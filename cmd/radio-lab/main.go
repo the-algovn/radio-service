@@ -62,6 +62,7 @@ func main() {
 		Ledger: spend.NewLedger(filepath.Join(dataDir, "ledger.jsonl")),
 		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
+		FixturesDir: config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())

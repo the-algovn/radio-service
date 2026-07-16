@@ -11,6 +11,7 @@ import (
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/callin"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -27,6 +28,7 @@ type Deps struct {
 	Models       map[string]brain.Model // keys: gemini | anthropic | fake
 	DefaultModel string                 // key into Models
 	PersonaDir   string
+	FixturesDir  string
 }
 
 type Server struct {
@@ -184,4 +186,33 @@ func (s *Server) SavePersona(_ context.Context, req *radiolabv1.SavePersonaReque
 		return nil, status.Errorf(codes.Internal, "save persona: %v", err)
 	}
 	return &radiolabv1.SavePersonaResponse{}, nil
+}
+
+func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInRequest) (*radiolabv1.ParseCallInResponse, error) {
+	if strings.TrimSpace(req.GetText()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "text is required")
+	}
+	m, ok := s.modelFor(req.GetModel())
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "unknown model %q", req.GetModel())
+	}
+	r, usage, err := callin.Parse(ctx, m, req.GetText())
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "parse: %v", err)
+	}
+	cost := brain.CostUSD(m.Name(), usage)
+	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
+	return &radiolabv1.ParseCallInResponse{
+		SongQuery: r.SongQuery, Recipient: r.Recipient, Message: r.Message,
+		Verdict: r.Verdict, RejectReason: r.RejectReason, Digest: r.Digest, Weight: r.Weight,
+		CostUsd: cost, Fake: m.Name() == "fake",
+	}, nil
+}
+
+func (s *Server) SaveFixture(_ context.Context, req *radiolabv1.SaveFixtureRequest) (*radiolabv1.SaveFixtureResponse, error) {
+	p, err := callin.SaveFixture(s.deps.FixturesDir, req.GetName(), req.GetRawText(), req.GetExpectedJson())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	return &radiolabv1.SaveFixtureResponse{Path: p}, nil
 }
