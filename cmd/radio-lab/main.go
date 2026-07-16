@@ -19,9 +19,11 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/voice"
 )
 
 func main() {
@@ -37,19 +39,22 @@ func main() {
 	}
 	gs := grpc.NewServer()
 	dataDir := config.Get("LAB_DATA_DIR", "lab-data")
+	store := &artifact.Store{Dir: filepath.Join(dataDir, "artifacts")}
+	var voiceProv voice.Provider = voice.Fake{}
+	voiceFake := true
+	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
+		voiceProv, voiceFake = voice.NewGoogle(k), false
+	}
 	srv := server.New(server.Deps{
 		Ledger: spend.NewLedger(filepath.Join(dataDir, "ledger.jsonl")),
+		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
 
 	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("ok"))
-		})
-		_ = (&http.Server{Addr: ":9291", Handler: mux}).ListenAndServe()
+		_ = (&http.Server{Addr: ":9291", Handler: artifact.Handler(*store)}).ListenAndServe()
 	}()
 	go func() {
 		<-ctx.Done()
