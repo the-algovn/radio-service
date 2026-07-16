@@ -15,7 +15,9 @@ type Provider interface {
 type Info struct{ ID, Label, Tier string }
 
 // Voices is the audition list. VERIFY names against
-//   curl "https://texttospeech.googleapis.com/v1/voices?languageCode=vi-VN&key=$GOOGLE_TTS_API_KEY"
+//
+//	curl "https://texttospeech.googleapis.com/v1/voices?languageCode=vi-VN&key=$GOOGLE_TTS_API_KEY"
+//
 // and edit before first real run — Google renames Chirp voices.
 func Voices() []Info {
 	return []Info{

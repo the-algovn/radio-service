@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -161,7 +160,6 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 	cost := brain.CostUSD(m.Name(), usage)
 	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
 		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
-	_ = json.Valid // keep linters honest about the json import when protojson covers it
 	return &radiolabv1.GenerateScriptResponse{
 		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
 		Violations: brain.Validate(out.Script, maxChars),

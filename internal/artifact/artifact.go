@@ -37,7 +37,7 @@ func (s Store) Save(kind, ext, label string, data []byte, meta map[string]string
 	suf := make([]byte, 4)
 	_, _ = rand.Read(suf)
 	a := Artifact{
-		ID: fmt.Sprintf("%s-%d-%s", kind, time.Now().UnixMilli(), hex.EncodeToString(suf)),
+		ID:   fmt.Sprintf("%s-%d-%s", kind, time.Now().UnixMilli(), hex.EncodeToString(suf)),
 		Kind: kind, Label: label, Ext: strings.TrimPrefix(ext, "."),
 		Bytes: int64(len(data)), CreatedAt: time.Now().UTC(), Meta: meta,
 	}
