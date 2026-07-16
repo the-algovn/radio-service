@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -19,11 +20,9 @@ import (
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/config"
+	"github.com/the-algovn/radio-service/internal/server"
+	"github.com/the-algovn/radio-service/internal/spend"
 )
-
-type labServer struct {
-	radiolabv1.UnimplementedLabServiceServer
-}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -37,7 +36,11 @@ func main() {
 		os.Exit(1)
 	}
 	gs := grpc.NewServer()
-	radiolabv1.RegisterLabServiceServer(gs, &labServer{})
+	dataDir := config.Get("LAB_DATA_DIR", "lab-data")
+	srv := server.New(server.Deps{
+		Ledger: spend.NewLedger(filepath.Join(dataDir, "ledger.jsonl")),
+	})
+	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
 
