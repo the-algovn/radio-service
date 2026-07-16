@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,4 +60,51 @@ func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
 	lines, _ := led.All()
 	require.Len(t, lines, 1)
 	require.Equal(t, "llm", lines[0].Kind)
+}
+
+func TestParseCallInFakeModelShortCircuits(t *testing.T) {
+	dir := t.TempDir()
+	led := spend.NewLedger(filepath.Join(dir, "ledger.jsonl"))
+	s := New(Deps{
+		Ledger: led,
+		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
+	})
+	resp, err := s.ParseCallIn(context.Background(), &radiolabv1.ParseCallInRequest{
+		Text: "cho mình xin bài Em Của Ngày Hôm Qua, tặng Ngọc",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "allow", resp.GetVerdict())
+	require.True(t, resp.GetFake())
+	require.Equal(t, 0.0, resp.GetCostUsd())
+	lines, _ := led.All()
+	require.Len(t, lines, 1)
+	require.Equal(t, "llm", lines[0].Kind)
+	require.Equal(t, "fake", lines[0].Provider)
+	require.Equal(t, 0.0, lines[0].CostUSD)
+}
+
+func TestSaveFixtureCanonicalizesCamelCaseAndDropsVolatileFields(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Deps{FixturesDir: dir})
+	// Shape the console actually sends: protojson camelCase + volatile cost/fake.
+	camel := `{"songQuery":"Em Của Ngày Hôm Qua","recipient":"Ngọc","message":"chúc ngủ ngon",` +
+		`"verdict":"allow","rejectReason":"","digest":"Đức chúc Ngọc ngủ ngon","weight":"warm",` +
+		`"costUsd":0.0021,"fake":false}`
+	resp, err := s.SaveFixture(context.Background(), &radiolabv1.SaveFixtureRequest{
+		Name: "happy-dedication", RawText: "raw text here", ExpectedJson: camel,
+	})
+	require.NoError(t, err)
+
+	b, err := os.ReadFile(resp.GetPath())
+	require.NoError(t, err)
+	var doc struct {
+		Expected map[string]any `json:"expected"`
+	}
+	require.NoError(t, json.Unmarshal(b, &doc))
+	require.Equal(t, "Em Của Ngày Hôm Qua", doc.Expected["song_query"])
+	require.Contains(t, doc.Expected, "reject_reason")
+	require.Equal(t, "warm", doc.Expected["weight"])
+	require.NotContains(t, doc.Expected, "costUsd")
+	require.NotContains(t, doc.Expected, "cost_usd")
+	require.NotContains(t, doc.Expected, "fake")
 }

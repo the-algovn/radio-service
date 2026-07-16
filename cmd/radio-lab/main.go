@@ -30,11 +30,13 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	_ = config.Load()
+	if err := config.Load(); err != nil {
+		logger.Error("config load failed", "err", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	lis, err := net.Listen("tcp", ":9290")
+	lis, err := net.Listen("tcp", "127.0.0.1:9290")
 	if err != nil {
 		logger.Error("listen failed", "err", err)
 		os.Exit(1)
@@ -70,13 +72,16 @@ func main() {
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		FixturesDir: config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
 		Ingest:      &ingest.Runner{}, TmpDir: tmpDir,
+		Logger: logger,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
 
 	go func() {
-		_ = (&http.Server{Addr: ":9291", Handler: artifact.Handler(*store)}).ListenAndServe()
+		if err := (&http.Server{Addr: "127.0.0.1:9291", Handler: artifact.Handler(*store)}).ListenAndServe(); err != nil {
+			logger.Error("artifact server exited", "err", err)
+		}
 	}()
 	go func() {
 		<-ctx.Done()

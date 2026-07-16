@@ -4,7 +4,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -35,14 +39,39 @@ type Deps struct {
 	FixturesDir  string
 	Ingest       *ingest.Runner
 	TmpDir       string
+	Logger       *slog.Logger
 }
 
 type Server struct {
 	radiolabv1.UnimplementedLabServiceServer
-	deps Deps
+	deps   Deps
+	logger *slog.Logger
 }
 
-func New(deps Deps) *Server { return &Server{deps: deps} }
+func New(deps Deps) *Server {
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Server{deps: deps, logger: logger}
+}
+
+// ledger appends a line to the spend ledger, logging (not discarding) any
+// append failure.
+func (s *Server) ledger(line spend.Line) {
+	if err := s.deps.Ledger.Append(line); err != nil {
+		s.logger.Error("ledger append failed", "err", err)
+	}
+}
+
+// truncateRunes returns s truncated to at most n runes.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
 
 func (s *Server) GetLedger(_ context.Context, _ *radiolabv1.GetLedgerRequest) (*radiolabv1.GetLedgerResponse, error) {
 	lines, err := s.deps.Ledger.All()
@@ -98,7 +127,7 @@ func (s *Server) SynthesizeVoice(ctx context.Context, req *radiolabv1.Synthesize
 	if s.deps.VoiceFake {
 		cost = 0
 	}
-	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "tts", Provider: providerName(s.deps.VoiceFake, "google"), Label: label, Chars: chars, CostUSD: cost})
+	s.ledger(spend.Line{TS: time.Now(), Kind: "tts", Provider: providerName(s.deps.VoiceFake, "google"), Label: label, Chars: chars, CostUSD: cost})
 	return &radiolabv1.SynthesizeVoiceResponse{Artifact: artifactToProto(a), CostUsd: cost, Fake: s.deps.VoiceFake}, nil
 }
 
@@ -166,7 +195,7 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 		maxChars = 800
 	}
 	cost := brain.CostUSD(m.Name(), usage)
-	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
+	s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
 		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.GenerateScriptResponse{
 		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
@@ -202,12 +231,22 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 	if !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "unknown model %q", req.GetModel())
 	}
+	if m.Name() == "fake" {
+		// brain.Fake returns script-shaped JSON that fails callin's schema —
+		// short-circuit before callin.Parse rather than surface a parse error.
+		s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: "fake", Label: "callin"})
+		return &radiolabv1.ParseCallInResponse{
+			SongQuery: "", Recipient: "", Message: truncateRunes(req.GetText(), 80),
+			Verdict: "allow", RejectReason: "", Digest: "lời nhắn mẫu (fake model)", Weight: "casual",
+			CostUsd: 0, Fake: true,
+		}, nil
+	}
 	r, usage, err := callin.Parse(ctx, m, req.GetText())
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "parse: %v", err)
 	}
 	cost := brain.CostUSD(m.Name(), usage)
-	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
+	s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.ParseCallInResponse{
 		SongQuery: r.SongQuery, Recipient: r.Recipient, Message: r.Message,
 		Verdict: r.Verdict, RejectReason: r.RejectReason, Digest: r.Digest, Weight: r.Weight,
@@ -215,9 +254,41 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 	}, nil
 }
 
+// fixtureExpected mirrors callin.Result but with the camelCase json tags
+// protojson emits, so the console's response JSON (which also carries
+// volatile cost_usd/fake fields we must drop) unmarshals cleanly.
+type fixtureExpected struct {
+	SongQuery    string `json:"songQuery"`
+	Recipient    string `json:"recipient"`
+	Message      string `json:"message"`
+	Verdict      string `json:"verdict"`
+	RejectReason string `json:"rejectReason"`
+	Digest       string `json:"digest"`
+	Weight       string `json:"weight"`
+}
+
 func (s *Server) SaveFixture(_ context.Context, req *radiolabv1.SaveFixtureRequest) (*radiolabv1.SaveFixtureResponse, error) {
-	p, err := callin.SaveFixture(s.deps.FixturesDir, req.GetName(), req.GetRawText(), req.GetExpectedJson())
+	var fe fixtureExpected
+	if err := json.Unmarshal([]byte(req.GetExpectedJson()), &fe); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "expected_json: %v", err)
+	}
+	r, err := callin.Normalize(callin.Result{
+		SongQuery: fe.SongQuery, Recipient: fe.Recipient, Message: fe.Message,
+		Verdict: fe.Verdict, RejectReason: fe.RejectReason, Digest: fe.Digest, Weight: fe.Weight,
+	})
 	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "expected_json: %v", err)
+	}
+	canonical, err := json.Marshal(r)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal expected: %v", err)
+	}
+	p, err := callin.SaveFixture(s.deps.FixturesDir, req.GetName(), req.GetRawText(), string(canonical))
+	if err != nil {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			return nil, status.Errorf(codes.Internal, "save fixture: %v", err)
+		}
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	return &radiolabv1.SaveFixtureResponse{Path: p}, nil
