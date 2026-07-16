@@ -20,10 +20,10 @@ func TestE2ESearchDownloadProbe(t *testing.T) {
 	ranked := Rank("em của ngày hôm qua sơn tùng", cs)
 	p, err := r.Download(context.Background(), ranked[0].YTID, t.TempDir())
 	require.NoError(t, err)
-	dur, err := Probe(p)
+	dur, err := Probe(context.Background(), p)
 	require.NoError(t, err)
 	require.Greater(t, dur, 60.0)
-	i, _, _, err := Loudnorm(p)
+	i, _, _, err := Loudnorm(context.Background(), p)
 	require.NoError(t, err)
 	require.Less(t, i, 0.0) // loudness is negative LUFS
 }

@@ -34,10 +34,30 @@ func Rank(query string, cs []Candidate) []Scored {
 		if strings.Contains(channel, "official") || strings.Contains(title, "official") {
 			add(20, "bonus:official")
 		}
+		// Collect matched penalty tokens (not in query)
+		matched := []string{}
 		for _, tok := range penaltyTokens {
 			if strings.Contains(title, tok) && !strings.Contains(q, tok) {
-				add(-25, "penalty:"+tok)
+				matched = append(matched, tok)
 			}
+		}
+		// Remove tokens that are substrings of other (longer) matched tokens
+		kept := []string{}
+		for _, tok := range matched {
+			isSubstring := false
+			for _, other := range matched {
+				if len(other) > len(tok) && strings.Contains(other, tok) {
+					isSubstring = true
+					break
+				}
+			}
+			if !isSubstring {
+				kept = append(kept, tok)
+			}
+		}
+		// Apply penalty for non-overlapping tokens
+		for _, tok := range kept {
+			add(-25, "penalty:"+tok)
 		}
 		switch {
 		case c.DurationS > 480:

@@ -253,11 +253,11 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "download: %v", err)
 	}
-	dur, err := ingest.Probe(p)
+	dur, err := ingest.Probe(ctx, p)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "probe: %v", err)
 	}
-	i, tp, lra, err := ingest.Loudnorm(p)
+	i, tp, lra, err := ingest.Loudnorm(ctx, p)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "loudnorm: %v", err)
 	}

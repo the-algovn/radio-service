@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,4 +41,21 @@ func TestRankDurationAndViews(t *testing.T) {
 		c("ok", "Bài Gì Đó", "Ca Sĩ - Topic", 240, 800_000),
 	})
 	require.Equal(t, "ok", got[0].YTID)
+}
+
+func TestRankDedupeOverlappingPenalties(t *testing.T) {
+	got := Rank("em của ngày hôm qua", []Candidate{
+		c("remix", "Em Của Ngày Hôm Qua Remix", "DJ Nào Đó", 250, 1_000_000),
+	})
+	// "remix" contains "mix", but only "remix" should be penalized once (−25),
+	// not both "remix" and "mix" (−50 total).
+	scored := got[0]
+	require.Equal(t, "remix", scored.YTID)
+	penaltyCount := 0
+	for _, note := range scored.Notes {
+		if strings.HasPrefix(note, "penalty:") {
+			penaltyCount++
+		}
+	}
+	require.Equal(t, 1, penaltyCount, "expected exactly 1 penalty note, got %v", scored.Notes)
 }

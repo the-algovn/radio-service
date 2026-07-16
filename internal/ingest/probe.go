@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-func Probe(path string) (float64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func Probe(ctx context.Context, path string) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", path).Output()
 	if err != nil {
@@ -33,8 +33,8 @@ var loudnormJSONRe = regexp.MustCompile(`(?s)\{[^{}]*"input_i"[^{}]*\}`)
 
 // Loudnorm runs a one-pass measurement and returns integrated loudness,
 // true peak, and loudness range. ffmpeg prints the JSON block on stderr.
-func Loudnorm(path string) (i, tp, lra float64, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func Loudnorm(ctx context.Context, path string) (i, tp, lra float64, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-nostats", "-i", path,
 		"-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-")
