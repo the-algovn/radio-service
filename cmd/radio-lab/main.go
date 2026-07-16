@@ -22,6 +22,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
+	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -40,6 +41,11 @@ func main() {
 	}
 	gs := grpc.NewServer()
 	dataDir := config.Get("LAB_DATA_DIR", "lab-data")
+	tmpDir := filepath.Join(dataDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		logger.Error("mkdir tmp failed", "err", err)
+		os.Exit(1)
+	}
 	store := &artifact.Store{Dir: filepath.Join(dataDir, "artifacts")}
 	var voiceProv voice.Provider = voice.Fake{}
 	voiceFake := true
@@ -63,6 +69,7 @@ func main() {
 		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		FixturesDir: config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
+		Ingest:      &ingest.Runner{}, TmpDir: tmpDir,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())

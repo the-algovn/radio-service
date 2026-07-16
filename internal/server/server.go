@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,6 +14,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/callin"
+	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -29,6 +32,8 @@ type Deps struct {
 	DefaultModel string                 // key into Models
 	PersonaDir   string
 	FixturesDir  string
+	Ingest       *ingest.Runner
+	TmpDir       string
 }
 
 type Server struct {
@@ -215,4 +220,56 @@ func (s *Server) SaveFixture(_ context.Context, req *radiolabv1.SaveFixtureReque
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	return &radiolabv1.SaveFixtureResponse{Path: p}, nil
+}
+
+func (s *Server) SearchTracks(ctx context.Context, req *radiolabv1.SearchTracksRequest) (*radiolabv1.SearchTracksResponse, error) {
+	if strings.TrimSpace(req.GetQuery()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "query is required")
+	}
+	cs, err := s.deps.Ingest.Search(ctx, req.GetQuery(), int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "search: %v", err)
+	}
+	resp := &radiolabv1.SearchTracksResponse{}
+	for _, sc := range ingest.Rank(req.GetQuery(), cs) {
+		resp.Candidates = append(resp.Candidates, &radiolabv1.Candidate{
+			YtId: sc.YTID, Title: sc.Title, Channel: sc.Channel, DurationS: sc.DurationS,
+			ViewCount: sc.ViewCount, ThumbnailUrl: sc.ThumbnailURL, Score: int32(sc.Score), ScoreNotes: sc.Notes,
+		})
+	}
+	return resp, nil
+}
+
+func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrackRequest) (*radiolabv1.DownloadTrackResponse, error) {
+	if req.GetYtId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
+	}
+	tmp, err := os.MkdirTemp(s.deps.TmpDir, "dl-*")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "tmp: %v", err)
+	}
+	defer os.RemoveAll(tmp)
+	p, err := s.deps.Ingest.Download(ctx, req.GetYtId(), tmp)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "download: %v", err)
+	}
+	dur, err := ingest.Probe(p)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "probe: %v", err)
+	}
+	i, tp, lra, err := ingest.Loudnorm(p)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "loudnorm: %v", err)
+	}
+	label := req.GetTitle()
+	if label == "" {
+		label = req.GetYtId()
+	}
+	a, err := s.deps.Store.SaveFile("track", p, label, map[string]string{
+		"yt_id": req.GetYtId(), "duration_s": fmt.Sprintf("%.1f", dur), "input_i": fmt.Sprintf("%.1f", i),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "store: %v", err)
+	}
+	return &radiolabv1.DownloadTrackResponse{Artifact: artifactToProto(a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
 }
