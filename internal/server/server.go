@@ -4,22 +4,30 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type Deps struct {
-	Ledger    *spend.Ledger
-	Store     *artifact.Store
-	Voice     voice.Provider
-	VoiceFake bool
+	Ledger       *spend.Ledger
+	Store        *artifact.Store
+	Voice        voice.Provider
+	VoiceFake    bool
+	Models       map[string]brain.Model // keys: gemini | anthropic | fake
+	DefaultModel string                 // key into Models
+	PersonaDir   string
 }
 
 type Server struct {
@@ -106,4 +114,76 @@ func providerName(fake bool, real string) string {
 		return "fake"
 	}
 	return real
+}
+
+func (s *Server) modelFor(name string) (brain.Model, bool) {
+	if name == "" {
+		name = s.DefaultModelName()
+	}
+	m, ok := s.deps.Models[name]
+	return m, ok
+}
+
+func (s *Server) DefaultModelName() string { return s.deps.DefaultModel }
+
+func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScriptRequest) (*radiolabv1.GenerateScriptResponse, error) {
+	if req.GetBrief() == nil {
+		return nil, status.Error(codes.InvalidArgument, "brief is required")
+	}
+	m, ok := s.modelFor(req.GetModel())
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "unknown model %q", req.GetModel())
+	}
+	pers := req.GetPersonaOverride()
+	if pers == "" {
+		var err error
+		if pers, err = persona.Load(s.deps.PersonaDir); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "load persona: %v", err)
+		}
+	}
+	briefJSON, err := protojson.Marshal(req.GetBrief())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal brief: %v", err)
+	}
+	system, user := brain.BuildPrompts(pers, string(briefJSON))
+	raw, usage, err := m.Generate(ctx, system, user)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "model: %v", err)
+	}
+	out, err := brain.ParseOutput(raw)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%v (raw: %.200s)", err, raw)
+	}
+	maxChars := int(req.GetBrief().GetMaxChars())
+	if maxChars == 0 {
+		maxChars = 800
+	}
+	cost := brain.CostUSD(m.Name(), usage)
+	_ = s.deps.Ledger.Append(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
+		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
+	_ = json.Valid // keep linters honest about the json import when protojson covers it
+	return &radiolabv1.GenerateScriptResponse{
+		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
+		Violations: brain.Validate(out.Script, maxChars),
+		InTokens:   int32(usage.In), OutTokens: int32(usage.Out),
+		CostUsd: cost, Fake: m.Name() == "fake", Model: m.Name(),
+	}, nil
+}
+
+func (s *Server) GetPersona(context.Context, *radiolabv1.GetPersonaRequest) (*radiolabv1.GetPersonaResponse, error) {
+	c, err := persona.Load(s.deps.PersonaDir)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "persona: %v", err)
+	}
+	return &radiolabv1.GetPersonaResponse{Content: c}, nil
+}
+
+func (s *Server) SavePersona(_ context.Context, req *radiolabv1.SavePersonaRequest) (*radiolabv1.SavePersonaResponse, error) {
+	if strings.TrimSpace(req.GetContent()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "content is empty")
+	}
+	if err := persona.Save(s.deps.PersonaDir, req.GetContent()); err != nil {
+		return nil, status.Errorf(codes.Internal, "save persona: %v", err)
+	}
+	return &radiolabv1.SavePersonaResponse{}, nil
 }

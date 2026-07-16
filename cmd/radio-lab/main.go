@@ -20,6 +20,7 @@ import (
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
@@ -45,9 +46,22 @@ func main() {
 	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
 		voiceProv, voiceFake = voice.NewGoogle(k), false
 	}
+	models := map[string]brain.Model{"fake": brain.Fake{}}
+	defaultModel := "fake"
+	if k := config.Get("GEMINI_API_KEY", ""); k != "" {
+		models["gemini"] = brain.NewGemini(k, config.Get("GEMINI_MODEL", "gemini-2.5-flash"))
+		defaultModel = "gemini"
+	}
+	if k := config.Get("ANTHROPIC_API_KEY", ""); k != "" {
+		models["anthropic"] = brain.NewAnthropic(k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"))
+		if defaultModel == "fake" {
+			defaultModel = "anthropic"
+		}
+	}
 	srv := server.New(server.Deps{
 		Ledger: spend.NewLedger(filepath.Join(dataDir, "ledger.jsonl")),
 		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
+		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 	healthpb.RegisterHealthServer(gs, health.NewServer())

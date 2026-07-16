@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
@@ -36,4 +38,24 @@ func TestSynthesizeVoiceFakeSavesTakeAndLedgerLine(t *testing.T) {
 	lines, _ := led.All()
 	require.Len(t, lines, 1)
 	require.Equal(t, 0.0, lines[0].CostUSD)
+}
+
+func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
+	dir := t.TempDir()
+	led := spend.NewLedger(filepath.Join(dir, "ledger.jsonl"))
+	s := New(Deps{
+		Ledger: led, PersonaDir: dir,
+		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
+	})
+	require.NoError(t, persona.Save(dir, "# test persona"))
+	resp, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		Brief: &radiolabv1.Brief{Type: "musing", Clock: "hai mươi ba giờ", MaxChars: 500},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.GetScript())
+	require.Empty(t, resp.GetViolations())
+	require.True(t, resp.GetFake())
+	lines, _ := led.All()
+	require.Len(t, lines, 1)
+	require.Equal(t, "llm", lines[0].Kind)
 }
