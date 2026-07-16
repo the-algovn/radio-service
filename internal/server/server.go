@@ -16,6 +16,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/callin"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/persona"
+	"github.com/the-algovn/radio-service/internal/render"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
 	"google.golang.org/grpc/codes"
@@ -272,4 +273,34 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 		return nil, status.Errorf(codes.Internal, "store: %v", err)
 	}
 	return &radiolabv1.DownloadTrackResponse{Artifact: artifactToProto(a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
+}
+
+func (s *Server) RenderPreview(ctx context.Context, req *radiolabv1.RenderPreviewRequest) (*radiolabv1.RenderPreviewResponse, error) {
+	trackPath, err := s.deps.Store.Path(req.GetTrackArtifactId())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "track artifact: %v", err)
+	}
+	voicePath, err := s.deps.Store.Path(req.GetVoiceArtifactId())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "voice artifact: %v", err)
+	}
+	tmp, err := os.MkdirTemp(s.deps.TmpDir, "render-*")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "tmp: %v", err)
+	}
+	defer os.RemoveAll(tmp)
+	out, dur, err := render.Preview(ctx, trackPath, voicePath, tmp, render.Knobs{
+		OffsetS: req.GetOffsetS(), DuckDB: req.GetDuckDb(), TailS: req.GetTailS(),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "render: %v", err)
+	}
+	label := fmt.Sprintf("render off=%.1f duck=%.1f", req.GetOffsetS(), req.GetDuckDb())
+	a, err := s.deps.Store.SaveFile("render", out, label, map[string]string{
+		"track": req.GetTrackArtifactId(), "voice": req.GetVoiceArtifactId(),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "store: %v", err)
+	}
+	return &radiolabv1.RenderPreviewResponse{Artifact: artifactToProto(a), DurationS: dur}, nil
 }
