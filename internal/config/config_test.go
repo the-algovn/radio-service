@@ -24,3 +24,17 @@ func TestGetDefault(t *testing.T) {
 	t.Setenv("SOME_KEY_XYZ", "set")
 	require.Equal(t, "set", Get("SOME_KEY_XYZ", "fallback"))
 }
+
+func TestGetBool(t *testing.T) {
+	t.Setenv("RL_FLAG_TRUE", "true")
+	t.Setenv("RL_FLAG_OTHER", "yes")
+	if !GetBool("RL_FLAG_TRUE", false) {
+		t.Fatal(`"true" should parse as true`)
+	}
+	if GetBool("RL_FLAG_OTHER", false) {
+		t.Fatal(`only literal "true" is true; "yes" must be false`)
+	}
+	if !GetBool("RL_FLAG_UNSET", true) {
+		t.Fatal("unset must return the default")
+	}
+}

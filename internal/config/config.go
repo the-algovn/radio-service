@@ -53,3 +53,14 @@ func Get(key, def string) string {
 	}
 	return def
 }
+
+// GetBool returns true only when the env value is exactly "true"; unset or any
+// other value returns def. Matches the strict === "true" the console uses for
+// VITE_ENABLE_LAB, so the two ends of a flag agree.
+func GetBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v == "true"
+}
