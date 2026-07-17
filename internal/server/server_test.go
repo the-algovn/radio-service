@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,11 +14,13 @@ import (
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestGetLedger(t *testing.T) {
-	led := spend.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"))
-	require.NoError(t, led.Append(spend.Line{TS: time.Now(), Kind: "tts", Provider: "google", Label: "x", Chars: 10, CostUSD: 0.0003}))
+	led := spend.NewMemLedger()
+	require.NoError(t, led.Append(context.Background(), spend.Line{TS: time.Now(), Kind: "tts", Provider: "google", Label: "x", Chars: 10, CostUSD: 0.0003}))
 	s := New(Deps{Ledger: led})
 	resp, err := s.GetLedger(context.Background(), &radiolabv1.GetLedgerRequest{})
 	require.NoError(t, err)
@@ -29,22 +30,22 @@ func TestGetLedger(t *testing.T) {
 }
 
 func TestSynthesizeVoiceFakeSavesTakeAndLedgerLine(t *testing.T) {
-	dir := t.TempDir()
-	led := spend.NewLedger(filepath.Join(dir, "ledger.jsonl"))
-	store := &artifact.Store{Dir: filepath.Join(dir, "artifacts")}
+	led := spend.NewMemLedger()
+	store := artifact.NewFakeStore()
 	s := New(Deps{Ledger: led, Store: store, Voice: voice.Fake{}, VoiceFake: true})
 	resp, err := s.SynthesizeVoice(context.Background(), &radiolabv1.SynthesizeVoiceRequest{Text: "xin chào", VoiceId: "fake", Label: "t1"})
 	require.NoError(t, err)
 	require.True(t, resp.GetFake())
 	require.Equal(t, "take", resp.GetArtifact().GetKind())
-	lines, _ := led.All()
+	require.NotEmpty(t, resp.GetArtifact().GetUrl())
+	lines, _ := led.All(context.Background())
 	require.Len(t, lines, 1)
 	require.Equal(t, 0.0, lines[0].CostUSD)
 }
 
 func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
 	dir := t.TempDir()
-	led := spend.NewLedger(filepath.Join(dir, "ledger.jsonl"))
+	led := spend.NewMemLedger()
 	s := New(Deps{
 		Ledger: led, PersonaDir: dir,
 		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
@@ -57,14 +58,13 @@ func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
 	require.NotEmpty(t, resp.GetScript())
 	require.Empty(t, resp.GetViolations())
 	require.True(t, resp.GetFake())
-	lines, _ := led.All()
+	lines, _ := led.All(context.Background())
 	require.Len(t, lines, 1)
 	require.Equal(t, "llm", lines[0].Kind)
 }
 
 func TestParseCallInFakeModelShortCircuits(t *testing.T) {
-	dir := t.TempDir()
-	led := spend.NewLedger(filepath.Join(dir, "ledger.jsonl"))
+	led := spend.NewMemLedger()
 	s := New(Deps{
 		Ledger: led,
 		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
@@ -76,11 +76,17 @@ func TestParseCallInFakeModelShortCircuits(t *testing.T) {
 	require.Equal(t, "allow", resp.GetVerdict())
 	require.True(t, resp.GetFake())
 	require.Equal(t, 0.0, resp.GetCostUsd())
-	lines, _ := led.All()
+	lines, _ := led.All(context.Background())
 	require.Len(t, lines, 1)
 	require.Equal(t, "llm", lines[0].Kind)
 	require.Equal(t, "fake", lines[0].Provider)
 	require.Equal(t, 0.0, lines[0].CostUSD)
+}
+
+func TestSavePersonaReadonlyRefuses(t *testing.T) {
+	s := New(Deps{PersonaReadonly: true, PersonaDir: t.TempDir()})
+	_, err := s.SavePersona(context.Background(), &radiolabv1.SavePersonaRequest{Content: "x"})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
 func TestSaveFixtureCanonicalizesCamelCaseAndDropsVolatileFields(t *testing.T) {

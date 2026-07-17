@@ -1,32 +1,42 @@
 package artifact
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestSaveListPath(t *testing.T) {
-	s := Store{Dir: t.TempDir()}
-	a, err := s.Save("take", "wav", "thử giọng", []byte("RIFFdata"), map[string]string{"voice": "x"})
+func TestFakeStoreSaveListFetch(t *testing.T) {
+	ctx := context.Background()
+	s := NewFakeStore()
+	a, err := s.Save(ctx, "take", "wav", "thử giọng", []byte("RIFFdata"), map[string]string{"voice": "x"})
 	require.NoError(t, err)
 	require.Regexp(t, `^take-\d+-[0-9a-f]{8}$`, a.ID)
 	require.Equal(t, int64(8), a.Bytes)
 
-	list, err := s.List()
+	list, err := s.List(ctx, "take")
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	require.Equal(t, "thử giọng", list[0].Label)
+	require.Empty(t, mustList(t, s, "render")) // kind filter works
 
-	p, err := s.Path(a.ID)
+	u, err := s.PresignGet(ctx, a.ID)
 	require.NoError(t, err)
-	require.FileExists(t, p)
+	require.Contains(t, u, a.ID)
+
+	p, err := s.FetchToFile(ctx, a.ID, t.TempDir())
+	require.NoError(t, err)
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	require.Equal(t, "RIFFdata", string(b))
+	require.Equal(t, ".wav", filepath.Ext(p))
 }
 
-func TestPathRejectsTraversal(t *testing.T) {
-	s := Store{Dir: t.TempDir()}
-	_, err := s.Path("../etc/passwd")
-	require.Error(t, err)
-	_, err = s.Path("no-such-id")
-	require.Error(t, err)
+func mustList(t *testing.T, s *FakeStore, kind string) []Artifact {
+	l, err := s.List(context.Background(), kind)
+	require.NoError(t, err)
+	return l
 }

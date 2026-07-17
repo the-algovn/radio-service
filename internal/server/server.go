@@ -29,17 +29,18 @@ import (
 )
 
 type Deps struct {
-	Ledger       *spend.Ledger
-	Store        *artifact.Store
-	Voice        voice.Provider
-	VoiceFake    bool
-	Models       map[string]brain.Model // keys: gemini | anthropic | fake
-	DefaultModel string                 // key into Models
-	PersonaDir   string
-	FixturesDir  string
-	Ingest       *ingest.Runner
-	TmpDir       string
-	Logger       *slog.Logger
+	Ledger          spend.Ledger
+	Store           artifact.Store
+	Voice           voice.Provider
+	VoiceFake       bool
+	Models          map[string]brain.Model // keys: gemini | anthropic | fake
+	DefaultModel    string                 // key into Models
+	PersonaDir      string
+	PersonaReadonly bool
+	FixturesDir     string
+	Ingest          *ingest.Runner
+	TmpDir          string
+	Logger          *slog.Logger
 }
 
 type Server struct {
@@ -58,8 +59,8 @@ func New(deps Deps) *Server {
 
 // ledger appends a line to the spend ledger, logging (not discarding) any
 // append failure.
-func (s *Server) ledger(line spend.Line) {
-	if err := s.deps.Ledger.Append(line); err != nil {
+func (s *Server) ledger(ctx context.Context, line spend.Line) {
+	if err := s.deps.Ledger.Append(ctx, line); err != nil {
 		s.logger.Error("ledger append failed", "err", err)
 	}
 }
@@ -73,8 +74,8 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-func (s *Server) GetLedger(_ context.Context, _ *radiolabv1.GetLedgerRequest) (*radiolabv1.GetLedgerResponse, error) {
-	lines, err := s.deps.Ledger.All()
+func (s *Server) GetLedger(ctx context.Context, _ *radiolabv1.GetLedgerRequest) (*radiolabv1.GetLedgerResponse, error) {
+	lines, err := s.deps.Ledger.All(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read ledger: %v", err)
 	}
@@ -88,10 +89,14 @@ func (s *Server) GetLedger(_ context.Context, _ *radiolabv1.GetLedgerRequest) (*
 	return resp, nil
 }
 
-func artifactToProto(a artifact.Artifact) *radiolabv1.Artifact {
+func (s *Server) artifactToProto(ctx context.Context, a artifact.Artifact) *radiolabv1.Artifact {
+	url, err := s.deps.Store.PresignGet(ctx, a.ID)
+	if err != nil {
+		s.logger.Error("presign failed", "id", a.ID, "err", err)
+	}
 	return &radiolabv1.Artifact{
 		Id: a.ID, Kind: a.Kind, Label: a.Label, Ext: a.Ext, Bytes: a.Bytes,
-		CreatedAt: a.CreatedAt.Format(time.RFC3339), Meta: a.Meta,
+		CreatedAt: a.CreatedAt.Format(time.RFC3339), Meta: a.Meta, Url: url,
 	}
 }
 
@@ -118,7 +123,7 @@ func (s *Server) SynthesizeVoice(ctx context.Context, req *radiolabv1.Synthesize
 	if label == "" {
 		label = req.GetVoiceId()
 	}
-	a, err := s.deps.Store.Save("take", ext, label, data, map[string]string{"voice": req.GetVoiceId(), "text": req.GetText()})
+	a, err := s.deps.Store.Save(ctx, "take", ext, label, data, map[string]string{"voice": req.GetVoiceId(), "text": req.GetText()})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "save take: %v", err)
 	}
@@ -127,20 +132,18 @@ func (s *Server) SynthesizeVoice(ctx context.Context, req *radiolabv1.Synthesize
 	if s.deps.VoiceFake {
 		cost = 0
 	}
-	s.ledger(spend.Line{TS: time.Now(), Kind: "tts", Provider: providerName(s.deps.VoiceFake, "google"), Label: label, Chars: chars, CostUSD: cost})
-	return &radiolabv1.SynthesizeVoiceResponse{Artifact: artifactToProto(a), CostUsd: cost, Fake: s.deps.VoiceFake}, nil
+	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "tts", Provider: providerName(s.deps.VoiceFake, "google"), Label: label, Chars: chars, CostUSD: cost})
+	return &radiolabv1.SynthesizeVoiceResponse{Artifact: s.artifactToProto(ctx, a), CostUsd: cost, Fake: s.deps.VoiceFake}, nil
 }
 
-func (s *Server) ListArtifacts(_ context.Context, req *radiolabv1.ListArtifactsRequest) (*radiolabv1.ListArtifactsResponse, error) {
-	all, err := s.deps.Store.List()
+func (s *Server) ListArtifacts(ctx context.Context, req *radiolabv1.ListArtifactsRequest) (*radiolabv1.ListArtifactsResponse, error) {
+	all, err := s.deps.Store.List(ctx, req.GetKind())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list: %v", err)
 	}
 	resp := &radiolabv1.ListArtifactsResponse{}
 	for _, a := range all {
-		if req.GetKind() == "" || a.Kind == req.GetKind() {
-			resp.Artifacts = append(resp.Artifacts, artifactToProto(a))
-		}
+		resp.Artifacts = append(resp.Artifacts, s.artifactToProto(ctx, a))
 	}
 	return resp, nil
 }
@@ -195,7 +198,7 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 		maxChars = 800
 	}
 	cost := brain.CostUSD(m.Name(), usage)
-	s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
+	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
 		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.GenerateScriptResponse{
 		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
@@ -214,6 +217,9 @@ func (s *Server) GetPersona(context.Context, *radiolabv1.GetPersonaRequest) (*ra
 }
 
 func (s *Server) SavePersona(_ context.Context, req *radiolabv1.SavePersonaRequest) (*radiolabv1.SavePersonaResponse, error) {
+	if s.deps.PersonaReadonly {
+		return nil, status.Error(codes.FailedPrecondition, "persona is read-only in this environment; edit persona/*.md and redeploy")
+	}
 	if strings.TrimSpace(req.GetContent()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "content is empty")
 	}
@@ -234,7 +240,7 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 	if m.Name() == "fake" {
 		// brain.Fake returns script-shaped JSON that fails callin's schema —
 		// short-circuit before callin.Parse rather than surface a parse error.
-		s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: "fake", Label: "callin"})
+		s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: "fake", Label: "callin"})
 		return &radiolabv1.ParseCallInResponse{
 			SongQuery: "", Recipient: "", Message: truncateRunes(req.GetText(), 80),
 			Verdict: "allow", RejectReason: "", Digest: "lời nhắn mẫu (fake model)", Weight: "casual",
@@ -246,7 +252,7 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 		return nil, status.Errorf(codes.Unavailable, "parse: %v", err)
 	}
 	cost := brain.CostUSD(m.Name(), usage)
-	s.ledger(spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
+	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.ParseCallInResponse{
 		SongQuery: r.SongQuery, Recipient: r.Recipient, Message: r.Message,
 		Verdict: r.Verdict, RejectReason: r.RejectReason, Digest: r.Digest, Weight: r.Weight,
@@ -337,29 +343,29 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	if label == "" {
 		label = req.GetYtId()
 	}
-	a, err := s.deps.Store.SaveFile("track", p, label, map[string]string{
+	a, err := s.deps.Store.SaveFile(ctx, "track", p, label, map[string]string{
 		"yt_id": req.GetYtId(), "duration_s": fmt.Sprintf("%.1f", dur), "input_i": fmt.Sprintf("%.1f", i),
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "store: %v", err)
 	}
-	return &radiolabv1.DownloadTrackResponse{Artifact: artifactToProto(a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
+	return &radiolabv1.DownloadTrackResponse{Artifact: s.artifactToProto(ctx, a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
 }
 
 func (s *Server) RenderPreview(ctx context.Context, req *radiolabv1.RenderPreviewRequest) (*radiolabv1.RenderPreviewResponse, error) {
-	trackPath, err := s.deps.Store.Path(req.GetTrackArtifactId())
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "track artifact: %v", err)
-	}
-	voicePath, err := s.deps.Store.Path(req.GetVoiceArtifactId())
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "voice artifact: %v", err)
-	}
 	tmp, err := os.MkdirTemp(s.deps.TmpDir, "render-*")
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "tmp: %v", err)
 	}
 	defer os.RemoveAll(tmp)
+	trackPath, err := s.deps.Store.FetchToFile(ctx, req.GetTrackArtifactId(), tmp)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "track artifact: %v", err)
+	}
+	voicePath, err := s.deps.Store.FetchToFile(ctx, req.GetVoiceArtifactId(), tmp)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "voice artifact: %v", err)
+	}
 	out, dur, err := render.Preview(ctx, trackPath, voicePath, tmp, render.Knobs{
 		OffsetS: req.GetOffsetS(), DuckDB: req.GetDuckDb(), TailS: req.GetTailS(),
 	})
@@ -367,11 +373,11 @@ func (s *Server) RenderPreview(ctx context.Context, req *radiolabv1.RenderPrevie
 		return nil, status.Errorf(codes.Internal, "render: %v", err)
 	}
 	label := fmt.Sprintf("render off=%.1f duck=%.1f", req.GetOffsetS(), req.GetDuckDb())
-	a, err := s.deps.Store.SaveFile("render", out, label, map[string]string{
+	a, err := s.deps.Store.SaveFile(ctx, "render", out, label, map[string]string{
 		"track": req.GetTrackArtifactId(), "voice": req.GetVoiceArtifactId(),
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "store: %v", err)
 	}
-	return &radiolabv1.RenderPreviewResponse{Artifact: artifactToProto(a), DurationS: dur}, nil
+	return &radiolabv1.RenderPreviewResponse{Artifact: s.artifactToProto(ctx, a), DurationS: dur}, nil
 }

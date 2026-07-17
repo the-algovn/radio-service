@@ -1,18 +1,19 @@
 // radio-lab: Phase-0 component bench for Tần Số 42. Dev-only — reached
 // through the LOCAL api-control-plane gateway (role:admin routes); audio
-// artifacts are served directly on :9291 (bytes never ride the gateway).
+// artifacts live in MinIO and are served via presigned URLs.
 package main
 
 import (
 	"context"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -48,7 +49,46 @@ func main() {
 		logger.Error("mkdir tmp failed", "err", err)
 		os.Exit(1)
 	}
-	store := &artifact.Store{Dir: filepath.Join(dataDir, "artifacts")}
+
+	// Postgres ledger
+	pgURL := config.Get("PG_URL", "")
+	if pgURL == "" {
+		logger.Error("config", "err", "PG_URL is required")
+		os.Exit(1)
+	}
+	pool, err := pgxpool.New(ctx, pgURL)
+	if err != nil {
+		logger.Error("pg connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+	ledger := spend.NewPGLedger(pool)
+
+	// MinIO artifact store
+	store, err := artifact.NewS3Store(artifact.S3Config{
+		Endpoint:       config.Get("MINIO_ENDPOINT", "localhost:9000"),
+		PublicEndpoint: config.Get("MINIO_PUBLIC_ENDPOINT", config.Get("MINIO_ENDPOINT", "localhost:9000")),
+		AccessKey:      config.Get("MINIO_ACCESS_KEY", ""),
+		SecretKey:      config.Get("MINIO_SECRET_KEY", ""),
+		Bucket:         config.Get("MINIO_BUCKET", "radio-lab"),
+		UseSSL:         config.GetBool("MINIO_USE_SSL", false),
+	})
+	if err != nil {
+		logger.Error("minio init failed", "err", err)
+		os.Exit(1)
+	}
+	// Ensure the bucket exists, tolerating a brief MinIO startup race.
+	for i := 0; ; i++ {
+		if err = store.EnsureBucket(ctx); err == nil {
+			break
+		}
+		if i >= 15 {
+			logger.Error("minio bucket ensure failed", "err", err)
+			os.Exit(1)
+		}
+		time.Sleep(time.Second)
+	}
+
 	var voiceProv voice.Provider = voice.Fake{}
 	voiceFake := true
 	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
@@ -67,11 +107,12 @@ func main() {
 		}
 	}
 	srv := server.New(server.Deps{
-		Ledger: spend.NewLedger(filepath.Join(dataDir, "ledger.jsonl")),
+		Ledger: ledger,
 		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
-		FixturesDir: config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
-		Ingest:      &ingest.Runner{}, TmpDir: tmpDir,
+		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
+		FixturesDir:     config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
+		Ingest:          &ingest.Runner{}, TmpDir: tmpDir,
 		Logger: logger,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
@@ -79,15 +120,10 @@ func main() {
 	reflection.Register(gs)
 
 	go func() {
-		if err := (&http.Server{Addr: "127.0.0.1:9291", Handler: artifact.Handler(*store)}).ListenAndServe(); err != nil {
-			logger.Error("artifact server exited", "err", err)
-		}
-	}()
-	go func() {
 		<-ctx.Done()
 		gs.GracefulStop()
 	}()
-	logger.Info("radio-lab listening", "grpc", ":9290", "http", ":9291")
+	logger.Info("radio-lab listening", "grpc", ":9290")
 	if err := gs.Serve(lis); err != nil {
 		logger.Error("serve failed", "err", err)
 		os.Exit(1)
