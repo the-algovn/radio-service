@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -113,4 +116,71 @@ func TestSaveFixtureCanonicalizesCamelCaseAndDropsVolatileFields(t *testing.T) {
 	require.NotContains(t, doc.Expected, "costUsd")
 	require.NotContains(t, doc.Expected, "cost_usd")
 	require.NotContains(t, doc.Expected, "fake")
+}
+
+// fakeIngestBinDir writes hermetic stand-ins for yt-dlp, ffprobe, and ffmpeg
+// to a temp dir and returns its path. yt-dlp is wired via ingest.Runner.Bin;
+// ffprobe/ffmpeg have no such override (ingest.Probe/Loudnorm call them by
+// bare name), so callers must also prepend this dir to PATH.
+func fakeIngestBinDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	scripts := map[string]string{
+		"yt-dlp": `#!/bin/sh
+set -e
+url="$1"
+shift
+outtpl=""
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-o" ]; then
+		outtpl="$2"
+		shift 2
+	else
+		shift
+	fi
+done
+ytid="${url##*v=}"
+printf 'fake-audio' > "$(dirname "$outtpl")/$ytid.m4a"
+`,
+		"ffprobe": `#!/bin/sh
+echo '{"format":{"duration":"217.5"}}'
+`,
+		"ffmpeg": `#!/bin/sh
+echo '{"input_i" : "-14.20", "input_tp" : "-1.50", "input_lra" : "7.10"}' >&2
+`,
+	}
+	for name, body := range scripts {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755))
+	}
+	return dir
+}
+
+func TestDownloadTrackCacheMissRunsFullPipelineAndAddsToLibrary(t *testing.T) {
+	bin := fakeIngestBinDir(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	lib := library.NewMemLibrary()
+	store := artifact.NewFakeStore()
+	s := New(Deps{
+		Store: store, Library: lib,
+		Ingest: &ingest.Runner{Bin: filepath.Join(bin, "yt-dlp")},
+		TmpDir: t.TempDir(),
+	})
+
+	resp, err := s.DownloadTrack(context.Background(), &radiolabv1.DownloadTrackRequest{
+		YtId: "abc123", Title: "Em Của Ngày Hôm Qua", Channel: "Sơn Tùng M-TP - Topic",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.GetCached())
+	require.InDelta(t, 217.5, resp.GetDurationS(), 0.01)
+	require.InDelta(t, -14.20, resp.GetInputI(), 0.01)
+	require.NotEmpty(t, resp.GetArtifact().GetId())
+	require.Equal(t, "track", resp.GetArtifact().GetKind())
+
+	tr, found, err := lib.Get(context.Background(), "abc123")
+	require.NoError(t, err)
+	require.True(t, found, "DownloadTrack must add the track to the library on a cache miss")
+	require.Equal(t, resp.GetArtifact().GetId(), tr.ArtifactID)
+	require.Equal(t, "Sơn Tùng M-TP - Topic", tr.Channel)
+	require.InDelta(t, 217.5, tr.DurationS, 0.01)
 }
