@@ -29,7 +29,8 @@ type Store interface {
 	Save(ctx context.Context, kind, ext, label string, data []byte, meta map[string]string) (Artifact, error)
 	SaveFile(ctx context.Context, kind, srcPath, label string, meta map[string]string) (Artifact, error)
 	Get(ctx context.Context, id string) (Artifact, error)
-	List(ctx context.Context, kind string) ([]Artifact, error)       // kind=="" means all
+	List(ctx context.Context, kind string) ([]Artifact, error) // kind=="" means all
+	Delete(ctx context.Context, id string) error
 	PresignGet(ctx context.Context, id string) (string, error)       // time-limited URL for the browser
 	FetchToFile(ctx context.Context, id, dir string) (string, error) // local copy for ffmpeg
 }

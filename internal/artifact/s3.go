@@ -128,6 +128,16 @@ func (s *S3Store) List(ctx context.Context, kind string) ([]Artifact, error) {
 	return out, nil
 }
 
+func (s *S3Store) Delete(ctx context.Context, id string) error {
+	if !idRe.MatchString(id) {
+		return fmt.Errorf("invalid artifact id")
+	}
+	if err := s.c.RemoveObject(ctx, s.bucket, blobKey(id), minio.RemoveObjectOptions{}); err != nil {
+		return err
+	}
+	return s.c.RemoveObject(ctx, s.bucket, metaKey(id), minio.RemoveObjectOptions{})
+}
+
 func (s *S3Store) PresignGet(ctx context.Context, id string) (string, error) {
 	a, err := s.Get(ctx, id)
 	if err != nil {

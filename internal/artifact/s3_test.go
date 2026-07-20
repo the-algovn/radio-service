@@ -56,3 +56,32 @@ func TestS3StoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.FileExists(t, p)
 }
+
+func TestS3StoreDelete(t *testing.T) {
+	endpoint, ak, sk := testutil.StartMinio(t)
+	ctx := context.Background()
+
+	mc, err := minio.New(endpoint, &minio.Options{Creds: credentials.NewStaticV4(ak, sk, ""), Secure: false})
+	require.NoError(t, err)
+	require.NoError(t, mc.MakeBucket(ctx, "radio-lab", minio.MakeBucketOptions{}))
+
+	s, err := artifact.NewS3Store(artifact.S3Config{
+		Endpoint: endpoint, PublicEndpoint: endpoint, AccessKey: ak, SecretKey: sk, Bucket: "radio-lab", UseSSL: false,
+	})
+	require.NoError(t, err)
+
+	a, err := s.Save(ctx, "take", "wav", "hi", []byte("RIFFdata"), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, s.Delete(ctx, a.ID))
+
+	_, err = s.Get(ctx, a.ID)
+	require.Error(t, err) // meta object gone
+
+	list, err := s.List(ctx, "take")
+	require.NoError(t, err)
+	require.Empty(t, list)
+
+	// S3 delete is idempotent: removing an already-absent id is not an error.
+	require.NoError(t, s.Delete(ctx, a.ID))
+}

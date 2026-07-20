@@ -68,6 +68,20 @@ func (f *FakeStore) List(_ context.Context, kind string) ([]Artifact, error) {
 	return out, nil
 }
 
+func (f *FakeStore) Delete(_ context.Context, id string) error {
+	if !idRe.MatchString(id) {
+		return fmt.Errorf("invalid artifact id")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.arts[id]; !ok {
+		return fmt.Errorf("not found: %s", id)
+	}
+	delete(f.arts, id)
+	delete(f.blob, id)
+	return nil
+}
+
 func (f *FakeStore) PresignGet(_ context.Context, id string) (string, error) {
 	if _, err := f.Get(context.Background(), id); err != nil {
 		return "", err

@@ -35,6 +35,25 @@ func TestFakeStoreSaveListFetch(t *testing.T) {
 	require.Equal(t, ".wav", filepath.Ext(p))
 }
 
+func TestFakeStoreDelete(t *testing.T) {
+	ctx := context.Background()
+	s := NewFakeStore()
+	a, err := s.Save(ctx, "take", "wav", "hi", []byte("RIFFdata"), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, s.Delete(ctx, a.ID))
+
+	_, err = s.Get(ctx, a.ID)
+	require.Error(t, err)                    // meta gone
+	require.Empty(t, mustList(t, s, "take")) // blob/meta both gone
+
+	err = s.Delete(ctx, a.ID)
+	require.Error(t, err) // already gone, mirrors Get's not-found
+
+	err = s.Delete(ctx, "../etc/passwd")
+	require.Error(t, err) // idRe guard rejects invalid ids
+}
+
 func mustList(t *testing.T, s *FakeStore, kind string) []Artifact {
 	l, err := s.List(context.Background(), kind)
 	require.NoError(t, err)
