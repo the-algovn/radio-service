@@ -325,7 +325,11 @@ func (s *Server) ListTracks(ctx context.Context, req *radiolabv1.ListTracksReque
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list tracks: %v", err)
 	}
-	resp := &radiolabv1.ListTracksResponse{}
+	total, err := s.deps.Library.Count(ctx, req.GetQuery())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count tracks: %v", err)
+	}
+	resp := &radiolabv1.ListTracksResponse{Total: total}
 	for _, tr := range tracks {
 		resp.Tracks = append(resp.Tracks, &radiolabv1.LibraryTrack{
 			YtId: tr.YTID, Title: tr.Title, Channel: tr.Channel, DurationS: int64(tr.DurationS),

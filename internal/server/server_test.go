@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -229,6 +230,26 @@ func TestListTracksFiltersByQuery(t *testing.T) {
 	require.Len(t, resp.GetTracks(), 1)
 	require.Equal(t, "b", resp.GetTracks()[0].GetYtId())
 	require.Equal(t, "track-2", resp.GetTracks()[0].GetArtifactId())
+}
+
+func TestListTracksPaginatesAndReturnsTotal(t *testing.T) {
+	ctx := context.Background()
+	lib := library.NewMemLibrary()
+	for i := 0; i < 3; i++ {
+		require.NoError(t, lib.Add(ctx, library.Track{YTID: fmt.Sprintf("yt-%02d", i), AddedAt: time.Now().Add(time.Duration(i) * time.Second)}))
+	}
+	s := New(Deps{Library: lib})
+
+	first, err := s.ListTracks(ctx, &radiolabv1.ListTracksRequest{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	require.Len(t, first.GetTracks(), 2)
+	require.Equal(t, int64(3), first.GetTotal())
+	require.Equal(t, "yt-02", first.GetTracks()[0].GetYtId()) // newest first
+
+	second, err := s.ListTracks(ctx, &radiolabv1.ListTracksRequest{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.Len(t, second.GetTracks(), 1)
+	require.Equal(t, int64(3), second.GetTotal())
 }
 
 func TestDeleteTrackRemovesRowAndBestEffortDeletesBlob(t *testing.T) {
