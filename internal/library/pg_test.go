@@ -38,7 +38,12 @@ func TestPGLibraryRoundTrip(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, t1.Title, got.Title)
 	require.Equal(t, t1.ArtifactID, got.ArtifactID)
+	require.Equal(t, t1.Channel, got.Channel)
+	require.InDelta(t, t1.DurationS, got.DurationS, 1e-9)
+	require.InDelta(t, t1.InputI, got.InputI, 1e-9)
 	require.InDelta(t, t1.InputTP, got.InputTP, 1e-9)
+	require.InDelta(t, t1.InputLRA, got.InputLRA, 1e-9)
+	require.False(t, got.AddedAt.IsZero())
 
 	// dedup: ON CONFLICT DO NOTHING.
 	require.NoError(t, l.Add(ctx, library.Track{YTID: "abc123", Title: "changed", DurationS: 1, ArtifactID: "art-x"}))
