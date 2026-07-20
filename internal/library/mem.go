@@ -32,12 +32,34 @@ func (m *MemLibrary) Add(_ context.Context, t Track) error {
 	return nil
 }
 
-func (m *MemLibrary) List(_ context.Context, query string, limit int) ([]Track, error) {
+func (m *MemLibrary) List(_ context.Context, query string, limit, offset int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	out := m.filtered(query)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(out) {
+		return []Track{}, nil
+	}
+	out = out[offset:]
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *MemLibrary) Count(_ context.Context, query string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return int64(len(m.filtered(query))), nil
+}
+
+// filtered returns tracks matching query, newest-first. Caller holds m.mu.
+func (m *MemLibrary) filtered(query string) []Track {
 	q := strings.ToLower(query)
 	out := make([]Track, 0, len(m.tracks))
 	for _, t := range m.tracks {
@@ -46,10 +68,7 @@ func (m *MemLibrary) List(_ context.Context, query string, limit int) ([]Track, 
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AddedAt.After(out[j].AddedAt) })
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return out
 }
 
 func (m *MemLibrary) Delete(_ context.Context, ytID string) (string, bool, error) {

@@ -25,7 +25,9 @@ type Library interface {
 	Add(ctx context.Context, t Track) error
 	// List returns tracks whose title or channel contains query
 	// (case-insensitive substring), newest first. limit<=0 defaults to 50.
-	List(ctx context.Context, query string, limit int) ([]Track, error)
+	List(ctx context.Context, query string, limit, offset int) ([]Track, error)
+	// Count returns the number of tracks matching query (same filter as List).
+	Count(ctx context.Context, query string) (int64, error)
 	// Delete removes a track by yt_id and returns its artifact_id so the
 	// caller can delete the MinIO blob. found is false (err nil) when absent.
 	Delete(ctx context.Context, ytID string) (artifactID string, found bool, err error)

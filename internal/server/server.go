@@ -321,7 +321,7 @@ func (s *Server) SearchTracks(ctx context.Context, req *radiolabv1.SearchTracksR
 }
 
 func (s *Server) ListTracks(ctx context.Context, req *radiolabv1.ListTracksRequest) (*radiolabv1.ListTracksResponse, error) {
-	tracks, err := s.deps.Library.List(ctx, req.GetQuery(), int(req.GetLimit()))
+	tracks, err := s.deps.Library.List(ctx, req.GetQuery(), int(req.GetLimit()), int(req.GetOffset()))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list tracks: %v", err)
 	}

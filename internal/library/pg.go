@@ -33,11 +33,13 @@ func (l *PGLibrary) Add(ctx context.Context, t Track) error {
 	})
 }
 
-func (l *PGLibrary) List(ctx context.Context, query string, limit int) ([]Track, error) {
+func (l *PGLibrary) List(ctx context.Context, query string, limit, offset int) ([]Track, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := db.New(l.pool).ListTracks(ctx, db.ListTracksParams{Column1: query, Limit: int32(limit)})
+	rows, err := db.New(l.pool).ListTracks(ctx, db.ListTracksParams{
+		Column1: query, Limit: int32(limit), Offset: int32(offset),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +48,10 @@ func (l *PGLibrary) List(ctx context.Context, query string, limit int) ([]Track,
 		out = append(out, trackFromRow(r))
 	}
 	return out, nil
+}
+
+func (l *PGLibrary) Count(ctx context.Context, query string) (int64, error) {
+	return db.New(l.pool).CountTracks(ctx, query)
 }
 
 func (l *PGLibrary) Delete(ctx context.Context, ytID string) (string, bool, error) {

@@ -53,11 +53,11 @@ func TestPGLibraryRoundTrip(t *testing.T) {
 
 	require.NoError(t, l.Add(ctx, library.Track{YTID: "def456", Title: "Synthwave Drive", Channel: "Retro Waves", ArtifactID: "art-2", DurationS: 240, InputI: -13, InputTP: -1.2, InputLRA: 6, AddedAt: time.Now()}))
 
-	all, err := l.List(ctx, "", 0)
+	all, err := l.List(ctx, "", 0, 0)
 	require.NoError(t, err)
 	require.Len(t, all, 2)
 
-	byTitle, err := l.List(ctx, "lo-fi", 10)
+	byTitle, err := l.List(ctx, "lo-fi", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, byTitle, 1)
 	require.Equal(t, "abc123", byTitle[0].YTID)

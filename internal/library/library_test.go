@@ -34,23 +34,23 @@ func TestMemLibraryGetAddListDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Lo-fi Beats", got.Title)
 
-	all, err := l.List(ctx, "", 0)
+	all, err := l.List(ctx, "", 0, 0)
 	require.NoError(t, err)
 	require.Len(t, all, 2)
 	require.Equal(t, "def456", all[0].YTID) // newest first
 
 	// ILIKE-style substring match, case-insensitive, against title or channel.
-	byTitle, err := l.List(ctx, "lo-fi", 10)
+	byTitle, err := l.List(ctx, "lo-fi", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, byTitle, 1)
 	require.Equal(t, "abc123", byTitle[0].YTID)
 
-	byChannel, err := l.List(ctx, "RETRO", 10)
+	byChannel, err := l.List(ctx, "RETRO", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, byChannel, 1)
 	require.Equal(t, "def456", byChannel[0].YTID)
 
-	none, err := l.List(ctx, "nonexistent", 10)
+	none, err := l.List(ctx, "nonexistent", 10, 0)
 	require.NoError(t, err)
 	require.Empty(t, none)
 
@@ -74,7 +74,39 @@ func TestMemLibraryListDefaultLimit(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		require.NoError(t, l.Add(ctx, Track{YTID: fmt.Sprintf("yt-%02d", i), AddedAt: time.Now().Add(time.Duration(i) * time.Second)}))
 	}
-	out, err := l.List(ctx, "", 0)
+	out, err := l.List(ctx, "", 0, 0)
 	require.NoError(t, err)
 	require.Len(t, out, 50)
+}
+
+func TestMemLibraryListPaginationAndCount(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemLibrary()
+	// Five tracks, ascending AddedAt so newest-first order is yt-04..yt-00.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, l.Add(ctx, Track{YTID: fmt.Sprintf("yt-%02d", i), AddedAt: time.Now().Add(time.Duration(i) * time.Second)}))
+	}
+
+	page1, err := l.List(ctx, "", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, page1, 2)
+	require.Equal(t, "yt-04", page1[0].YTID) // newest first
+	require.Equal(t, "yt-03", page1[1].YTID)
+
+	page2, err := l.List(ctx, "", 2, 2)
+	require.NoError(t, err)
+	require.Len(t, page2, 2)
+	require.Equal(t, "yt-02", page2[0].YTID)
+
+	beyond, err := l.List(ctx, "", 2, 10)
+	require.NoError(t, err)
+	require.Empty(t, beyond)
+
+	total, err := l.Count(ctx, "")
+	require.NoError(t, err)
+	require.Equal(t, int64(5), total)
+
+	zero, err := l.Count(ctx, "nonexistent")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), zero)
 }
