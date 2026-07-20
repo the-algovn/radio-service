@@ -19,3 +19,15 @@ type LedgerLine struct {
 	OutTokens int32
 	CostUsd   float64
 }
+
+type Track struct {
+	YtID       string
+	Title      string
+	Channel    string
+	DurationS  float64
+	ArtifactID string
+	InputI     float64
+	InputTp    float64
+	InputLra   float64
+	AddedAt    time.Time
+}

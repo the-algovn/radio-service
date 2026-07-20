@@ -10,6 +10,39 @@ import (
 	"time"
 )
 
+const deleteTrack = `-- name: DeleteTrack :one
+DELETE FROM track WHERE yt_id = $1 RETURNING artifact_id
+`
+
+func (q *Queries) DeleteTrack(ctx context.Context, ytID string) (string, error) {
+	row := q.db.QueryRow(ctx, deleteTrack, ytID)
+	var artifact_id string
+	err := row.Scan(&artifact_id)
+	return artifact_id, err
+}
+
+const getTrack = `-- name: GetTrack :one
+SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at
+FROM track WHERE yt_id = $1
+`
+
+func (q *Queries) GetTrack(ctx context.Context, ytID string) (Track, error) {
+	row := q.db.QueryRow(ctx, getTrack, ytID)
+	var i Track
+	err := row.Scan(
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.DurationS,
+		&i.ArtifactID,
+		&i.InputI,
+		&i.InputTp,
+		&i.InputLra,
+		&i.AddedAt,
+	)
+	return i, err
+}
+
 const insertLedgerLine = `-- name: InsertLedgerLine :exec
 INSERT INTO ledger_line (ts, kind, provider, label, chars, in_tokens, out_tokens, cost_usd)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -36,6 +69,37 @@ func (q *Queries) InsertLedgerLine(ctx context.Context, arg InsertLedgerLinePara
 		arg.InTokens,
 		arg.OutTokens,
 		arg.CostUsd,
+	)
+	return err
+}
+
+const insertTrack = `-- name: InsertTrack :exec
+INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (yt_id) DO NOTHING
+`
+
+type InsertTrackParams struct {
+	YtID       string
+	Title      string
+	Channel    string
+	DurationS  float64
+	ArtifactID string
+	InputI     float64
+	InputTp    float64
+	InputLra   float64
+}
+
+func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error {
+	_, err := q.db.Exec(ctx, insertTrack,
+		arg.YtID,
+		arg.Title,
+		arg.Channel,
+		arg.DurationS,
+		arg.ArtifactID,
+		arg.InputI,
+		arg.InputTp,
+		arg.InputLra,
 	)
 	return err
 }
@@ -74,6 +138,49 @@ func (q *Queries) ListLedgerLines(ctx context.Context) ([]ListLedgerLinesRow, er
 			&i.InTokens,
 			&i.OutTokens,
 			&i.CostUsd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTracks = `-- name: ListTracks :many
+SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at
+FROM track
+WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
+ORDER BY added_at DESC
+LIMIT $2
+`
+
+type ListTracksParams struct {
+	Column1 interface{}
+	Limit   int32
+}
+
+func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track, error) {
+	rows, err := q.db.Query(ctx, listTracks, arg.Column1, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Track{}
+	for rows.Next() {
+		var i Track
+		if err := rows.Scan(
+			&i.YtID,
+			&i.Title,
+			&i.Channel,
+			&i.DurationS,
+			&i.ArtifactID,
+			&i.InputI,
+			&i.InputTp,
+			&i.InputLra,
+			&i.AddedAt,
 		); err != nil {
 			return nil, err
 		}
