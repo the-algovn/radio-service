@@ -74,6 +74,7 @@ func main() {
 		SecretKey:      config.Get("MINIO_SECRET_KEY", ""),
 		Bucket:         config.Get("MINIO_BUCKET", "radio-lab"),
 		UseSSL:         config.GetBool("MINIO_USE_SSL", false),
+		PublicUseSSL:   config.GetBool("MINIO_PUBLIC_USE_SSL", config.GetBool("MINIO_USE_SSL", false)),
 	})
 	if err != nil {
 		logger.Error("minio init failed", "err", err)

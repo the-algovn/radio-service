@@ -28,17 +28,17 @@ type S3Store struct {
 
 type S3Config struct {
 	Endpoint, PublicEndpoint, AccessKey, SecretKey, Bucket string
-	UseSSL                                                 bool
+	UseSSL, PublicUseSSL                                   bool
 }
 
 func NewS3Store(cfg S3Config) (*S3Store, error) {
-	mk := func(ep string) (*minio.Client, error) {
+	mk := func(ep string, secure bool) (*minio.Client, error) {
 		return minio.New(ep, &minio.Options{
 			Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-			Secure: cfg.UseSSL,
+			Secure: secure,
 		})
 	}
-	c, err := mk(cfg.Endpoint)
+	c, err := mk(cfg.Endpoint, cfg.UseSSL)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,7 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 	if pub == "" {
 		pub = cfg.Endpoint
 	}
-	pc, err := mk(pub)
+	pc, err := mk(pub, cfg.PublicUseSSL)
 	if err != nil {
 		return nil, err
 	}
