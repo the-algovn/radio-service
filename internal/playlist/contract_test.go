@@ -121,6 +121,8 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.ErrorIs(t, err, playlist.ErrStale)
 		_, _, err = st.Reorder(ctx, p.ID, []string{"c", "a", "b", "x"}) // extra
 		require.ErrorIs(t, err, playlist.ErrStale)
+		_, _, err = st.Reorder(ctx, p.ID, []string{"c", "a", "a"}) // duplicate, same length
+		require.ErrorIs(t, err, playlist.ErrStale)
 	})
 
 	t.Run("station state machine", func(t *testing.T) {
@@ -208,5 +210,20 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		s, err = st.GetStation(ctx)
 		require.NoError(t, err)
 		require.Empty(t, s.ActivePlaylistID)
+	})
+
+	t.Run("go on air with an emptied active playlist", func(t *testing.T) {
+		st, lib := newStore(t)
+		seed(t, lib, "a", 60)
+		p, err := st.Create(ctx, "solo")
+		require.NoError(t, err)
+		_, _, err = st.AddTrack(ctx, p.ID, "a")
+		require.NoError(t, err)
+		_, err = st.SetActive(ctx, p.ID)
+		require.NoError(t, err)
+		_, _, err = st.RemoveTrack(ctx, p.ID, "a") // off-air: emptying active is allowed
+		require.NoError(t, err)
+		_, err = st.GoOnAir(ctx)
+		require.ErrorIs(t, err, playlist.ErrEmptyPlaylist)
 	})
 }

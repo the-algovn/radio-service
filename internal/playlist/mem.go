@@ -222,10 +222,12 @@ func (m *MemStore) Reorder(ctx context.Context, playlistID string, ytIDs []strin
 	for _, yt := range p.items {
 		current[yt] = true
 	}
+	used := map[string]bool{}
 	for _, yt := range ytIDs {
-		if !current[yt] {
+		if !current[yt] || used[yt] { // unknown or duplicated id — stale/corrupt list
 			return Summary{}, nil, ErrStale
 		}
+		used[yt] = true
 	}
 	p.items = append([]string(nil), ytIDs...)
 	p.updated = time.Now()
