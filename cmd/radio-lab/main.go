@@ -38,7 +38,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	lis, err := net.Listen("tcp", "127.0.0.1:9290")
+	lis, err := net.Listen("tcp", config.Get("LISTEN_ADDR", ":9290"))
 	if err != nil {
 		logger.Error("listen failed", "err", err)
 		os.Exit(1)
