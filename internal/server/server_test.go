@@ -216,3 +216,42 @@ func TestDownloadTrackCacheHitSkipsIngestAndReturnsCachedTrue(t *testing.T) {
 	require.InDelta(t, first.GetInputTp(), second.GetInputTp(), 0.001)
 	require.NotEmpty(t, second.GetArtifact().GetUrl())
 }
+
+func TestListTracksFiltersByQuery(t *testing.T) {
+	lib := library.NewMemLibrary()
+	ctx := context.Background()
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "a", Title: "Em Của Ngày Hôm Qua", Channel: "Sơn Tùng M-TP - Topic", DurationS: 217, ArtifactID: "track-1"}))
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "b", Title: "Lạc Trôi", Channel: "Sơn Tùng M-TP - Topic", DurationS: 240, ArtifactID: "track-2"}))
+	s := New(Deps{Library: lib})
+
+	resp, err := s.ListTracks(ctx, &radiolabv1.ListTracksRequest{Query: "lạc"})
+	require.NoError(t, err)
+	require.Len(t, resp.GetTracks(), 1)
+	require.Equal(t, "b", resp.GetTracks()[0].GetYtId())
+	require.Equal(t, "track-2", resp.GetTracks()[0].GetArtifactId())
+}
+
+func TestDeleteTrackRemovesRowAndBestEffortDeletesBlob(t *testing.T) {
+	lib := library.NewMemLibrary()
+	store := artifact.NewFakeStore()
+	ctx := context.Background()
+	a, err := store.Save(ctx, "track", "m4a", "Lạc Trôi", []byte("audio"), nil)
+	require.NoError(t, err)
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "b", Title: "Lạc Trôi", ArtifactID: a.ID}))
+	s := New(Deps{Library: lib, Store: store})
+
+	_, err = s.DeleteTrack(ctx, &radiolabv1.DeleteTrackRequest{YtId: "b"})
+	require.NoError(t, err)
+
+	_, found, err := lib.Get(ctx, "b")
+	require.NoError(t, err)
+	require.False(t, found)
+	_, err = store.Get(ctx, a.ID)
+	require.Error(t, err) // blob deleted too
+}
+
+func TestDeleteTrackNotFound(t *testing.T) {
+	s := New(Deps{Library: library.NewMemLibrary()})
+	_, err := s.DeleteTrack(context.Background(), &radiolabv1.DeleteTrackRequest{YtId: "missing"})
+	require.Equal(t, codes.NotFound, status.Code(err))
+}

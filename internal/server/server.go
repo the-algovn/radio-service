@@ -320,6 +320,39 @@ func (s *Server) SearchTracks(ctx context.Context, req *radiolabv1.SearchTracksR
 	return resp, nil
 }
 
+func (s *Server) ListTracks(ctx context.Context, req *radiolabv1.ListTracksRequest) (*radiolabv1.ListTracksResponse, error) {
+	tracks, err := s.deps.Library.List(ctx, req.GetQuery(), int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list tracks: %v", err)
+	}
+	resp := &radiolabv1.ListTracksResponse{}
+	for _, tr := range tracks {
+		resp.Tracks = append(resp.Tracks, &radiolabv1.LibraryTrack{
+			YtId: tr.YTID, Title: tr.Title, Channel: tr.Channel, DurationS: int64(tr.DurationS),
+			ArtifactId: tr.ArtifactID, InputI: tr.InputI, InputTp: tr.InputTP, InputLra: tr.InputLRA,
+			AddedAt: tr.AddedAt.Format(time.RFC3339),
+		})
+	}
+	return resp, nil
+}
+
+func (s *Server) DeleteTrack(ctx context.Context, req *radiolabv1.DeleteTrackRequest) (*radiolabv1.DeleteTrackResponse, error) {
+	if req.GetYtId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
+	}
+	artifactID, found, err := s.deps.Library.Delete(ctx, req.GetYtId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "delete track: %v", err)
+	}
+	if !found {
+		return nil, status.Errorf(codes.NotFound, "track %q not found", req.GetYtId())
+	}
+	if err := s.deps.Store.Delete(ctx, artifactID); err != nil {
+		s.logger.Error("store delete failed", "artifact_id", artifactID, "err", err)
+	}
+	return &radiolabv1.DeleteTrackResponse{}, nil
+}
+
 func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrackRequest) (*radiolabv1.DownloadTrackResponse, error) {
 	if req.GetYtId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
