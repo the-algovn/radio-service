@@ -23,7 +23,12 @@ SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_
 FROM track
 WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
 ORDER BY added_at DESC
-LIMIT $2;
+LIMIT $2 OFFSET $3;
+
+-- name: CountTracks :one
+SELECT count(*)
+FROM track
+WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%');
 
 -- name: DeleteTrack :one
 DELETE FROM track WHERE yt_id = $1 RETURNING artifact_id;

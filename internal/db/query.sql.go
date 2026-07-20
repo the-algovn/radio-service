@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+const countTracks = `-- name: CountTracks :one
+SELECT count(*)
+FROM track
+WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
+`
+
+func (q *Queries) CountTracks(ctx context.Context, dollar_1 interface{}) (int64, error) {
+	row := q.db.QueryRow(ctx, countTracks, dollar_1)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteTrack = `-- name: DeleteTrack :one
 DELETE FROM track WHERE yt_id = $1 RETURNING artifact_id
 `
@@ -154,16 +167,17 @@ SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_
 FROM track
 WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
 ORDER BY added_at DESC
-LIMIT $2
+LIMIT $2 OFFSET $3
 `
 
 type ListTracksParams struct {
 	Column1 interface{}
 	Limit   int32
+	Offset  int32
 }
 
 func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track, error) {
-	rows, err := q.db.Query(ctx, listTracks, arg.Column1, arg.Limit)
+	rows, err := q.db.Query(ctx, listTracks, arg.Column1, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
