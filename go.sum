@@ -153,6 +153,8 @@ github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0 h1:ShNOFYAF
 github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0/go.mod h1:vdq5/RqmGfWeefzyfcVI/pID1rzmc1TDvqXa15bPJks=
 github.com/the-algovn/protos/gen/go v0.4.0 h1:nulha6oHk1OgbNUvc94cGxxXuEqBL2q4ybbyubPzHQ4=
 github.com/the-algovn/protos/gen/go v0.4.0/go.mod h1:R7XPFZZ4rZTL4uTugvszHktcYV+MTpGSh2lFal4ZyK0=
+github.com/the-algovn/protos/gen/go v0.7.0 h1:PwcAcJfVePU3D6Sm/Jo3wxoynR7pG1tyyDKp8qdDV74=
+github.com/the-algovn/protos/gen/go v0.7.0/go.mod h1:R7XPFZZ4rZTL4uTugvszHktcYV+MTpGSh2lFal4ZyK0=
 github.com/tinylib/msgp v1.6.1 h1:ESRv8eL3u+DNHUoSAAQRE50Hm162zqAnBoGv9PzScPY=
 github.com/tinylib/msgp v1.6.1/go.mod h1:RSp0LW9oSxFut3KzESt5Voq4GVWyS+PSulT77roAqEA=
 github.com/tklauser/go-sysconf v0.3.16 h1:frioLaCQSsF5Cy1jgRBrzr6t502KIIwQ0MArYICU0nA=
