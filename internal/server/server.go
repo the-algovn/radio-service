@@ -324,6 +324,16 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	if req.GetYtId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
 	}
+	if tr, found, _ := s.deps.Library.Get(ctx, req.GetYtId()); found {
+		a, err := s.deps.Store.Get(ctx, tr.ArtifactID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "store get: %v", err)
+		}
+		return &radiolabv1.DownloadTrackResponse{
+			Artifact: s.artifactToProto(ctx, a), DurationS: tr.DurationS,
+			InputI: tr.InputI, InputTp: tr.InputTP, InputLra: tr.InputLRA, Cached: true,
+		}, nil
+	}
 	tmp, err := os.MkdirTemp(s.deps.TmpDir, "dl-*")
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "tmp: %v", err)
@@ -350,6 +360,12 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "store: %v", err)
+	}
+	if err := s.deps.Library.Add(ctx, library.Track{
+		YTID: req.GetYtId(), Title: label, Channel: req.GetChannel(), DurationS: dur,
+		ArtifactID: a.ID, InputI: i, InputTP: tp, InputLRA: lra,
+	}); err != nil {
+		s.logger.Error("library add failed", "yt_id", req.GetYtId(), "err", err)
 	}
 	return &radiolabv1.DownloadTrackResponse{Artifact: s.artifactToProto(ctx, a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
 }

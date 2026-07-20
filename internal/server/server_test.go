@@ -184,3 +184,35 @@ func TestDownloadTrackCacheMissRunsFullPipelineAndAddsToLibrary(t *testing.T) {
 	require.Equal(t, "Sơn Tùng M-TP - Topic", tr.Channel)
 	require.InDelta(t, 217.5, tr.DurationS, 0.01)
 }
+
+func TestDownloadTrackCacheHitSkipsIngestAndReturnsCachedTrue(t *testing.T) {
+	bin := fakeIngestBinDir(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	lib := library.NewMemLibrary()
+	store := artifact.NewFakeStore()
+	s := New(Deps{
+		Store: store, Library: lib,
+		Ingest: &ingest.Runner{Bin: filepath.Join(bin, "yt-dlp")},
+		TmpDir: t.TempDir(),
+	})
+
+	first, err := s.DownloadTrack(context.Background(), &radiolabv1.DownloadTrackRequest{
+		YtId: "abc123", Title: "Em Của Ngày Hôm Qua", Channel: "Sơn Tùng M-TP - Topic",
+	})
+	require.NoError(t, err)
+	require.False(t, first.GetCached())
+
+	// Break yt-dlp so a second Ingest.Download call would fail the RPC —
+	// proves the cache-hit path never reaches it.
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "yt-dlp"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+
+	second, err := s.DownloadTrack(context.Background(), &radiolabv1.DownloadTrackRequest{YtId: "abc123"})
+	require.NoError(t, err)
+	require.True(t, second.GetCached())
+	require.Equal(t, first.GetArtifact().GetId(), second.GetArtifact().GetId())
+	require.InDelta(t, first.GetDurationS(), second.GetDurationS(), 0.001)
+	require.InDelta(t, first.GetInputI(), second.GetInputI(), 0.001)
+	require.InDelta(t, first.GetInputTp(), second.GetInputTp(), 0.001)
+	require.NotEmpty(t, second.GetArtifact().GetUrl())
+}
