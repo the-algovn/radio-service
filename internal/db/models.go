@@ -6,6 +6,8 @@ package db
 
 import (
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type LedgerLine struct {
@@ -18,6 +20,27 @@ type LedgerLine struct {
 	InTokens  int32
 	OutTokens int32
 	CostUsd   float64
+}
+
+type Playlist struct {
+	ID        string
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type PlaylistItem struct {
+	PlaylistID string
+	Position   int32
+	YtID       string
+}
+
+type Station struct {
+	ID               bool
+	ActivePlaylistID pgtype.UUID
+	OnAir            bool
+	OnAirSince       *time.Time
+	UpdatedAt        time.Time
 }
 
 type Track struct {
