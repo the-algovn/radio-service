@@ -20,11 +20,14 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/library"
+	"github.com/the-algovn/radio-service/internal/radioserver"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -119,6 +122,10 @@ func main() {
 		Logger: logger,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
+	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
+		Store:  playlist.NewPGStore(pool),
+		Logger: logger,
+	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
 
