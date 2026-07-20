@@ -163,6 +163,14 @@ type GetStationRowRow struct {
 	OnAirSince       *time.Time
 }
 
+// Station queries below use extra ::text casts that aren't semantically
+// necessary in plain Postgres: sqlc's static analyzer (no live DB
+// connection configured) can't otherwise infer a concrete Go type for
+// COALESCE(uuid_col::text, ”) or for a bare uuid-column parameter, and
+// falls back to interface{}/pgtype.UUID instead of the intended string.
+// The outer ::text on the COALESCE reads (SELECT/RETURNING) and the
+// ::text::uuid round-trip on the SetStationActive param are cast
+// workarounds only — behavior is unchanged from a plain uuid column.
 func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 	row := q.db.QueryRow(ctx, getStationRow)
 	var i GetStationRowRow
@@ -539,7 +547,7 @@ func (q *Queries) RenamePlaylist(ctx context.Context, arg RenamePlaylistParams) 
 }
 
 const setStationActive = `-- name: SetStationActive :exec
-UPDATE station SET active_playlist_id = NULLIF($1::text, '')::uuid, updated_at = now() WHERE id = TRUE
+UPDATE station SET active_playlist_id = $1::text::uuid, updated_at = now() WHERE id = TRUE
 `
 
 func (q *Queries) SetStationActive(ctx context.Context, activePlaylistID string) error {

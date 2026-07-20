@@ -95,6 +95,14 @@ DELETE FROM playlist_item WHERE playlist_id = $1;
 -- name: InsertPlaylistItemAt :exec
 INSERT INTO playlist_item (playlist_id, position, yt_id) VALUES ($1, $2, $3);
 
+-- Station queries below use extra ::text casts that aren't semantically
+-- necessary in plain Postgres: sqlc's static analyzer (no live DB
+-- connection configured) can't otherwise infer a concrete Go type for
+-- COALESCE(uuid_col::text, '') or for a bare uuid-column parameter, and
+-- falls back to interface{}/pgtype.UUID instead of the intended string.
+-- The outer ::text on the COALESCE reads (SELECT/RETURNING) and the
+-- ::text::uuid round-trip on the SetStationActive param are cast
+-- workarounds only — behavior is unchanged from a plain uuid column.
 -- name: GetStationRow :one
 SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
 FROM station WHERE id = TRUE;
@@ -104,7 +112,7 @@ SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_ai
 FROM station WHERE id = TRUE FOR UPDATE;
 
 -- name: SetStationActive :exec
-UPDATE station SET active_playlist_id = NULLIF(sqlc.arg(active_playlist_id)::text, '')::uuid, updated_at = now() WHERE id = TRUE;
+UPDATE station SET active_playlist_id = sqlc.arg(active_playlist_id)::text::uuid, updated_at = now() WHERE id = TRUE;
 
 -- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
