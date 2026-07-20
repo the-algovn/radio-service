@@ -102,6 +102,19 @@ func (s *Server) artifactToProto(ctx context.Context, a artifact.Artifact) *radi
 	}
 }
 
+// PresignArtifact hands the browser a time-limited MinIO GET URL for one
+// artifact id — the console resolves this lazily when a track is played.
+func (s *Server) PresignArtifact(ctx context.Context, req *radiolabv1.PresignArtifactRequest) (*radiolabv1.PresignArtifactResponse, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	url, err := s.deps.Store.PresignGet(ctx, req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "presign artifact: %v", err)
+	}
+	return &radiolabv1.PresignArtifactResponse{Url: url}, nil
+}
+
 func (s *Server) ListVoices(context.Context, *radiolabv1.ListVoicesRequest) (*radiolabv1.ListVoicesResponse, error) {
 	resp := &radiolabv1.ListVoicesResponse{}
 	for _, v := range voice.Voices() {

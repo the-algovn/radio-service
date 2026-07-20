@@ -252,6 +252,24 @@ func TestListTracksPaginatesAndReturnsTotal(t *testing.T) {
 	require.Equal(t, int64(3), second.GetTotal())
 }
 
+func TestPresignArtifactReturnsURL(t *testing.T) {
+	ctx := context.Background()
+	store := artifact.NewFakeStore()
+	a, err := store.Save(ctx, "track", "m4a", "Em Của Ngày Hôm Qua", []byte("audio"), nil)
+	require.NoError(t, err)
+	s := New(Deps{Store: store})
+
+	resp, err := s.PresignArtifact(ctx, &radiolabv1.PresignArtifactRequest{Id: a.ID})
+	require.NoError(t, err)
+	require.Equal(t, "https://fake.local/artifacts/"+a.ID, resp.GetUrl())
+
+	_, err = s.PresignArtifact(ctx, &radiolabv1.PresignArtifactRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	_, err = s.PresignArtifact(ctx, &radiolabv1.PresignArtifactRequest{Id: "nope"})
+	require.Equal(t, codes.Internal, status.Code(err))
+}
+
 func TestDeleteTrackRemovesRowAndBestEffortDeletesBlob(t *testing.T) {
 	lib := library.NewMemLibrary()
 	store := artifact.NewFakeStore()
