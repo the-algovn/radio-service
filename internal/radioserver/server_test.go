@@ -65,6 +65,12 @@ func TestPlaylistLifecycleAndProjection(t *testing.T) {
 	require.Equal(t, int64(60), tracks[0].GetDurationS())
 	require.NotEmpty(t, get.GetPlaylist().GetSummary().GetCreatedAt()) // RFC3339
 
+	list, err := s.ListPlaylists(ctx, &radiov1.ListPlaylistsRequest{})
+	require.NoError(t, err)
+	require.Len(t, list.GetPlaylists(), 1)
+	require.Equal(t, "mix", list.GetPlaylists()[0].GetName())
+	require.Equal(t, int32(2), list.GetPlaylists()[0].GetTrackCount())
+
 	re, err := s.ReorderTracks(ctx, &radiov1.ReorderTracksRequest{PlaylistId: id, YtIds: []string{"b", "a"}})
 	require.NoError(t, err)
 	require.Equal(t, "b", re.GetPlaylist().GetTracks()[0].GetYtId())
@@ -118,4 +124,20 @@ func TestStationGuards(t *testing.T) {
 	empty := mkPlaylist(t, s, "empty")
 	_, err = s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: empty})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestRenamePlaylistGuards(t *testing.T) {
+	s := newTestServer(t, "a")
+	ctx := context.Background()
+	id := mkPlaylist(t, s, "mix", "a")
+
+	_, err := s.RenamePlaylist(ctx, &radiov1.RenamePlaylistRequest{Id: "", Name: "x"})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	_, err = s.RenamePlaylist(ctx, &radiov1.RenamePlaylistRequest{Id: id, Name: "  "})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	resp, err := s.RenamePlaylist(ctx, &radiov1.RenamePlaylistRequest{Id: id, Name: "  new name  "})
+	require.NoError(t, err)
+	require.Equal(t, "new name", resp.GetSummary().GetName())
 }
