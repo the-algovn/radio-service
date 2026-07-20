@@ -24,6 +24,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -63,6 +64,7 @@ func main() {
 	}
 	defer pool.Close()
 	ledger := spend.NewPGLedger(pool)
+	lib := library.NewPGLibrary(pool)
 
 	// MinIO artifact store
 	store, err := artifact.NewS3Store(artifact.S3Config{
@@ -107,8 +109,8 @@ func main() {
 		}
 	}
 	srv := server.New(server.Deps{
-		Ledger: ledger,
-		Store:  store, Voice: voiceProv, VoiceFake: voiceFake,
+		Ledger: ledger, Library: lib,
+		Store: store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
 		FixturesDir:     config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),

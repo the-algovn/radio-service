@@ -19,6 +19,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/callin"
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/render"
 	"github.com/the-algovn/radio-service/internal/spend"
@@ -39,6 +40,7 @@ type Deps struct {
 	PersonaReadonly bool
 	FixturesDir     string
 	Ingest          *ingest.Runner
+	Library         library.Library
 	TmpDir          string
 	Logger          *slog.Logger
 }
