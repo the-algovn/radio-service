@@ -137,6 +137,75 @@ func (f *Feeder) autoOffAir(ctx context.Context) error {
 	return nil
 }
 
+// bootResumeEntry is a boot-resume candidate found by findBootResume: the
+// air log's latest entry, still mid-flight and still scheduled in the
+// active playlist, that a fresh RunSession should air first (at its
+// already-elapsed offset) instead of starting fresh at the top of rotation.
+type bootResumeEntry struct {
+	track   library.Track
+	entry   Entry
+	offsetS float64
+}
+
+// findBootResume decides whether this session should resume an in-flight
+// track instead of starting fresh. It deliberately uses real wall-clock
+// time (not f.d.Clock): this is a question about how much actual time has
+// passed since the process last wrote an air-log entry (e.g. across a
+// restart), independent of the injected Clock that only paces this
+// session's own encoder ticks. Every failure mode here (log/store/library
+// errors, no active playlist, the track no longer scheduled, or an expired
+// entry) is treated as "no resume" rather than fatal — RunSession's first
+// real boundary() call right after this hits the same store/library and
+// will surface any persistent problem through its own (fatal) error path.
+func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
+	entry, found, err := f.d.Log.Latest(ctx)
+	if err != nil {
+		f.d.Logger.Error("boot resume: air log read failed", "err", err)
+		return nil
+	}
+	if !found {
+		return nil
+	}
+	offsetS, expired := ResumeOffset(entry, time.Now())
+	if expired {
+		return nil
+	}
+	st, err := f.d.Store.GetStation(ctx)
+	if err != nil {
+		f.d.Logger.Error("boot resume: station read failed", "err", err)
+		return nil
+	}
+	if st.ActivePlaylistID == "" {
+		return nil
+	}
+	_, items, err := f.d.Store.Get(ctx, st.ActivePlaylistID)
+	if err != nil {
+		if !errors.Is(err, playlist.ErrNotFound) {
+			f.d.Logger.Error("boot resume: playlist read failed", "err", err)
+		}
+		return nil
+	}
+	inPlaylist := false
+	for _, it := range items {
+		if it.YTID == entry.YTID {
+			inPlaylist = true
+			break
+		}
+	}
+	if !inPlaylist {
+		return nil
+	}
+	track, ok, err := f.d.Library.Get(ctx, entry.YTID)
+	if err != nil {
+		f.d.Logger.Error("boot resume: library read failed", "err", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return &bootResumeEntry{track: track, entry: entry, offsetS: offsetS}
+}
+
 // RunSession broadcasts until off-air or ctx cancellation. An encoder crash
 // (Session.Done() delivering a non-nil error) does NOT end the session: a
 // new session dir + encoder is started in place and the current track is
@@ -146,7 +215,17 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	// sessionDir.Store, so callers can synchronize on SessionDir() != ""
 	// becoming true and be guaranteed the anchor is already fixed (program
 	// order on this goroutine — no separate lock needed for the field).
+	// findBootResume below may still adjust it (to the resumed entry's real
+	// StartedAt), but that happens before any of the dir/encoder setup, so
+	// the invariant holds for anyone observing SessionDir() != "".
 	f.anchor = f.d.Clock.Now()
+
+	var samplesFed int64 // 4 bytes per stereo sample-frame at s16le
+	resume := f.findBootResume(ctx)
+	if resume != nil {
+		f.anchor = resume.entry.StartedAt
+		samplesFed = int64(resume.offsetS * 48000)
+	}
 
 	dir := filepath.Join(f.d.Dir, fmt.Sprintf("session-%d", f.seq.Add(1)))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -171,29 +250,41 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		f.publish(context.WithoutCancel(ctx), TopicNowPlaying, OffAirPayload())
 	}()
 
-	var samplesFed int64 // 4 bytes per stereo sample-frame at s16le
 	prevYTID := ""
+	if resume != nil {
+		prevYTID = resume.entry.YTID
+	}
 	tick := f.d.Clock.Tick(250 * time.Millisecond)
 	republish := f.d.Clock.Tick(republishEvery)
 
 	for {
-		next, track, skip, stop, err := f.boundary(ctx, prevYTID)
-		if stop || ctx.Err() != nil {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if skip { // vanished from library: advance past it, no publish
-			prevYTID = next.YTID
-			continue
+		var track library.Track
+		var entry Entry
+		var offsetS float64
+		resumed := resume != nil
+		if resumed {
+			track, entry, offsetS = resume.track, resume.entry, resume.offsetS
+			resume = nil
+		} else {
+			next, tr, skip, stop, err := f.boundary(ctx, prevYTID)
+			if stop || ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if skip { // vanished from library: advance past it, no publish
+				prevYTID = next.YTID
+				continue
+			}
+			track = tr
 		}
 
 		// Open the artifact + decoder BEFORE announcing anything: a track
 		// that fails to fetch/decode must never be logged or published as
 		// now-playing — it never aired, and doing so would poison the
 		// sample-clock resume anchor with a track nobody heard.
-		rd, cleanup, openSkip, err := f.openTrack(ctx, track, 0)
+		rd, cleanup, openSkip, err := f.openTrack(ctx, track, offsetS)
 		if err != nil {
 			return err
 		}
@@ -202,14 +293,29 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			continue
 		}
 
-		// Overflow-safe: samplesFed can exceed ~9.2e9 (≈53h continuous at
-		// 48kHz) before time.Duration(samplesFed)*time.Second would overflow
-		// int64 nanoseconds. Split into whole seconds + sub-second remainder.
-		startedAt := f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
-		entry := Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
-			StartedAt: startedAt, DurationS: int(track.DurationS)}
-		if err := f.d.Log.Append(ctx, entry); err != nil {
-			f.d.Logger.Error("air log append failed", "err", err)
+		// trackStartSamples anchors this track's aired offset: on a crash
+		// mid-track, offset = (samplesFed at crash - trackStartSamples)/48000.
+		// It is fixed once per track (not per crash-restart), so repeated
+		// crashes on the same track keep computing offset from the track's
+		// true start, not from the previous restart point. For a
+		// boot-resumed track, samplesFed already starts pre-loaded at the
+		// resumed offset (see above), and the track's true start is 0
+		// frames from f.anchor (== the entry's original StartedAt) — not
+		// the current samplesFed value.
+		var trackStartSamples int64
+		if resumed {
+			trackStartSamples = 0
+		} else {
+			// Overflow-safe: samplesFed can exceed ~9.2e9 (≈53h continuous at
+			// 48kHz) before time.Duration(samplesFed)*time.Second would overflow
+			// int64 nanoseconds. Split into whole seconds + sub-second remainder.
+			startedAt := f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
+			entry = Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
+				StartedAt: startedAt, DurationS: int(track.DurationS)}
+			if err := f.d.Log.Append(ctx, entry); err != nil {
+				f.d.Logger.Error("air log append failed", "err", err)
+			}
+			trackStartSamples = samplesFed
 		}
 		n, _ := f.d.Listeners.Count(ctx)
 		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
@@ -220,12 +326,6 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 		}
 
-		// trackStartSamples anchors this track's aired offset: on a crash
-		// mid-track, offset = (samplesFed at crash - trackStartSamples)/48000.
-		// It is fixed once per track (not per crash-restart), so repeated
-		// crashes on the same track keep computing offset from the track's
-		// true start, not from the previous restart point.
-		trackStartSamples := samplesFed
 		crashRestarts := 0
 		stopSession := false
 	feedTrack:

@@ -109,3 +109,29 @@ func TestCrashResumeCapSkipsTrackAfterThreeAttempts(t *testing.T) {
 	require.Contains(t, nps[0], `"title":"t-a"`)
 	require.Contains(t, nps[1], `"title":"t-b"`)
 }
+
+func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
+	store, lib := newFixture(t, "a", "b")
+	log := NewMemAirLog()
+	started := time.Now().Add(-30 * time.Second).Truncate(time.Second)
+	require.NoError(t, log.Append(context.Background(),
+		Entry{YTID: "a", Title: "t-a", Artist: "c-a", StartedAt: started, DurationS: 60}))
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 2}}
+	f := NewFeeder(FeederDeps{
+		Store: store, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
+		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	require.InDelta(t, 30.0, dec.lastOffset(), 1.5)                        // resumed ~30s in
+	require.Contains(t, prod.byTopic(TopicNowPlaying)[0], `"title":"t-a"`) // same entry
+}

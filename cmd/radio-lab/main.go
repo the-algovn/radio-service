@@ -7,9 +7,11 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
+	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/radioserver"
 	"github.com/the-algovn/radio-service/internal/server"
@@ -122,8 +125,54 @@ func main() {
 		Logger: logger,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
+
+	// Broadcast engine (Slice 2): feeder + HLS listener + optional Kafka feeds.
+	// playlistStore is hoisted so the RadioService registration below and
+	// the feeder share the same store.
+	playlistStore := playlist.NewPGStore(pool)
+	hlsDir := config.Get("HLS_DIR", filepath.Join(dataDir, "hls"))
+	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
+		logger.Error("mkdir hls failed", "err", err)
+		os.Exit(1)
+	}
+	var producer live.Producer
+	if brokers := config.Get("KAFKA_BROKERS", ""); brokers != "" {
+		kp, err := live.NewKafkaProducer(strings.Split(brokers, ","))
+		if err != nil {
+			logger.Error("kafka producer init failed", "err", err)
+			os.Exit(1)
+		}
+		defer kp.Close()
+		producer = kp
+	} else {
+		logger.Warn("KAFKA_BROKERS not set; radio SSE feeds disabled")
+	}
+	feeder := live.NewFeeder(live.FeederDeps{
+		Store: playlistStore, Library: lib,
+		Log: live.NewPGAirLog(pool), Listeners: live.NewPGListeners(pool),
+		Fetch:   store.FetchToFile,
+		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
+		Producer: producer, Clock: live.RealClock(), Dir: hlsDir, Logger: logger,
+	})
+	engine := live.NewEngine(feeder, logger)
+	go func() {
+		if err := engine.Run(ctx); err != nil {
+			logger.Error("engine exited", "err", err)
+		}
+	}()
+	hlsSrv := &http.Server{Addr: config.Get("HLS_ADDR", ":9291"), Handler: live.NewHLSHandler(feeder.SessionDir)}
+	go func() {
+		if err := hlsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("hls listener failed", "err", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		_ = hlsSrv.Close()
+	}()
+
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
-		Store:  playlist.NewPGStore(pool),
+		Store:  playlistStore,
 		Logger: logger,
 	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
