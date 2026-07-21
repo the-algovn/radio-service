@@ -10,6 +10,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AirLog struct {
+	ID        int64
+	YtID      string
+	Title     string
+	Artist    string
+	StartedAt time.Time
+	DurationS int32
+}
+
 type LedgerLine struct {
 	ID        int64
 	Ts        time.Time
@@ -33,6 +42,11 @@ type PlaylistItem struct {
 	PlaylistID string
 	Position   int32
 	YtID       string
+}
+
+type RadioListener struct {
+	SessionID string
+	LastSeen  time.Time
 }
 
 type Station struct {

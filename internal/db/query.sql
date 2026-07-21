@@ -121,3 +121,29 @@ RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on
 -- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
 RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since;
+
+-- name: AppendAirLog :exec
+INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
+VALUES ($1, $2, $3, $4, $5);
+
+-- name: LatestAirLog :one
+SELECT id, yt_id, title, artist, started_at, duration_s
+FROM air_log ORDER BY started_at DESC, id DESC LIMIT 1;
+
+-- name: AirHistory :many
+SELECT yt_id, title, artist, started_at, duration_s
+FROM air_log
+WHERE started_at + make_interval(secs => duration_s) < now()
+ORDER BY started_at DESC
+LIMIT $1;
+
+-- name: BeatListener :exec
+INSERT INTO radio_listener (session_id, last_seen) VALUES ($1, now())
+ON CONFLICT (session_id) DO UPDATE SET last_seen = now();
+
+-- name: CountListeners :one
+SELECT count(*) FROM radio_listener
+WHERE last_seen > now() - interval '75 seconds';
+
+-- name: PruneListeners :exec
+DELETE FROM radio_listener WHERE last_seen < now() - interval '10 minutes';

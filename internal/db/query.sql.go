@@ -10,6 +10,72 @@ import (
 	"time"
 )
 
+const airHistory = `-- name: AirHistory :many
+SELECT yt_id, title, artist, started_at, duration_s
+FROM air_log
+WHERE started_at + make_interval(secs => duration_s) < now()
+ORDER BY started_at DESC
+LIMIT $1
+`
+
+type AirHistoryRow struct {
+	YtID      string
+	Title     string
+	Artist    string
+	StartedAt time.Time
+	DurationS int32
+}
+
+func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow, error) {
+	rows, err := q.db.Query(ctx, airHistory, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AirHistoryRow{}
+	for rows.Next() {
+		var i AirHistoryRow
+		if err := rows.Scan(
+			&i.YtID,
+			&i.Title,
+			&i.Artist,
+			&i.StartedAt,
+			&i.DurationS,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const appendAirLog = `-- name: AppendAirLog :exec
+INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type AppendAirLogParams struct {
+	YtID      string
+	Title     string
+	Artist    string
+	StartedAt time.Time
+	DurationS int32
+}
+
+func (q *Queries) AppendAirLog(ctx context.Context, arg AppendAirLogParams) error {
+	_, err := q.db.Exec(ctx, appendAirLog,
+		arg.YtID,
+		arg.Title,
+		arg.Artist,
+		arg.StartedAt,
+		arg.DurationS,
+	)
+	return err
+}
+
 const appendPlaylistItem = `-- name: AppendPlaylistItem :execrows
 INSERT INTO playlist_item (playlist_id, position, yt_id)
 VALUES ($1,
@@ -29,6 +95,28 @@ func (q *Queries) AppendPlaylistItem(ctx context.Context, arg AppendPlaylistItem
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const beatListener = `-- name: BeatListener :exec
+INSERT INTO radio_listener (session_id, last_seen) VALUES ($1, now())
+ON CONFLICT (session_id) DO UPDATE SET last_seen = now()
+`
+
+func (q *Queries) BeatListener(ctx context.Context, sessionID string) error {
+	_, err := q.db.Exec(ctx, beatListener, sessionID)
+	return err
+}
+
+const countListeners = `-- name: CountListeners :one
+SELECT count(*) FROM radio_listener
+WHERE last_seen > now() - interval '75 seconds'
+`
+
+func (q *Queries) CountListeners(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countListeners)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const countPlaylistItems = `-- name: CountPlaylistItems :one
@@ -276,6 +364,25 @@ func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error 
 	return err
 }
 
+const latestAirLog = `-- name: LatestAirLog :one
+SELECT id, yt_id, title, artist, started_at, duration_s
+FROM air_log ORDER BY started_at DESC, id DESC LIMIT 1
+`
+
+func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
+	row := q.db.QueryRow(ctx, latestAirLog)
+	var i AirLog
+	err := row.Scan(
+		&i.ID,
+		&i.YtID,
+		&i.Title,
+		&i.Artist,
+		&i.StartedAt,
+		&i.DurationS,
+	)
+	return i, err
+}
+
 const listLedgerLines = `-- name: ListLedgerLines :many
 SELECT ts, kind, provider, label, chars, in_tokens, out_tokens, cost_usd
 FROM ledger_line ORDER BY ts ASC
@@ -515,6 +622,15 @@ func (q *Queries) PlaylistStats(ctx context.Context, playlistID string) (Playlis
 	var i PlaylistStatsRow
 	err := row.Scan(&i.TrackCount, &i.TotalDurationS)
 	return i, err
+}
+
+const pruneListeners = `-- name: PruneListeners :exec
+DELETE FROM radio_listener WHERE last_seen < now() - interval '10 minutes'
+`
+
+func (q *Queries) PruneListeners(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, pruneListeners)
+	return err
 }
 
 const renamePlaylist = `-- name: RenamePlaylist :one
