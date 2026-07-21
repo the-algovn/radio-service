@@ -36,6 +36,7 @@ func runStoreContract(t *testing.T, newStores storeFactory) {
 
 		hist, err := log.History(ctx, 20)
 		require.NoError(t, err)
+		require.Len(t, hist, 2)
 		require.Equal(t, []string{"b", "a"}, []string{hist[0].YTID, hist[1].YTID}) // completed only, newest first
 
 		hist, err = log.History(ctx, 1)

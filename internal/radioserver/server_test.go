@@ -2,6 +2,7 @@ package radioserver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -250,3 +251,37 @@ func TestGoOnAirPokesNotifier(t *testing.T) {
 type notifierFunc func()
 
 func (f notifierFunc) Poke() { f() }
+
+// failingAirLog wraps an AirLog and makes Latest return an error.
+type failingAirLog struct {
+	log live.AirLog
+}
+
+func (f *failingAirLog) Append(ctx context.Context, e live.Entry) error {
+	return f.log.Append(ctx, e)
+}
+
+func (f *failingAirLog) Latest(ctx context.Context) (live.Entry, bool, error) {
+	return live.Entry{}, false, errors.New("test error")
+}
+
+func (f *failingAirLog) History(ctx context.Context, limit int) ([]live.Entry, error) {
+	return f.log.History(ctx, limit)
+}
+
+func TestGetQueueAirLogError(t *testing.T) {
+	s, st, log, _ := newLiveTestServer(t, "a")
+	ctx := context.Background()
+	id := mkPlaylist(t, s, "mix", "a")
+	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
+	require.NoError(t, err)
+	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+
+	// Replace with a failing AirLog
+	s.deps.Log = &failingAirLog{log: log}
+	_ = st // unused in this test
+
+	_, err = s.GetQueue(ctx, &radiov1.GetQueueRequest{})
+	require.Equal(t, codes.Internal, status.Code(err))
+}

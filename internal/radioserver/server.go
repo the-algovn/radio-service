@@ -285,7 +285,9 @@ func (s *Server) GetQueue(ctx context.Context, _ *radiov1.GetQueueRequest) (*rad
 		return nil, mapErr("get playlist", err)
 	}
 	current := ""
-	if e, found, err := s.deps.Log.Latest(ctx); err == nil && found {
+	if e, found, err := s.deps.Log.Latest(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "air log: %v", err)
+	} else if found {
 		current = e.YTID
 	}
 	resp := &radiov1.GetQueueResponse{}

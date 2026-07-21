@@ -344,6 +344,9 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			// a fresh encoder session is required before we can do anything
 			// else — including giving up on this track, since the NEXT
 			// track also needs a live sess.
+			// The crashed Session is deliberately not Stop()'d — the encoder process
+			// already exited, and os/exec's Wait (running in FFEncoder's goroutine)
+			// closes the parent's pipe FDs, so there is no leak.
 			cleanup()
 			crashRestarts++
 			newDir, newSess, rerr := f.restartSession(ctx, dir)
