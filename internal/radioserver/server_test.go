@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -11,6 +12,7 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	"github.com/the-algovn/radio-service/internal/library"
+	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
 )
 
@@ -141,3 +143,110 @@ func TestRenamePlaylistGuards(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "new name", resp.GetSummary().GetName())
 }
+
+func newLiveTestServer(t *testing.T, ytIDs ...string) (*Server, playlist.Store, *live.MemAirLog, *live.MemListeners) {
+	t.Helper()
+	lib := library.NewMemLibrary()
+	for _, id := range ytIDs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 60, ArtifactID: "a-" + id,
+		}))
+	}
+	st := playlist.NewMemStore(lib)
+	log := live.NewMemAirLog()
+	ls := live.NewMemListeners(time.Now)
+	return New(Deps{Store: st, Log: log, Listeners: ls}), st, log, ls
+}
+
+func TestGetNowPlayingOffAirIsEmpty(t *testing.T) {
+	s, _, _, _ := newLiveTestServer(t)
+	resp, err := s.GetNowPlaying(context.Background(), &radiov1.GetNowPlayingRequest{})
+	require.NoError(t, err)
+	require.Nil(t, resp.GetNowPlaying()) // ABSENT ⇔ off-air
+}
+
+func TestGetNowPlayingOnAir(t *testing.T) {
+	s, st, log, ls := newLiveTestServer(t, "a")
+	ctx := context.Background()
+	id := mkPlaylist(t, s, "mix", "a")
+	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
+	require.NoError(t, err)
+	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+	started := time.Now().Add(-10 * time.Second).Truncate(time.Second)
+	require.NoError(t, log.Append(ctx, live.Entry{YTID: "a", Title: "t-a", Artist: "c-a", StartedAt: started, DurationS: 60}))
+	require.NoError(t, ls.Beat(ctx, "tab-1"))
+
+	resp, err := s.GetNowPlaying(ctx, &radiov1.GetNowPlayingRequest{})
+	require.NoError(t, err)
+	np := resp.GetNowPlaying()
+	require.NotNil(t, np)
+	require.Equal(t, "track", np.GetKind())
+	require.Equal(t, "t-a", np.GetTitle())
+	require.Equal(t, started.UTC().Format(time.RFC3339Nano), np.GetStartedAt())
+	require.Equal(t, int32(60), np.GetDurationSeconds())
+	require.Equal(t, int32(1), np.GetListeners())
+	_ = st
+}
+
+func TestGetQueueRotation(t *testing.T) {
+	s, _, log, _ := newLiveTestServer(t, "a", "b", "c")
+	ctx := context.Background()
+	id := mkPlaylist(t, s, "mix", "a", "b", "c")
+	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
+	require.NoError(t, err)
+	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+	require.NoError(t, log.Append(ctx, live.Entry{YTID: "b", Title: "t-b", Artist: "c-b", StartedAt: time.Now(), DurationS: 60}))
+
+	resp, err := s.GetQueue(ctx, &radiov1.GetQueueRequest{})
+	require.NoError(t, err)
+	items := resp.GetItems()
+	require.Len(t, items, 2)
+	require.Equal(t, "t-c", items[0].GetTitle()) // after current b, wrapping
+	require.Equal(t, "t-a", items[1].GetTitle())
+}
+
+func TestGetHistoryAndHeartbeat(t *testing.T) {
+	s, _, log, ls := newLiveTestServer(t)
+	ctx := context.Background()
+	old := time.Now().Add(-10 * time.Minute)
+	require.NoError(t, log.Append(ctx, live.Entry{YTID: "x", Title: "t-x", Artist: "c-x", StartedAt: old, DurationS: 60}))
+
+	h, err := s.GetHistory(ctx, &radiov1.GetHistoryRequest{})
+	require.NoError(t, err)
+	require.Len(t, h.GetItems(), 1)
+	require.Equal(t, "t-x", h.GetItems()[0].GetTitle())
+	require.Equal(t, old.UTC().Format(time.RFC3339Nano), h.GetItems()[0].GetAiredAt())
+
+	_, err = s.Heartbeat(ctx, &radiov1.HeartbeatRequest{SessionId: "tab-9"})
+	require.NoError(t, err)
+	n, err := ls.Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	_, err = s.Heartbeat(ctx, &radiov1.HeartbeatRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err)) // blank session_id
+	_, err = s.Heartbeat(ctx, &radiov1.HeartbeatRequest{SessionId: strings.Repeat("x", 101)})
+	require.Equal(t, codes.InvalidArgument, status.Code(err)) // oversized
+}
+
+func TestGoOnAirPokesNotifier(t *testing.T) {
+	lib := library.NewMemLibrary()
+	require.NoError(t, lib.Add(context.Background(), library.Track{YTID: "a", Title: "t", Channel: "c", DurationS: 60, ArtifactID: "x"}))
+	pokes := 0
+	s := New(Deps{Store: playlist.NewMemStore(lib), Notifier: notifierFunc(func() { pokes++ })})
+	id := mkPlaylist(t, s, "mix", "a")
+	ctx := context.Background()
+	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
+	require.NoError(t, err)
+	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+	_, err = s.GoOffAir(ctx, &radiov1.GoOffAirRequest{})
+	require.NoError(t, err)
+	require.Equal(t, 2, pokes)
+}
+
+type notifierFunc func()
+
+func (f notifierFunc) Poke() { f() }

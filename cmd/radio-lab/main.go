@@ -147,9 +147,13 @@ func main() {
 	} else {
 		logger.Warn("KAFKA_BROKERS not set; radio SSE feeds disabled")
 	}
+	// airLog/listeners are hoisted so the feeder and the RadioService
+	// registration below share the same stores.
+	airLog := live.NewPGAirLog(pool)
+	listeners := live.NewPGListeners(pool)
 	feeder := live.NewFeeder(live.FeederDeps{
 		Store: playlistStore, Library: lib,
-		Log: live.NewPGAirLog(pool), Listeners: live.NewPGListeners(pool),
+		Log: airLog, Listeners: listeners,
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
 		Producer: producer, Clock: live.RealClock(), Dir: hlsDir, Logger: logger,
@@ -172,8 +176,11 @@ func main() {
 	}()
 
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
-		Store:  playlistStore,
-		Logger: logger,
+		Store:     playlistStore,
+		Log:       airLog,
+		Listeners: listeners,
+		Notifier:  engine,
+		Logger:    logger,
 	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)

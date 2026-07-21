@@ -16,14 +16,25 @@ import (
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
 )
 
-const maxNameRunes = 200
+const (
+	maxNameRunes    = 200
+	maxSessionIDLen = 100
+)
+
+// Notifier lets the server nudge the broadcast engine (same process) when
+// on-air state changes; the engine's 5s poll is the fallback.
+type Notifier interface{ Poke() }
 
 type Deps struct {
-	Store  playlist.Store
-	Logger *slog.Logger
+	Store     playlist.Store
+	Log       live.AirLog
+	Listeners live.Listeners
+	Notifier  Notifier
+	Logger    *slog.Logger
 }
 
 type Server struct {
@@ -217,6 +228,9 @@ func (s *Server) GoOnAir(ctx context.Context, _ *radiov1.GoOnAirRequest) (*radio
 		return nil, mapErr("go on air", err)
 	}
 	s.logger.Info("station on air", "playlist_id", st.ActivePlaylistID)
+	if s.deps.Notifier != nil {
+		s.deps.Notifier.Poke()
+	}
 	return &radiov1.GoOnAirResponse{Station: stationProto(st)}, nil
 }
 
@@ -226,5 +240,83 @@ func (s *Server) GoOffAir(ctx context.Context, _ *radiov1.GoOffAirRequest) (*rad
 		return nil, mapErr("go off air", err)
 	}
 	s.logger.Info("station off air")
+	if s.deps.Notifier != nil {
+		s.deps.Notifier.Poke()
+	}
 	return &radiov1.GoOffAirResponse{Station: stationProto(st)}, nil
+}
+
+func (s *Server) GetNowPlaying(ctx context.Context, _ *radiov1.GetNowPlayingRequest) (*radiov1.GetNowPlayingResponse, error) {
+	st, err := s.deps.Store.GetStation(ctx)
+	if err != nil {
+		return nil, mapErr("get station", err)
+	}
+	if !st.OnAir {
+		return &radiov1.GetNowPlayingResponse{}, nil // absent ⇔ off-air
+	}
+	e, found, err := s.deps.Log.Latest(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "air log: %v", err)
+	}
+	if !found {
+		return &radiov1.GetNowPlayingResponse{}, nil // on-air but nothing aired yet
+	}
+	n, err := s.deps.Listeners.Count(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "listeners: %v", err)
+	}
+	return &radiov1.GetNowPlayingResponse{NowPlaying: &radiov1.NowPlaying{
+		Kind: "track", Title: e.Title, Artist: e.Artist,
+		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
+		DurationSeconds: int32(e.DurationS), Listeners: int32(n),
+	}}, nil
+}
+
+func (s *Server) GetQueue(ctx context.Context, _ *radiov1.GetQueueRequest) (*radiov1.GetQueueResponse, error) {
+	st, err := s.deps.Store.GetStation(ctx)
+	if err != nil {
+		return nil, mapErr("get station", err)
+	}
+	if !st.OnAir || st.ActivePlaylistID == "" {
+		return &radiov1.GetQueueResponse{}, nil
+	}
+	_, items, err := s.deps.Store.Get(ctx, st.ActivePlaylistID)
+	if err != nil {
+		return nil, mapErr("get playlist", err)
+	}
+	current := ""
+	if e, found, err := s.deps.Log.Latest(ctx); err == nil && found {
+		current = e.YTID
+	}
+	resp := &radiov1.GetQueueResponse{}
+	for _, it := range live.QueueAfter(items, current) {
+		resp.Items = append(resp.Items, &radiov1.QueueItem{Title: it.Title, Artist: it.Channel})
+	}
+	return resp, nil
+}
+
+func (s *Server) GetHistory(ctx context.Context, _ *radiov1.GetHistoryRequest) (*radiov1.GetHistoryResponse, error) {
+	entries, err := s.deps.Log.History(ctx, 20)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "air history: %v", err)
+	}
+	resp := &radiov1.GetHistoryResponse{}
+	for _, e := range entries {
+		resp.Items = append(resp.Items, &radiov1.HistoryItem{
+			Title: e.Title, Artist: e.Artist,
+			AiredAt: e.StartedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return resp, nil
+}
+
+func (s *Server) Heartbeat(ctx context.Context, req *radiov1.HeartbeatRequest) (*radiov1.HeartbeatResponse, error) {
+	id := req.GetSessionId()
+	if id == "" || len(id) > maxSessionIDLen {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required (max 100 chars)")
+	}
+	if err := s.deps.Listeners.Beat(ctx, id); err != nil {
+		return nil, status.Errorf(codes.Internal, "heartbeat: %v", err)
+	}
+	return &radiov1.HeartbeatResponse{}, nil
 }
