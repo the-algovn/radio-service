@@ -50,3 +50,7 @@ func TestQueueAfterAndPayload(t *testing.T) {
 		`[{"title":"C","artist":"ch-c","hasDedication":false},
           {"title":"A","artist":"ch-a","hasDedication":false}]`, got)
 }
+
+func TestQueuePayloadEmptyIsBareArray(t *testing.T) {
+	require.Equal(t, "[]", string(QueuePayload(nil, "whatever")))
+}

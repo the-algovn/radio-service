@@ -58,7 +58,8 @@ type nowPlayingJSON struct {
 func NowPlayingPayload(e Entry, listeners int) []byte {
 	b, _ := json.Marshal(nowPlayingJSON{
 		Kind: "track", Title: e.Title, Artist: e.Artist,
-		StartedAt: e.StartedAt.UTC().Format(time.RFC3339),
+		// RFC3339Nano preserves sub-second sample-clock precision (== RFC3339 for whole seconds).
+		StartedAt: e.StartedAt.UTC().Format(time.RFC3339Nano),
 		DurationSeconds: e.DurationS, Listeners: listeners,
 	})
 	return b
