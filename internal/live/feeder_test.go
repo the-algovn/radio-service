@@ -191,6 +191,7 @@ func TestSessionPublishesAndLogsEachTrackThenLoops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 
 	// let it air a→b→a (loop proves wrap-around), then cancel
 	for len(prod.byTopic(TopicNowPlaying)) < 3 {
@@ -231,6 +232,7 @@ func TestAutoOffAirWhenActivePlaylistEmpties(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(context.Background()) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 	err := drive(t, clk, done, 100)
 	require.NoError(t, err)
 
@@ -267,6 +269,7 @@ func TestOperatorOffAirEndsSession(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(context.Background()) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 	// wait for first track publish, then flip off-air
 	for len(prod.byTopic(TopicNowPlaying)) < 1 {
 		clk.step(250 * time.Millisecond)
@@ -289,6 +292,7 @@ func TestStartedAtFollowsSampleClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 	for len(prod.byTopic(TopicNowPlaying)) < 2 {
 		clk.step(250 * time.Millisecond)
 		time.Sleep(time.Millisecond)

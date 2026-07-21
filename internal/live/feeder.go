@@ -52,14 +52,15 @@ type Feeder struct {
 	d          FeederDeps
 	sessionDir atomic.Value // string
 	seq        atomic.Int64 // session counter for dir names
-	// anchor is the sample-clock epoch: entry.StartedAt = anchor +
-	// samplesFed/48000. Captured at construction (synchronously, on the
-	// caller's goroutine) rather than at the top of RunSession, so it is
-	// immune to scheduling order between RunSession's goroutine and
-	// whatever the caller does right after spawning it (e.g. a test
-	// driving a fake clock in a loop it starts immediately after `go
-	// f.RunSession(ctx)` — that loop can and does run before the spawned
-	// goroutine gets its first timeslice).
+	// anchor is the sample-clock epoch for the CURRENT session only:
+	// entry.StartedAt = anchor + samplesFed/48000. Must be captured fresh
+	// at the start of each RunSession call, not once at Feeder
+	// construction — one Feeder is built at boot and RunSession is called
+	// again each time the operator goes back on-air, possibly hours
+	// later, so a construction-time anchor would misdate every session
+	// after the first. Written only by RunSession's own goroutine and
+	// read only within that same call, so it needs no synchronization of
+	// its own.
 	anchor time.Time
 }
 
@@ -67,7 +68,7 @@ func NewFeeder(d FeederDeps) *Feeder {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	f := &Feeder{d: d, anchor: d.Clock.Now()}
+	f := &Feeder{d: d}
 	f.sessionDir.Store("")
 	return f
 }
@@ -139,6 +140,12 @@ func (f *Feeder) autoOffAir(ctx context.Context) error {
 // RunSession broadcasts until off-air or ctx cancellation. resumeOffset
 // handling lives in Task 7; this core loop starts every session fresh.
 func (f *Feeder) RunSession(ctx context.Context) error {
+	// Per-session epoch: captured before any of MkdirAll/Encoder.Start/
+	// sessionDir.Store, so callers can synchronize on SessionDir() != ""
+	// becoming true and be guaranteed the anchor is already fixed (program
+	// order on this goroutine — no separate lock needed for the field).
+	f.anchor = f.d.Clock.Now()
+
 	dir := filepath.Join(f.d.Dir, fmt.Sprintf("session-%d", f.seq.Add(1)))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
