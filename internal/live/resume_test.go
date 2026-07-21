@@ -135,3 +135,57 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 	require.InDelta(t, 30.0, dec.lastOffset(), 1.5)                        // resumed ~30s in
 	require.Contains(t, prod.byTopic(TopicNowPlaying)[0], `"title":"t-a"`) // same entry
 }
+
+// TestBootResumeThenCrashKeepsOriginalOffset pins the subtlest line in the
+// boot-resume implementation: trackStartSamples is special-cased to 0 for a
+// resumed track (not `= samplesFed`, the pattern every OTHER track uses),
+// because samplesFed is pre-loaded with the resume offset while the track's
+// true start is 0 frames from the (now entry.StartedAt) anchor. A refactor
+// that "simplified" this back to the general `trackStartSamples = samplesFed`
+// pattern would silently double-count the resume offset on any mid-track
+// crash. This test forces exactly that path: resume track 'a' ~30s in, feed
+// two more chunks (0.5s), then crash the encoder — the reopened decoder must
+// see offset ≈ original 30s + 0.5s newly fed, not just the 0.5s.
+func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
+	store, lib := newFixture(t, "a", "b")
+	log := NewMemAirLog()
+	started := time.Now().Add(-30 * time.Second).Truncate(time.Second)
+	require.NoError(t, log.Append(context.Background(),
+		Entry{YTID: "a", Title: "t-a", Artist: "c-a", StartedAt: started, DurationS: 60}))
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 4}}
+	f := NewFeeder(FeederDeps{
+		Store: store, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
+		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	// wait for the resumed session + its first now-playing frame
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+
+	// feed ~2 chunks (0.5s) of the resumed track, then kill the encoder mid-track
+	for i := 0; i < 2; i++ {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(5 * time.Millisecond)
+	enc.sessions[0].fail(context.DeadlineExceeded) // simulated crash
+
+	// a second encoder session must start and the decoder re-open with
+	// offset ≈ original resume offset (30s) + newly fed audio (0.5s)
+	for enc.count() < 2 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	require.InDelta(t, 30.5, dec.lastOffset(), 1.5)
+	cancel()
+	<-done
+}
