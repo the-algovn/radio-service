@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -194,7 +195,11 @@ func TestSessionPublishesAndLogsEachTrackThenLoops(t *testing.T) {
 	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 
 	// let it air a→b→a (loop proves wrap-around), then cancel
+	deadline := time.Now().Add(2 * time.Second)
 	for len(prod.byTopic(TopicNowPlaying)) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for 3 now-playing frames")
+		}
 		select {
 		case err := <-done:
 			t.Fatalf("session ended early: %v", err)
@@ -293,7 +298,11 @@ func TestStartedAtFollowsSampleClock(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
 	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for len(prod.byTopic(TopicNowPlaying)) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for 2 now-playing frames")
+		}
 		clk.step(250 * time.Millisecond)
 		time.Sleep(time.Millisecond)
 	}
@@ -306,4 +315,87 @@ func TestStartedAtFollowsSampleClock(t *testing.T) {
 	nps := prod.byTopic(TopicNowPlaying)
 	require.Contains(t, nps[0], `"startedAt":"2026-07-21T12:00:00Z"`)
 	require.Contains(t, nps[1], `"startedAt":"2026-07-21T12:00:00.5`)
+}
+
+// TestFetchFailureSkipsTrackWithoutPublishOrLog covers the CRITICAL fix: a
+// track that fails to fetch must never be announced (NowPlaying/Queue) or
+// air-logged — it never actually aired. The feeder should silently skip past
+// it to the next track in rotation.
+func TestFetchFailureSkipsTrackWithoutPublishOrLog(t *testing.T) {
+	store, lib := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	log := NewMemAirLog()
+	f := NewFeeder(FeederDeps{
+		Store: store, Library: lib,
+		Log: log, Listeners: NewMemListeners(time.Now),
+		Fetch: func(_ context.Context, id, _ string) (string, error) {
+			if id == "art-a" {
+				return "", errors.New("fetch failed for a")
+			}
+			return "/fake/" + id, nil
+		},
+		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2},
+		Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	// 'a' fails to fetch every time it comes up; 'b' airs fine — wait for
+	// b's now-playing frame, then flip off-air to end the session cleanly.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for t-b now-playing frame")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	_, err := store.GoOffAir(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 100))
+
+	nps := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, nps[0], `"title":"t-b"`)
+	for _, frame := range nps {
+		require.NotContains(t, frame, `"title":"t-a"`) // 'a' never aired
+	}
+
+	latest, ok, lerr := log.Latest(context.Background())
+	require.NoError(t, lerr)
+	require.True(t, ok)
+	require.Equal(t, "b", latest.YTID) // 'a' never air-logged either
+}
+
+// TestOperatorOffAirStopsMidTrackWithinAChunk covers the IMPORTANT off-air
+// latency fix: flipping off-air must stop feeding within about one chunk,
+// not wait for the whole track to finish.
+func TestOperatorOffAirStopsMidTrackWithinAChunk(t *testing.T) {
+	store, lib := newFixture(t, "a")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := NewFeeder(FeederDeps{
+		Store: store, Library: lib,
+		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
+		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
+		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 8}, // 8 chunks
+		Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	// feed ~2 of the 8 chunks, then flip off-air mid-track
+	for i := 0; i < 2; i++ {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	_, err := store.GoOffAir(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 100))
+
+	require.Empty(t, f.SessionDir())
+	require.Contains(t, prod.byTopic(TopicNowPlaying), string(OffAirPayload()))
+	require.Less(t, enc.sessions[0].wrote, 8*chunkBytes) // stopped mid-track
 }

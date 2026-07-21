@@ -150,6 +150,12 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// Registered right after MkdirAll succeeds (not after Encoder.Start) so a
+	// subsequent encoder-start failure doesn't leak the session dir.
+	// RemoveAll is idempotent, so this is the ONLY removal of dir — the
+	// on-air-exit defer below no longer calls it separately.
+	defer os.RemoveAll(dir)
+
 	sess, err := f.d.Encoder.Start(ctx, dir)
 	if err != nil {
 		return err
@@ -158,7 +164,6 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	defer func() {
 		f.sessionDir.Store("")
 		sess.Stop()
-		_ = os.RemoveAll(dir)
 		f.publish(context.WithoutCancel(ctx), TopicNowPlaying, OffAirPayload())
 	}()
 
@@ -180,7 +185,23 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			continue
 		}
 
-		startedAt := f.anchor.Add(time.Duration(samplesFed) * time.Second / 48000)
+		// Open the artifact + decoder BEFORE announcing anything: a track
+		// that fails to fetch/decode must never be logged or published as
+		// now-playing — it never aired, and doing so would poison the
+		// sample-clock resume anchor with a track nobody heard.
+		rd, cleanup, openSkip, err := f.openTrack(ctx, track)
+		if err != nil {
+			return err
+		}
+		if openSkip {
+			prevYTID = track.YTID // advance past the track that failed to open
+			continue
+		}
+
+		// Overflow-safe: samplesFed can exceed ~9.2e9 (≈53h continuous at
+		// 48kHz) before time.Duration(samplesFed)*time.Second would overflow
+		// int64 nanoseconds. Split into whole seconds + sub-second remainder.
+		startedAt := f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
 		entry := Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
 			StartedAt: startedAt, DurationS: int(track.DurationS)}
 		if err := f.d.Log.Append(ctx, entry); err != nil {
@@ -195,7 +216,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 		}
 
-		stopTrack, err := f.airTrack(ctx, sess, track, entry, &samplesFed, tick, republish)
+		stopTrack, err := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish, entry)
+		cleanup()
 		if err != nil {
 			return err
 		}
@@ -206,27 +228,39 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	}
 }
 
-// airTrack feeds one track's PCM, paced one chunk per clock tick. Returns
-// stop=true when the session must end (off-air observed mid-track or ctx
-// done). Off-air takes effect within one chunk (~250ms).
-func (f *Feeder) airTrack(ctx context.Context, sess Session, track library.Track, entry Entry, samplesFed *int64, tick, republish <-chan time.Time) (bool, error) {
+// openTrack fetches the artifact and opens the decoder for track, BEFORE any
+// air-log entry or publish happens for it. skip=true (err=nil) means
+// fetch/decode failed for THIS track specifically — already logged; the
+// caller advances past it and re-runs the boundary without announcing
+// anything. err != nil is a fatal, session-ending error (e.g. can't even
+// create the fetch scratch dir). On success, cleanup must be called exactly
+// once, after the caller is done reading from rd.
+func (f *Feeder) openTrack(ctx context.Context, track library.Track) (rd io.ReadCloser, cleanup func(), skip bool, err error) {
 	tmp, err := os.MkdirTemp(f.d.Dir, "fetch-*")
 	if err != nil {
-		return false, err
+		return nil, nil, false, err
 	}
-	defer os.RemoveAll(tmp)
-	path, err := f.d.Fetch(ctx, track.ArtifactID, tmp)
-	if err != nil {
-		f.d.Logger.Error("artifact fetch failed; skipping track", "yt_id", track.YTID, "err", err)
-		return false, nil // skip to next boundary
+	path, ferr := f.d.Fetch(ctx, track.ArtifactID, tmp)
+	if ferr != nil {
+		_ = os.RemoveAll(tmp)
+		f.d.Logger.Error("artifact fetch failed; skipping track", "yt_id", track.YTID, "err", ferr)
+		return nil, nil, true, nil
 	}
-	rd, err := f.d.Decoder.Open(ctx, path, Loudness{I: track.InputI, TP: track.InputTP, LRA: track.InputLRA}, 0)
-	if err != nil {
-		f.d.Logger.Error("decoder open failed; skipping track", "yt_id", track.YTID, "err", err)
-		return false, nil
+	rd, derr := f.d.Decoder.Open(ctx, path, Loudness{I: track.InputI, TP: track.InputTP, LRA: track.InputLRA}, 0)
+	if derr != nil {
+		_ = os.RemoveAll(tmp)
+		f.d.Logger.Error("decoder open failed; skipping track", "yt_id", track.YTID, "err", derr)
+		return nil, nil, true, nil
 	}
-	defer rd.Close()
+	return rd, func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }, false, nil
+}
 
+// airTrack feeds one track's already-open PCM reader, paced one chunk per
+// clock tick. Returns stop=true when the session must end (off-air observed
+// within one chunk, or ctx done). Off-air is checked on every tick right
+// after writing that tick's chunk, so it takes effect within ~250ms rather
+// than waiting for the track to finish.
+func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, samplesFed *int64, tick, republish <-chan time.Time, entry Entry) (bool, error) {
 	buf := make([]byte, chunkBytes)
 	for {
 		select {
@@ -246,11 +280,13 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, track library.Track
 				}
 				*samplesFed += int64(n / 4) // 4 bytes per stereo frame
 			}
+			// Off-air check on EVERY tick (not just at track end): the
+			// operator's flip must take effect within ~one chunk, not
+			// after the whole track finishes.
+			if st, serr := f.d.Store.GetStation(ctx); serr == nil && !st.OnAir {
+				return true, nil
+			}
 			if rerr != nil { // EOF/short read = track finished
-				// check off-air quickly between tracks (also caught at boundary)
-				if st, serr := f.d.Store.GetStation(ctx); serr == nil && !st.OnAir {
-					return true, nil
-				}
 				return false, nil
 			}
 		}
