@@ -137,8 +137,10 @@ func (f *Feeder) autoOffAir(ctx context.Context) error {
 	return nil
 }
 
-// RunSession broadcasts until off-air or ctx cancellation. resumeOffset
-// handling lives in Task 7; this core loop starts every session fresh.
+// RunSession broadcasts until off-air or ctx cancellation. An encoder crash
+// (Session.Done() delivering a non-nil error) does NOT end the session: a
+// new session dir + encoder is started in place and the current track is
+// resumed at its aired offset — see the crash-resume block below.
 func (f *Feeder) RunSession(ctx context.Context) error {
 	// Per-session epoch: captured before any of MkdirAll/Encoder.Start/
 	// sessionDir.Store, so callers can synchronize on SessionDir() != ""
@@ -150,11 +152,13 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// Registered right after MkdirAll succeeds (not after Encoder.Start) so a
-	// subsequent encoder-start failure doesn't leak the session dir.
-	// RemoveAll is idempotent, so this is the ONLY removal of dir — the
-	// on-air-exit defer below no longer calls it separately.
-	defer os.RemoveAll(dir)
+	// Captured by closure (not by value) because a crash-resume mid-session
+	// swaps `dir` to a fresh session directory; this defer must clean up
+	// whichever dir is current when RunSession returns, not the original
+	// one. RemoveAll is idempotent, and every crash-resume swap already
+	// removes the OLD dir itself (see below), so this defer only ever has
+	// the final dir left to reclaim.
+	defer func() { os.RemoveAll(dir) }()
 
 	sess, err := f.d.Encoder.Start(ctx, dir)
 	if err != nil {
@@ -189,7 +193,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// that fails to fetch/decode must never be logged or published as
 		// now-playing — it never aired, and doing so would poison the
 		// sample-clock resume anchor with a track nobody heard.
-		rd, cleanup, openSkip, err := f.openTrack(ctx, track)
+		rd, cleanup, openSkip, err := f.openTrack(ctx, track, 0)
 		if err != nil {
 			return err
 		}
@@ -216,26 +220,98 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 		}
 
-		stopTrack, err := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish, entry)
-		cleanup()
-		if err != nil {
-			return err
+		// trackStartSamples anchors this track's aired offset: on a crash
+		// mid-track, offset = (samplesFed at crash - trackStartSamples)/48000.
+		// It is fixed once per track (not per crash-restart), so repeated
+		// crashes on the same track keep computing offset from the track's
+		// true start, not from the previous restart point.
+		trackStartSamples := samplesFed
+		crashRestarts := 0
+		stopSession := false
+	feedTrack:
+		for {
+			stopTrack, crashed, aerr := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish, entry)
+			if !crashed {
+				cleanup()
+				if aerr != nil {
+					return aerr
+				}
+				stopSession = stopTrack
+				break
+			}
+
+			// Encoder crashed: the reader tied to the dead session is done;
+			// a fresh encoder session is required before we can do anything
+			// else — including giving up on this track, since the NEXT
+			// track also needs a live sess.
+			cleanup()
+			crashRestarts++
+			newDir, newSess, rerr := f.restartSession(ctx, dir)
+			if rerr != nil {
+				return rerr
+			}
+			dir, sess = newDir, newSess
+
+			if crashRestarts > 3 {
+				f.d.Logger.Error("crash-resume attempts exhausted; skipping track",
+					"yt_id", track.YTID, "restarts", crashRestarts-1)
+				break feedTrack
+			}
+
+			offsetS := float64(samplesFed-trackStartSamples) / 48000
+			// Assignment, not `:=` — rd/cleanup/openSkip are the SAME
+			// variables read at the top of this loop and at the end of the
+			// outer per-track block; `:=` here would shadow them inside
+			// just this iteration's block and the reopened reader would
+			// never actually be fed (classic for-loop redeclaration trap).
+			var oerr error
+			rd, cleanup, openSkip, oerr = f.openTrack(ctx, track, offsetS)
+			if oerr != nil {
+				return oerr
+			}
+			if openSkip {
+				f.d.Logger.Error("resume reopen failed; skipping track", "yt_id", track.YTID)
+				break feedTrack
+			}
 		}
 		prevYTID = track.YTID
-		if stopTrack {
+		if stopSession {
 			return nil
 		}
 	}
 }
 
-// openTrack fetches the artifact and opens the decoder for track, BEFORE any
-// air-log entry or publish happens for it. skip=true (err=nil) means
-// fetch/decode failed for THIS track specifically — already logged; the
-// caller advances past it and re-runs the boundary without announcing
+// restartSession starts a fresh encoder session after the previous one
+// crashed (Session.Done() delivered a non-nil error). The new session dir is
+// created and its encoder started, then f.sessionDir is atomically swapped
+// to it, and ONLY THEN is oldDir removed — sessionDir is an atomic.Value
+// read concurrently (e.g. by the HLS handler), so a request racing the swap
+// must always see either the old, still-intact dir or the new one, never a
+// dir mid-deletion.
+func (f *Feeder) restartSession(ctx context.Context, oldDir string) (dir string, sess Session, err error) {
+	dir = filepath.Join(f.d.Dir, fmt.Sprintf("session-%d", f.seq.Add(1)))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, err
+	}
+	sess, err = f.d.Encoder.Start(ctx, dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", nil, err
+	}
+	f.sessionDir.Store(dir)
+	_ = os.RemoveAll(oldDir)
+	return dir, sess, nil
+}
+
+// openTrack fetches the artifact and opens the decoder for track at offsetS
+// seconds in (0 for a fresh track; >0 when re-opening after a crash-resume),
+// BEFORE any air-log entry or publish happens for it. skip=true (err=nil)
+// means fetch/decode failed for THIS track specifically — already logged;
+// the caller advances past it and re-runs the boundary without announcing
 // anything. err != nil is a fatal, session-ending error (e.g. can't even
 // create the fetch scratch dir). On success, cleanup must be called exactly
 // once, after the caller is done reading from rd.
-func (f *Feeder) openTrack(ctx context.Context, track library.Track) (rd io.ReadCloser, cleanup func(), skip bool, err error) {
+func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS float64) (rd io.ReadCloser, cleanup func(), skip bool, err error) {
 	tmp, err := os.MkdirTemp(f.d.Dir, "fetch-*")
 	if err != nil {
 		return nil, nil, false, err
@@ -246,7 +322,7 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track) (rd io.Read
 		f.d.Logger.Error("artifact fetch failed; skipping track", "yt_id", track.YTID, "err", ferr)
 		return nil, nil, true, nil
 	}
-	rd, derr := f.d.Decoder.Open(ctx, path, Loudness{I: track.InputI, TP: track.InputTP, LRA: track.InputLRA}, 0)
+	rd, derr := f.d.Decoder.Open(ctx, path, Loudness{I: track.InputI, TP: track.InputTP, LRA: track.InputLRA}, offsetS)
 	if derr != nil {
 		_ = os.RemoveAll(tmp)
 		f.d.Logger.Error("decoder open failed; skipping track", "yt_id", track.YTID, "err", derr)
@@ -255,19 +331,51 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track) (rd io.Read
 	return rd, func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }, false, nil
 }
 
+// ResumeOffset computes how far into e the broadcast is at `now`. expired
+// means the track already finished (resume at the next boundary instead).
+// Negative skew (now before StartedAt) clamps to an offset of 0 rather than
+// going negative. Pure and side-effect free — also used by the boot resume
+// path (Task 9).
+func ResumeOffset(e Entry, now time.Time) (offsetS float64, expired bool) {
+	off := now.Sub(e.StartedAt).Seconds()
+	if off < 0 {
+		return 0, false
+	}
+	if off >= float64(e.DurationS) {
+		return 0, true
+	}
+	return off, false
+}
+
 // airTrack feeds one track's already-open PCM reader, paced one chunk per
-// clock tick. Returns stop=true when the session must end (off-air observed
-// within one chunk, or ctx done). Off-air is checked on every tick right
-// after writing that tick's chunk, so it takes effect within ~250ms rather
-// than waiting for the track to finish.
-func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, samplesFed *int64, tick, republish <-chan time.Time, entry Entry) (bool, error) {
+// clock tick. Returns:
+//   - stop=true: the session must end entirely (ctx cancelled, or off-air
+//     observed within one chunk). No resume, no next track.
+//   - crashed=true: the encoder session died (Session.Done() delivered a
+//     non-nil error). The caller must start a fresh encoder session and
+//     resume this SAME track at its aired offset — see RunSession's
+//     crash-resume loop. A Done() close with a NIL error (e.g. our own
+//     Stop() during shutdown) is treated like ctx.Done — stop=true,
+//     crashed=false — never as a crash, since only error values signal an
+//     actual encoder failure.
+//   - err != nil: a fatal, session-ending error unrelated to crash-resume
+//     (e.g. an encoder stdin write failure).
+//
+// When none of the above, the track finished normally (EOF). Off-air is
+// checked on every tick right after writing that tick's chunk, so an
+// operator's flip takes effect within ~250ms rather than waiting for the
+// track to finish.
+func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, samplesFed *int64, tick, republish <-chan time.Time, entry Entry) (stop, crashed bool, err error) {
 	buf := make([]byte, chunkBytes)
 	for {
 		select {
 		case <-ctx.Done():
-			return true, nil
-		case err := <-sess.Done():
-			return false, fmt.Errorf("encoder exited: %w", err) // Task 7 turns this into resume
+			return true, false, nil
+		case derr := <-sess.Done():
+			if derr == nil { // clean close (our own Stop) — not a crash
+				return true, false, nil
+			}
+			return false, true, nil
 		case <-republish:
 			n, _ := f.d.Listeners.Count(ctx)
 			f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
@@ -276,7 +384,7 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, sampl
 			n, rerr := io.ReadFull(rd, buf)
 			if n > 0 {
 				if _, werr := sess.Stdin().Write(buf[:n]); werr != nil {
-					return false, fmt.Errorf("encoder write: %w", werr)
+					return false, false, fmt.Errorf("encoder write: %w", werr)
 				}
 				*samplesFed += int64(n / 4) // 4 bytes per stereo frame
 			}
@@ -284,10 +392,10 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, sampl
 			// operator's flip must take effect within ~one chunk, not
 			// after the whole track finishes.
 			if st, serr := f.d.Store.GetStation(ctx); serr == nil && !st.OnAir {
-				return true, nil
+				return true, false, nil
 			}
 			if rerr != nil { // EOF/short read = track finished
-				return false, nil
+				return false, false, nil
 			}
 		}
 	}

@@ -106,6 +106,64 @@ func (e *fakeEncoder) Start(_ context.Context, _ string) (Session, error) {
 	return s, nil
 }
 
+func (e *fakeEncoder) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.sessions)
+}
+
+func (s *fakeSession) fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		s.done <- err
+		close(s.done)
+	}
+}
+
+// crashingEncoder auto-fails every session with index < aliveFrom right
+// after Start, driving the crash-resume cap deterministically without
+// having to pump the clock through each failed attempt (the crash is
+// observed via the already-closed Done() channel the instant airTrack's
+// select runs, before any tick fires).
+type crashingEncoder struct {
+	fakeEncoder
+	aliveFrom int
+}
+
+func (e *crashingEncoder) Start(ctx context.Context, dir string) (Session, error) {
+	sess, err := e.fakeEncoder.Start(ctx, dir)
+	if err != nil {
+		return sess, err
+	}
+	if e.count()-1 < e.aliveFrom {
+		sess.(*fakeSession).fail(errors.New("simulated crash"))
+	}
+	return sess, nil
+}
+
+// offsetRecordingDecoder wraps fakeDecoder to record the offsetS passed to
+// Open, so crash-resume tests can assert the reader was reopened at the
+// aired offset.
+type offsetRecordingDecoder struct {
+	mu     sync.Mutex
+	inner  fakeDecoder
+	offset float64
+}
+
+func (d *offsetRecordingDecoder) Open(ctx context.Context, path string, l Loudness, offsetS float64) (io.ReadCloser, error) {
+	d.mu.Lock()
+	d.offset = offsetS
+	d.mu.Unlock()
+	return d.inner.Open(ctx, path, l, offsetS)
+}
+func (d *offsetRecordingDecoder) lastOffset() float64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.offset
+}
+
 type publishedFrame struct {
 	topic string
 	value string
