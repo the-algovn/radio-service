@@ -80,6 +80,44 @@ func TestTakeFreshBacksellResetsCounter(t *testing.T) {
 	require.Equal(t, 0, dr.finishedSinceBacksell, "hand-off resets the backsell counter")
 }
 
+// TestTakeFreshAcrossPrecisionLoss covers the CRITICAL fix: the anchor
+// round-trips through Postgres TIMESTAMPTZ (microsecond precision) while the
+// feeder's entry carries the sample clock's nanoseconds — a clip anchored at
+// the microsecond-truncated timestamp must still match the nanosecond-precise
+// justFinished entry within the 1s tolerance.
+func TestTakeFreshAcrossPrecisionLoss(t *testing.T) {
+	dr, _ := newCoreDirector(t, 2, 0)
+	ts := time.Date(2026, 7, 22, 21, 0, 0, 123456789, time.UTC)
+	dr.TrackFinished(live.Entry{YTID: "x"})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: ts.Truncate(time.Microsecond)})
+	c, ok := dr.Take(live.Entry{YTID: "a", StartedAt: ts})
+	require.True(t, ok)
+	require.Equal(t, p, c.Path)
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	require.Nil(t, dr.slot)
+	require.Equal(t, 0, dr.finishedSinceBacksell, "hand-off resets the backsell counter")
+}
+
+// TestTakeStaleSameYTIDDifferentAiring covers the other half of the OR: same
+// YTID as the anchor, but a StartedAt two minutes later — a different airing
+// of the same track, well outside the 1s tolerance — must still be discarded
+// as stale.
+func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
+	dr, _ := newCoreDirector(t, 2, 0)
+	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
+	dr.TrackFinished(live.Entry{YTID: "x"})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
+	_, ok := dr.Take(live.Entry{YTID: "a", StartedAt: anchor.Add(2 * time.Minute)})
+	require.False(t, ok)
+	_, err := os.Stat(p)
+	require.True(t, os.IsNotExist(err), "stale clip file must be deleted inside Take")
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	require.Nil(t, dr.slot, "slot cleared — no livelock on the slot-empty gate")
+	require.Equal(t, 1, dr.finishedSinceBacksell, "stale discard does NOT reset the counter")
+}
+
 func TestTakeStaleBacksellDeletesAndClears(t *testing.T) {
 	dr, _ := newCoreDirector(t, 2, 0)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)

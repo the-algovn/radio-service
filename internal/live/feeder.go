@@ -284,6 +284,12 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	}
 
 	var lastFinished Entry // zero until the first music item ends this session
+	// awaitMusic enforces at most one talk break per seam: a music item must
+	// air between any two talk breaks. Set whenever Take hands over a clip,
+	// regardless of how the clip airing ends (aired, crashed, or failed
+	// open); cleared only once a music item has actually finished airing —
+	// see the TrackFinished call at the loop tail below.
+	awaitMusic := false
 
 	dir := filepath.Join(f.d.Dir, fmt.Sprintf("session-%d", f.seq.Add(1)))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -324,8 +330,9 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			// Talk break first — take-if-ready, never waits (v2). Placed
 			// before boundary() so a due break airs at the seam between
 			// tracks; lastFinished carries the backsell freshness anchor.
-			if f.d.Talk != nil {
+			if f.d.Talk != nil && !awaitMusic {
 				if clip, ok := f.d.Talk.Take(lastFinished); ok {
+					awaitMusic = true
 					stopClip, crashed, cerr := f.airClip(ctx, sess, clip, &samplesFed, tick, republish)
 					if cerr != nil {
 						return cerr
@@ -472,6 +479,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			f.d.Talk.TrackFinished(entry)
 		}
 		lastFinished = entry
+		awaitMusic = false // a music item just aired — the seam guard resets
 	}
 }
 

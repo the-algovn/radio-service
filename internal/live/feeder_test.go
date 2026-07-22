@@ -866,3 +866,40 @@ func TestTalkClipCrashSkipsRemainder(t *testing.T) {
 	// it is the one that proves music continued after the crash.
 	require.Contains(t, frames[len(frames)-2], `"kind":"track"`)
 }
+
+// TestAtMostOneTalkBreakPerSeam covers the IMPORTANT fix: at most one talk
+// break per seam. A talk source with two clips ready up-front (minFinished
+// left at its zero value, so nothing gates Take) must NOT air them
+// back-to-back — the feeder's awaitMusic guard forces a boundary() pick
+// between them, so the now-playing frames strictly alternate dj/track/dj.
+func TestAtMostOneTalkBreakPerSeam(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	clip1 := writeClipFile(t, t.TempDir(), chunkBytes*2)
+	clip2 := writeClipFile(t, t.TempDir(), chunkBytes*2)
+	talk := &fakeTalkSource{clips: []Clip{
+		{Path: clip1, DurationS: 0.5, Kind: ClipStationID},
+		{Path: clip2, DurationS: 0.5, Kind: ClipStationID},
+	}}
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	f.d.Talk = talk
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 3)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	frames := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, frames[0], `"kind":"dj"`)
+	require.Contains(t, frames[1], `"kind":"track"`)
+	require.Contains(t, frames[2], `"kind":"dj"`)
+
+	for i := 1; i < len(frames); i++ {
+		require.False(t, strings.Contains(frames[i-1], `"kind":"dj"`) && strings.Contains(frames[i], `"kind":"dj"`),
+			"two consecutive dj frames at %d,%d: %q, %q", i-1, i, frames[i-1], frames[i])
+	}
+}

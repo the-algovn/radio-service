@@ -123,8 +123,7 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		return live.Clip{}, false
 	}
 	c := *dr.slot
-	if c.Kind == live.ClipBacksell &&
-		(c.AnchorYTID != justFinished.YTID || !c.AnchorStartedAt.Equal(justFinished.StartedAt)) {
+	if c.Kind == live.ClipBacksell && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
 		dr.slot = nil
 		_ = os.Remove(c.Path)
 		dr.d.Logger.Info("stale backsell discarded", "anchor_ytid", c.AnchorYTID, "finished_ytid", justFinished.YTID)
@@ -137,6 +136,26 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		dr.finishedSinceBacksell = 0
 	}
 	return c, true
+}
+
+// anchorFreshTolerance bounds the StartedAt comparison in anchorFresh.
+const anchorFreshTolerance = time.Second
+
+// anchorFresh reports whether the clip was prepared against the entry that
+// just finished. StartedAt is compared with a 1s tolerance: the anchor
+// round-trips through Postgres TIMESTAMPTZ (microsecond precision) while the
+// feeder's entry carries the sample clock's nanoseconds — exact equality
+// would discard every backsell on a PG-backed deployment. Two airings of the
+// same track are separated by at least a track length, so 1s is safe.
+func anchorFresh(anchorYTID string, anchorStartedAt time.Time, justFinished live.Entry) bool {
+	if anchorYTID != justFinished.YTID {
+		return false
+	}
+	delta := anchorStartedAt.Sub(justFinished.StartedAt)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= anchorFreshTolerance
 }
 
 // dueKindLocked picks the due segment kind ("" = none). Caller holds mu.

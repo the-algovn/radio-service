@@ -23,8 +23,10 @@ type RenderFunc func(ctx context.Context, inPath, outPath string) (durationS flo
 const (
 	bytesPerSecond = 192000 // s16le 48kHz stereo — the live feed contract
 	// silenceFloorLUFS: below this measured integrated loudness the input is
-	// effectively silence (voice.Fake's 1s WAV measures ~-70); linear
-	// loudnorm against -inf/-70 measurements is undefined, so plain-decode.
+	// effectively silence (voice.Fake's 1s WAV of digital silence measures
+	// -inf — ffmpeg's loudnorm JSON prints "-inf" for input_i, which
+	// strconv.ParseFloat parses as -Inf); linear loudnorm against an
+	// -inf/-70 measurement is undefined, so plain-decode instead.
 	silenceFloorLUFS = -50.0
 )
 
