@@ -66,6 +66,12 @@ type Feeder struct {
 	// read only within that same call, so it needs no synchronization of
 	// its own.
 	anchor time.Time
+	// skip is the operator's skip-current-track flag (v1.2). Ephemeral by
+	// design: set by RequestSkip (any goroutine), consumed by airTrack's
+	// next tick as "track finished", and cleared at session start so a
+	// skip can never go stale across off-air. Single replica — no
+	// persistence.
+	skip atomic.Bool
 }
 
 func NewFeeder(d FeederDeps) *Feeder {
@@ -81,6 +87,10 @@ func NewFeeder(d FeederDeps) *Feeder {
 }
 
 func (f *Feeder) SessionDir() string { return f.sessionDir.Load().(string) }
+
+// RequestSkip asks the currently-airing track to end at the next tick — a
+// no-op when nothing consumes it (the flag is reset at session start).
+func (f *Feeder) RequestSkip() { f.skip.Store(true) }
 
 func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 	if f.d.Producer == nil {
@@ -253,6 +263,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	// StartedAt), but that happens before any of the dir/encoder setup, so
 	// the invariant holds for anyone observing SessionDir() != "".
 	f.anchor = f.d.Clock.Now()
+	f.skip.Store(false) // a skip requested while off-air must not cut the next session's first track
 
 	var samplesFed int64 // 4 bytes per stereo sample-frame at s16le
 	resume := f.findBootResume(ctx)
@@ -533,6 +544,9 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, sampl
 			// after the whole track finishes.
 			if st, serr := f.d.Store.GetStation(ctx); serr == nil && !st.OnAir {
 				return true, false, nil
+			}
+			if f.skip.CompareAndSwap(true, false) {
+				return false, false, nil // operator skip: treat as track finished
 			}
 			if rerr != nil { // EOF/short read = track finished
 				return false, false, nil

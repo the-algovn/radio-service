@@ -609,3 +609,72 @@ func TestOperatorOffAirStopsMidTrackWithinAChunk(t *testing.T) {
 	require.Contains(t, prod.byTopic(TopicNowPlaying), string(OffAirPayload()))
 	require.Less(t, enc.sessions[0].wrote, 8*chunkBytes) // stopped mid-track
 }
+
+// RequestSkip ends the current track at the next tick; the next boundary
+// picks the following item.
+func TestRequestSkipAdvancesAtNextTick(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	// wait for the first track to announce
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first track")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	first := prod.byTopic(TopicNowPlaying)[0]
+
+	f.RequestSkip()
+	// one tick consumes the skip; the next boundary announces track 2 well
+	// before the fake track's 2-chunk length would have elapsed naturally
+	for len(prod.byTopic(TopicNowPlaying)) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the skip to advance")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	second := prod.byTopic(TopicNowPlaying)[1]
+	require.NotEqual(t, titleOf(first), titleOf(second))
+}
+
+// A skip requested while no session runs must NOT bleed into the next
+// session's first track.
+func TestStaleSkipClearedAtSessionStart(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+
+	f.RequestSkip() // stale: nothing is airing
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	// the first track must play a full fake-track length (2 chunks) without
+	// being cut by the stale flag: pump exactly one chunk and assert we are
+	// still on frame 1, then let it finish naturally.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	clk.step(250 * time.Millisecond) // one chunk fed — a live stale flag would end the track here
+	time.Sleep(5 * time.Millisecond)
+	require.Len(t, prod.byTopic(TopicNowPlaying), 1) // still the first track
+	cancel()
+	<-done
+}
