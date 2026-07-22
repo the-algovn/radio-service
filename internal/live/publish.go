@@ -3,11 +3,13 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 // SSE topics — the gateway routes these to channels radio.nowplaying /
@@ -100,4 +102,48 @@ func QueuePayload(items []playlist.Item, currentYTID string) []byte {
 	}
 	b, _ := json.Marshal(out)
 	return b
+}
+
+type requestQueueItemJSON struct {
+	Title           string `json:"title"`
+	Artist          string `json:"artist,omitempty"`
+	ThumbnailURL    string `json:"thumbnailUrl,omitempty"`
+	HasDedication   bool   `json:"hasDedication"`
+	Source          string `json:"source"`
+	RequestedByName string `json:"requestedByName,omitempty"`
+}
+
+// RequestQueuePayload is the radio.queue SSE frame: the pending request
+// queue in air order (listener FIFO, then AI FIFO), camelCase raw JSON.
+// Empty queue → "[]" — shuffle territory is deliberately not previewed.
+func RequestQueuePayload(items []request.Item) []byte {
+	out := make([]requestQueueItemJSON, 0, len(items))
+	for _, it := range items {
+		out = append(out, requestQueueItemJSON{
+			Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
+			Source: it.Source, RequestedByName: it.DisplayName,
+		})
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
+// PublishQueueSnapshot reads the pending queue and publishes it — the one
+// shared publisher used by the feeder, the ingest worker, the programmer
+// and RequestTrack. nil producer = feeds disabled (dev without Kafka).
+func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, logger *slog.Logger) {
+	if p == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	items, err := reqs.Pending(ctx)
+	if err != nil {
+		logger.Error("queue read for snapshot failed", "err", err)
+		return
+	}
+	if err := p.Publish(ctx, TopicQueue, RequestQueuePayload(items)); err != nil {
+		logger.Error("queue snapshot publish failed", "err", err)
+	}
 }

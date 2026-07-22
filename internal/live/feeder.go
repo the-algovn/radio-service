@@ -2,10 +2,10 @@ package live
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 const (
@@ -36,6 +37,7 @@ func RealClock() Clock { return realClock{} }
 
 type FeederDeps struct {
 	Store     playlist.Store
+	Requests  request.Store // the play queue; boundary priority 1–2
 	Library   library.Library
 	Log       AirLog
 	Listeners Listeners
@@ -46,6 +48,8 @@ type FeederDeps struct {
 	Clock     Clock
 	Dir       string
 	Logger    *slog.Logger
+	// Rand picks the shuffle-bed track (0 <= result < n). nil → math/rand.Intn.
+	Rand func(n int) int
 }
 
 type Feeder struct {
@@ -68,6 +72,9 @@ func NewFeeder(d FeederDeps) *Feeder {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
+	if d.Rand == nil {
+		d.Rand = rand.Intn
+	}
 	f := &Feeder{d: d}
 	f.sessionDir.Store("")
 	return f
@@ -84,63 +91,103 @@ func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 	}
 }
 
-// boundary decides what airs next. skip=true means the chosen item vanished
-// from the library — the caller advances prevYTID past it and re-runs the
-// boundary. stop=true ends the session (operator off-air or §10).
-func (f *Feeder) boundary(ctx context.Context, prevYTID string) (next playlist.Item, track library.Track, skip, stop bool, err error) {
-	st, err := f.d.Store.GetStation(ctx)
-	if err != nil {
-		return playlist.Item{}, library.Track{}, false, false, err
-	}
-	if !st.OnAir {
-		return playlist.Item{}, library.Track{}, false, true, nil // operator stopped us
-	}
-	if st.ActivePlaylistID == "" {
-		return playlist.Item{}, library.Track{}, false, true, f.autoOffAir(ctx) // §10
-	}
-	_, items, err := f.d.Store.Get(ctx, st.ActivePlaylistID)
-	if errors.Is(err, playlist.ErrNotFound) {
-		return playlist.Item{}, library.Track{}, false, true, f.autoOffAir(ctx) // §10
-	}
-	if err != nil {
-		return playlist.Item{}, library.Track{}, false, false, err
-	}
-	if len(items) == 0 {
-		return playlist.Item{}, library.Track{}, false, true, f.autoOffAir(ctx) // §10
-	}
-	// next item after prev, wrapping; unknown prev (playlist swap) → first.
-	next = items[0]
-	for i, it := range items {
-		if it.YTID == prevYTID {
-			next = items[(i+1)%len(items)]
-			break
-		}
-	}
-	track, found, err := f.d.Library.Get(ctx, next.YTID)
-	if err != nil {
-		return playlist.Item{}, library.Track{}, false, false, err
-	}
-	if !found {
-		// library row vanished between store read and here — skip it.
-		return next, library.Track{}, true, false, nil
-	}
-	return next, track, false, false, nil
+// airItem is boundary's pick: the library track to air and, when it came
+// from the request queue, the request id to mark aired/failed.
+type airItem struct {
+	track     library.Track
+	requestID string
 }
 
-// autoOffAir persists off-air (§10 engine-side closure) and reports the
-// sentinel; store errors are logged, not fatal — the session ends either way.
+const shuffleWindowCap = 50
+
+// boundary decides what airs next (spec §4.1): oldest ready listener
+// request → oldest ready AI pick → library no-repeat shuffle. skip=true
+// means the chosen item can't air (vanished track — already marked failed
+// when it was a request); the caller re-runs the boundary. stop=true ends
+// the session (operator off-air, or empty library → auto off-air).
+func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
+	st, err := f.d.Store.GetStation(ctx)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	if !st.OnAir {
+		return airItem{}, false, true, nil // operator stopped us
+	}
+
+	req, found, err := f.d.Requests.NextReady(ctx)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	if found {
+		track, ok, err := f.d.Library.Get(ctx, req.YTID)
+		if err != nil {
+			return airItem{}, false, false, err
+		}
+		if !ok {
+			if merr := f.d.Requests.MarkFailed(ctx, req.ID, "track vanished from library"); merr != nil {
+				f.d.Logger.Error("mark request failed", "id", req.ID, "err", merr)
+			}
+			return airItem{}, true, false, nil
+		}
+		return airItem{track: track, requestID: req.ID}, false, false, nil
+	}
+
+	// Shuffle bed: uniform over the library minus the last-N aired.
+	ids, err := f.d.Library.AllIDs(ctx)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	if len(ids) == 0 {
+		return airItem{}, false, true, f.autoOffAir(ctx) // nothing to air at all
+	}
+	window := len(ids) / 2
+	if window > shuffleWindowCap {
+		window = shuffleWindowCap
+	}
+	exclude := map[string]bool{}
+	if window > 0 {
+		recent, err := f.d.Log.RecentYTIDs(ctx, window)
+		if err != nil {
+			return airItem{}, false, false, err
+		}
+		for _, id := range recent {
+			exclude[id] = true
+		}
+	}
+	pool := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !exclude[id] {
+			pool = append(pool, id)
+		}
+	}
+	if len(pool) == 0 {
+		pool = ids // tiny library: the window covered everything
+	}
+	pick := pool[f.d.Rand(len(pool))]
+	track, ok, err := f.d.Library.Get(ctx, pick)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	if !ok {
+		return airItem{}, true, false, nil // vanished between AllIDs and Get
+	}
+	return airItem{track: track}, false, false, nil
+}
+
+// autoOffAir persists off-air (engine-side closure) and reports the sentinel;
+// store errors are logged, not fatal — the session ends either way.
 func (f *Feeder) autoOffAir(ctx context.Context) error {
 	if _, err := f.d.Store.GoOffAir(ctx); err != nil {
 		f.d.Logger.Error("auto off-air persist failed", "err", err)
 	}
-	f.d.Logger.Info("auto off-air: active playlist empty or missing")
+	f.d.Logger.Info("auto off-air: library is empty")
 	return nil
 }
 
 // bootResumeEntry is a boot-resume candidate found by findBootResume: the
-// air log's latest entry, still mid-flight and still scheduled in the
-// active playlist, that a fresh RunSession should air first (at its
-// already-elapsed offset) instead of starting fresh at the top of rotation.
+// air log's latest entry, still mid-flight and whose track still exists in
+// the library, that a fresh RunSession should air first (at its
+// already-elapsed offset) instead of starting fresh at a shuffle pick.
 type bootResumeEntry struct {
 	track   library.Track
 	entry   Entry
@@ -152,11 +199,13 @@ type bootResumeEntry struct {
 // time (not f.d.Clock): this is a question about how much actual time has
 // passed since the process last wrote an air-log entry (e.g. across a
 // restart), independent of the injected Clock that only paces this
-// session's own encoder ticks. Every failure mode here (log/store/library
-// errors, no active playlist, the track no longer scheduled, or an expired
-// entry) is treated as "no resume" rather than fatal — RunSession's first
-// real boundary() call right after this hits the same store/library and
-// will surface any persistent problem through its own (fatal) error path.
+// session's own encoder ticks. A resume candidate needs only a fresh,
+// unexpired air-log entry whose track still exists in the library —
+// playlists are curation tools and no longer gate what airs. Every failure
+// mode here (log/library errors or an expired entry) is treated as "no
+// resume" rather than fatal — RunSession's first real boundary() call right
+// after this hits the same store/library and will surface any persistent
+// problem through its own (fatal) error path.
 func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	entry, found, err := f.d.Log.Latest(ctx)
 	if err != nil {
@@ -168,31 +217,6 @@ func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	}
 	offsetS, expired := ResumeOffset(entry, time.Now())
 	if expired {
-		return nil
-	}
-	st, err := f.d.Store.GetStation(ctx)
-	if err != nil {
-		f.d.Logger.Error("boot resume: station read failed", "err", err)
-		return nil
-	}
-	if st.ActivePlaylistID == "" {
-		return nil
-	}
-	_, items, err := f.d.Store.Get(ctx, st.ActivePlaylistID)
-	if err != nil {
-		if !errors.Is(err, playlist.ErrNotFound) {
-			f.d.Logger.Error("boot resume: playlist read failed", "err", err)
-		}
-		return nil
-	}
-	inPlaylist := false
-	for _, it := range items {
-		if it.YTID == entry.YTID {
-			inPlaylist = true
-			break
-		}
-	}
-	if !inPlaylist {
 		return nil
 	}
 	track, ok, err := f.d.Library.Get(ctx, entry.YTID)
@@ -250,10 +274,6 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		f.publish(context.WithoutCancel(ctx), TopicNowPlaying, OffAirPayload())
 	}()
 
-	prevYTID := ""
-	if resume != nil {
-		prevYTID = resume.entry.YTID
-	}
 	tick := f.d.Clock.Tick(250 * time.Millisecond)
 	republish := f.d.Clock.Tick(republishEvery)
 
@@ -261,23 +281,23 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		var track library.Track
 		var entry Entry
 		var offsetS float64
+		requestID := ""
 		resumed := resume != nil
 		if resumed {
 			track, entry, offsetS = resume.track, resume.entry, resume.offsetS
 			resume = nil
 		} else {
-			next, tr, skip, stop, err := f.boundary(ctx, prevYTID)
+			item, skip, stop, err := f.boundary(ctx)
 			if stop || ctx.Err() != nil {
 				return nil
 			}
 			if err != nil {
 				return err
 			}
-			if skip { // vanished from library: advance past it, no publish
-				prevYTID = next.YTID
+			if skip { // vanished track: boundary already handled it
 				continue
 			}
-			track = tr
+			track, requestID = item.track, item.requestID
 		}
 
 		// Open the artifact + decoder BEFORE announcing anything: a track
@@ -289,7 +309,11 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			return err
 		}
 		if openSkip {
-			prevYTID = track.YTID // advance past the track that failed to open
+			if requestID != "" {
+				if err := f.d.Requests.MarkFailed(ctx, requestID, "artifact failed to open"); err != nil {
+					f.d.Logger.Error("mark request failed", "id", requestID, "err", err)
+				}
+			}
 			continue
 		}
 
@@ -316,15 +340,17 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				f.d.Logger.Error("air log append failed", "err", err)
 			}
 			trackStartSamples = samplesFed
+			// Mark the request aired only now: openTrack succeeded and the
+			// air-log entry is written, so this track genuinely aired.
+			if requestID != "" {
+				if err := f.d.Requests.MarkAired(ctx, requestID, entry.StartedAt); err != nil {
+					f.d.Logger.Error("mark request aired", "id", requestID, "err", err)
+				}
+			}
 		}
 		n, _ := f.d.Listeners.Count(ctx)
 		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
-		// queue: re-read items at publish time for freshness
-		if st, err := f.d.Store.GetStation(ctx); err == nil && st.ActivePlaylistID != "" {
-			if _, items, err := f.d.Store.Get(ctx, st.ActivePlaylistID); err == nil {
-				f.publish(ctx, TopicQueue, QueuePayload(items, track.YTID))
-			}
-		}
+		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Logger)
 
 		crashRestarts := 0
 		stopSession := false
@@ -377,7 +403,6 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				break feedTrack
 			}
 		}
-		prevYTID = track.YTID
 		if stopSession {
 			return nil
 		}

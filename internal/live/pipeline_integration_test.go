@@ -17,6 +17,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 // makeTone writes an n-second 440Hz sine m4a for the pipeline to chew on.
@@ -57,7 +58,7 @@ func TestRealPipelineProducesLiveHLS(t *testing.T) {
 	require.NoError(t, err)
 
 	f := NewFeeder(FeederDeps{
-		Store: st, Library: lib,
+		Store: st, Requests: request.NewMemStore(), Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, _, _ string) (string, error) { return tone, nil },
 		Decoder: NewFFDecoder(), Encoder: NewFFEncoder(),

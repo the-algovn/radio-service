@@ -9,9 +9,9 @@ import (
 )
 
 func TestEngineStartsSessionOnPoke(t *testing.T) {
-	store, lib := newFixture(t, "a", "b") // on-air fixture
+	store, lib, reqs := newFixture(t, "a", "b") // on-air fixture
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(store, lib, enc, prod, clk, t.TempDir())
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 	e := NewEngine(f, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -30,11 +30,11 @@ func TestEngineStartsSessionOnPoke(t *testing.T) {
 }
 
 func TestEngineIdleWhenOffAir(t *testing.T) {
-	store, lib := newFixture(t, "a")
+	store, lib, reqs := newFixture(t, "a")
 	_, err := store.GoOffAir(context.Background())
 	require.NoError(t, err)
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(store, lib, enc, prod, clk, t.TempDir())
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 	e := NewEngine(f, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())

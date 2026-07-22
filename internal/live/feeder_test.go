@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 // --- fakes ---
@@ -191,10 +193,9 @@ func (p *fakeProducer) byTopic(topic string) []string {
 	return out
 }
 
-// fixture: station on-air with playlist tracks a,b (60s each at 48kHz s16le
-// stereo → 11,520,000 bytes; fake tracks are far smaller for test speed —
-// duration comes from the library, bytes from fakeDecoder).
-func newFixture(t *testing.T, ytIDs ...string) (playlist.Store, library.Library) {
+// fixture: station on-air; tracks in the library only (playlists are
+// curation tools now — the engine never reads them). Requests seed per-test.
+func newFixture(t *testing.T, ytIDs ...string) (playlist.Store, library.Library, *request.MemStore) {
 	t.Helper()
 	lib := library.NewMemLibrary()
 	ctx := context.Background()
@@ -204,26 +205,19 @@ func newFixture(t *testing.T, ytIDs ...string) (playlist.Store, library.Library)
 		}))
 	}
 	st := playlist.NewMemStore(lib)
-	p, err := st.Create(ctx, "mix")
+	_, err := st.GoOnAir(ctx)
 	require.NoError(t, err)
-	for _, id := range ytIDs {
-		_, _, err = st.AddTrack(ctx, p.ID, id)
-		require.NoError(t, err)
-	}
-	_, err = st.SetActive(ctx, p.ID)
-	require.NoError(t, err)
-	_, err = st.GoOnAir(ctx)
-	require.NoError(t, err)
-	return st, lib
+	return st, lib, request.NewMemStore()
 }
 
-func newTestFeeder(store playlist.Store, lib library.Library, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
+func newTestFeeder(store playlist.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
 	return NewFeeder(FeederDeps{
-		Store: store, Library: lib,
+		Store: store, Requests: reqs, Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2}, // 2 chunks per track
 		Encoder: enc, Producer: prod, Clock: clk, Dir: dir,
+		Rand: func(int) int { return 0 }, // deterministic shuffle for tests
 	})
 }
 
@@ -242,17 +236,18 @@ func drive(t *testing.T, clk *fakeClock, done <-chan error, maxSteps int) error 
 	return nil
 }
 
-func TestSessionPublishesAndLogsEachTrackThenLoops(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+// Shuffle-only: with a 2-track library the no-repeat window is 1, so the
+// bed alternates a,b,a deterministically regardless of Rand.
+func TestShuffleBedAlternatesWithNoRepeatWindow(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(store, lib, enc, prod, clk, t.TempDir())
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
 	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
 
-	// let it air a→b→a (loop proves wrap-around), then cancel
 	deadline := time.Now().Add(2 * time.Second)
 	for len(prod.byTopic(TopicNowPlaying)) < 3 {
 		if time.Now().After(deadline) {
@@ -270,65 +265,131 @@ func TestSessionPublishesAndLogsEachTrackThenLoops(t *testing.T) {
 	<-done
 
 	nps := prod.byTopic(TopicNowPlaying)
-	require.Contains(t, nps[0], `"title":"t-a"`)
-	require.Contains(t, nps[1], `"title":"t-b"`)
-	require.Contains(t, nps[2], `"title":"t-a"`) // looped
-	require.Contains(t, nps[0], `"listeners":0`)
-	// queue frames: bare arrays, other track first
-	qs := prod.byTopic(TopicQueue)
-	require.True(t, strings.HasPrefix(qs[0], "["))
-	require.Contains(t, qs[0], `"title":"t-b"`)
+	first := nps[0]
+	second := nps[1]
+	require.NotEqual(t, first, second) // window=1 forbids an immediate repeat
+	require.Contains(t, nps[2], titleOf(first))
 }
 
-func TestAutoOffAirWhenActivePlaylistEmpties(t *testing.T) {
-	// Single-track playlist; after track 'a' airs once, delete the library
-	// track — mem store playlists don't cascade, so instead delete the
-	// playlist itself off-air? No: simulate §10 by making Get fail — the
-	// real cascade path is pg-only. Simplest deterministic simulation:
-	// empty the active playlist between boundaries while OFF-air is not
-	// possible on-air via RemoveTrack guard… so use a store wrapper that
-	// reports an empty playlist at the second boundary.
-	store, lib := newFixture(t, "a")
-	wrapped := &emptyAfterFirstBoundary{Store: store}
-	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(wrapped, lib, enc, prod, clk, t.TempDir())
+// titleOf extracts the "title" value from a now-playing frame for
+// alternation assertions without caring which track aired first.
+func titleOf(frame string) string {
+	var v struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal([]byte(frame), &v)
+	return v.Title
+}
 
-	done := make(chan error, 1)
-	go func() { done <- f.RunSession(context.Background()) }()
-	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
-	err := drive(t, clk, done, 100)
+// A ready listener request airs before a ready AI pick, which airs before
+// shuffle; aired requests are marked and leave the queue payload.
+func TestBoundaryPriorityRequestThenAIThenShuffle(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b", "req", "pick")
+	ctx0 := context.Background()
+	aiIt, err := reqs.Create(ctx0, request.Item{Source: request.SourceAI,
+		YTID: "pick", Title: "t-pick", Channel: "c-pick", DurationS: 60, Status: request.StatusReady})
+	require.NoError(t, err)
+	lIt, err := reqs.Create(ctx0, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", DisplayName: "Ngọc", YTID: "req", Title: "t-req", Channel: "c-req",
+		DurationS: 60, Status: request.StatusReady})
 	require.NoError(t, err)
 
-	// §10: session ended by itself, station persisted off-air, sentinel sent
-	st, gerr := store.GetStation(context.Background())
-	require.NoError(t, gerr)
-	require.False(t, st.OnAir)
-	nps := prod.byTopic(TopicNowPlaying)
-	require.Contains(t, nps[len(nps)-1], `"offAir":true`)
-	require.Empty(t, f.SessionDir())
-}
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
 
-// emptyAfterFirstBoundary lets the first boundary read through, then reports
-// the active playlist as empty (simulating the DeleteTrack cascade).
-type emptyAfterFirstBoundary struct {
-	playlist.Store
-	boundaries int
-}
-
-func (w *emptyAfterFirstBoundary) Get(ctx context.Context, id string) (playlist.Summary, []playlist.Item, error) {
-	w.boundaries++
-	if w.boundaries > 1 {
-		s, _, err := w.Store.Get(ctx, id)
-		s.TrackCount = 0
-		return s, nil, err
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
-	return w.Store.Get(ctx, id)
+	cancel()
+	<-done
+
+	nps := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, nps[0], `"title":"t-req"`)  // listener first
+	require.Contains(t, nps[1], `"title":"t-pick"`) // then AI
+	// third frame is shuffle — either library track, never the aired requests
+	require.NotContains(t, nps[2], "t-req")
+	require.NotContains(t, nps[2], "t-pick")
+
+	mine, err := reqs.ByUser(ctx0, "u1", 10)
+	require.NoError(t, err)
+	require.Equal(t, request.StatusAired, mine[0].Status)
+	require.NotNil(t, mine[0].AiredAt)
+	_ = aiIt
+	_ = lIt
+
+	// queue frames: first frame (published at t-req's start) still holds the
+	// AI pick with its source badge; later frames drain to [].
+	qs := prod.byTopic(TopicQueue)
+	require.NotEmpty(t, qs)
+	require.Contains(t, qs[0], `"source":"ai"`)
+	require.Contains(t, qs[0], `"title":"t-pick"`)
+	require.Equal(t, "[]", qs[len(qs)-1])
+}
+
+// A ready request whose track vanished from the library fails and is
+// skipped without airing or being announced.
+func TestVanishedRequestTrackMarksFailed(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	ctx0 := context.Background()
+	it, err := reqs.Create(ctx0, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", YTID: "ghost", Title: "t-ghost", Channel: "c", DurationS: 60,
+		Status: request.StatusReady})
+	require.NoError(t, err)
+
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	require.NotContains(t, prod.byTopic(TopicNowPlaying)[0], "t-ghost")
+	mine, err := reqs.ByUser(ctx0, "u1", 10)
+	require.NoError(t, err)
+	require.Equal(t, request.StatusFailed, mine[0].Status)
+	require.Equal(t, "track vanished from library", mine[0].FailReason)
+	_ = it
+}
+
+// Empty library (the only remaining engine-side closure): auto off-air.
+func TestEmptyLibraryAutoOffAir(t *testing.T) {
+	store, lib, reqs := newFixture(t) // no tracks at all
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+	require.NoError(t, drive(t, clk, done, 100))
+	st, err := store.GetStation(context.Background())
+	require.NoError(t, err)
+	require.False(t, st.OnAir)
+	// nothing ever aired: the only now-playing frame is the teardown sentinel
+	frames := prod.byTopic(TopicNowPlaying)
+	require.Len(t, frames, 1)
+	require.JSONEq(t, `{"offAir":true}`, frames[0])
 }
 
 func TestOperatorOffAirEndsSession(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(store, lib, enc, prod, clk, t.TempDir())
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(context.Background()) }()
@@ -348,9 +409,9 @@ func TestOperatorOffAirEndsSession(t *testing.T) {
 }
 
 func TestStartedAtFollowsSampleClock(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
-	f := newTestFeeder(store, lib, enc, prod, clk, t.TempDir())
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -380,11 +441,11 @@ func TestStartedAtFollowsSampleClock(t *testing.T) {
 // air-logged — it never actually aired. The feeder should silently skip past
 // it to the next track in rotation.
 func TestFetchFailureSkipsTrackWithoutPublishOrLog(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	log := NewMemAirLog()
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib,
+		Store: store, Requests: reqs, Library: lib,
 		Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch: func(_ context.Context, id, _ string) (string, error) {
 			if id == "art-a" {
@@ -430,10 +491,10 @@ func TestFetchFailureSkipsTrackWithoutPublishOrLog(t *testing.T) {
 // latency fix: flipping off-air must stop feeding within about one chunk,
 // not wait for the whole track to finish.
 func TestOperatorOffAirStopsMidTrackWithinAChunk(t *testing.T) {
-	store, lib := newFixture(t, "a")
+	store, lib, reqs := newFixture(t, "a")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib,
+		Store: store, Requests: reqs, Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 8}, // 8 chunks

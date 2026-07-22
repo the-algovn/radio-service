@@ -23,11 +23,11 @@ func TestResumeOffset(t *testing.T) {
 }
 
 func TestEncoderCrashStartsNewSessionAndResumes(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 4}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib,
+		Store: store, Requests: reqs, Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
@@ -62,18 +62,21 @@ func TestEncoderCrashStartsNewSessionAndResumes(t *testing.T) {
 // one more fresh session to keep broadcasting, and moves on to the next
 // track in rotation.
 func TestCrashResumeCapSkipsTrackAfterThreeAttempts(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	// sessions 0..3 (the initial attempt + 3 restarts) auto-crash; session 4
 	// (the 5th, started after the cap is exhausted) survives so track 'b'
 	// can actually air on it.
 	enc := &crashingEncoder{aliveFrom: 4}
 	prod, clk := &fakeProducer{}, newFakeClock()
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib,
+		Store: store, Requests: reqs, Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2},
 		Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+		// Deterministic shuffle so the bed is a then b: the cap-exhaustion
+		// path must give up on the first-aired track and move to the next.
+		Rand: func(int) int { return 0 },
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,7 +114,7 @@ func TestCrashResumeCapSkipsTrackAfterThreeAttempts(t *testing.T) {
 }
 
 func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	log := NewMemAirLog()
 	started := time.Now().Add(-30 * time.Second).Truncate(time.Second)
 	require.NoError(t, log.Append(context.Background(),
@@ -119,7 +122,7 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 2}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Store: store, Requests: reqs, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
 	})
@@ -147,7 +150,7 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 // two more chunks (0.5s), then crash the encoder — the reopened decoder must
 // see offset ≈ original 30s + 0.5s newly fed, not just the 0.5s.
 func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
-	store, lib := newFixture(t, "a", "b")
+	store, lib, reqs := newFixture(t, "a", "b")
 	log := NewMemAirLog()
 	started := time.Now().Add(-30 * time.Second).Truncate(time.Second)
 	require.NoError(t, log.Append(context.Background(),
@@ -155,7 +158,7 @@ func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 4}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Store: store, Requests: reqs, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
 	})
