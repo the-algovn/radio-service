@@ -125,7 +125,12 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 		}
 		if !ok {
 			if merr := f.d.Requests.MarkFailed(ctx, req.ID, "track vanished from library"); merr != nil {
+				// A persistently-failing store would otherwise leave this
+				// same ready request re-picked on every boundary() call —
+				// an unpaced spin inside the audio goroutine. Surfacing it
+				// as fatal lets Engine.Run's 5s poll pace the retry.
 				f.d.Logger.Error("mark request failed", "id", req.ID, "err", merr)
+				return airItem{}, false, false, merr
 			}
 			return airItem{}, true, false, nil
 		}

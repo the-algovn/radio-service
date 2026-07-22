@@ -369,6 +369,51 @@ func TestVanishedRequestTrackMarksFailed(t *testing.T) {
 	_ = it
 }
 
+var errMarkFailedBroken = errors.New("store: write failed")
+
+// failingMarkFailedStore wraps request.MemStore so MarkFailed always errors,
+// simulating a persistently-failing store (reads OK, writes failing). Used
+// to prove boundary()'s vanished-request branch surfaces a MarkFailed
+// failure as fatal instead of silently looping (skip=true would let
+// RunSession re-pick the same ready, still-unmarked request on every
+// iteration with no pacing — a hot spin inside the audio goroutine).
+type failingMarkFailedStore struct {
+	*request.MemStore
+}
+
+func (failingMarkFailedStore) MarkFailed(context.Context, string, string) error {
+	return errMarkFailedBroken
+}
+
+// A MarkFailed error on the vanished-track branch must end the session with
+// that error (not skip=true) so Engine.Run's 5s poll paces the retry,
+// instead of RunSession re-picking the same ready request immediately.
+func TestBoundaryMarkFailedErrorIsFatal(t *testing.T) {
+	store, lib, _ := newFixture(t, "a", "b")
+	mem := request.NewMemStore()
+	reqs := failingMarkFailedStore{mem}
+	ctx0 := context.Background()
+	_, err := mem.Create(ctx0, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", YTID: "ghost", Title: "t-ghost", Channel: "c", DurationS: 60,
+		Status: request.StatusReady})
+	require.NoError(t, err)
+
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+
+	runErr := drive(t, clk, done, 200)
+	require.ErrorIs(t, runErr, errMarkFailedBroken)
+	// No track was ever announced — the only now-playing-topic frame
+	// allowed is RunSession's own end-of-session off-air marker (published
+	// unconditionally by its teardown defer on any exit), never a
+	// NowPlayingPayload for the vanished track.
+	for _, frame := range prod.byTopic(TopicNowPlaying) {
+		require.NotContains(t, frame, `"kind":"track"`)
+	}
+}
+
 // Empty library (the only remaining engine-side closure): auto off-air.
 func TestEmptyLibraryAutoOffAir(t *testing.T) {
 	store, lib, reqs := newFixture(t) // no tracks at all
