@@ -11,12 +11,15 @@ import (
 )
 
 type AirLog struct {
-	ID        int64
-	YtID      string
-	Title     string
-	Artist    string
-	StartedAt time.Time
-	DurationS int32
+	ID              int64
+	YtID            string
+	Title           string
+	Artist          string
+	StartedAt       time.Time
+	DurationS       int32
+	Source          string
+	RequestedByName string
+	Reason          string
 }
 
 type LedgerLine struct {
@@ -64,6 +67,7 @@ type Request struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 type Station struct {

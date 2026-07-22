@@ -11,7 +11,7 @@ import (
 )
 
 const airHistory = `-- name: AirHistory :many
-SELECT yt_id, title, artist, started_at, duration_s
+SELECT yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
 FROM air_log
 WHERE started_at + make_interval(secs => duration_s) < now()
 ORDER BY started_at DESC
@@ -19,11 +19,14 @@ LIMIT $1
 `
 
 type AirHistoryRow struct {
-	YtID      string
-	Title     string
-	Artist    string
-	StartedAt time.Time
-	DurationS int32
+	YtID            string
+	Title           string
+	Artist          string
+	StartedAt       time.Time
+	DurationS       int32
+	Source          string
+	RequestedByName string
+	Reason          string
 }
 
 func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow, error) {
@@ -41,6 +44,9 @@ func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow,
 			&i.Artist,
 			&i.StartedAt,
 			&i.DurationS,
+			&i.Source,
+			&i.RequestedByName,
+			&i.Reason,
 		); err != nil {
 			return nil, err
 		}
@@ -95,16 +101,19 @@ func (q *Queries) AllTrackIDs(ctx context.Context) ([]string, error) {
 }
 
 const appendAirLog = `-- name: AppendAirLog :exec
-INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type AppendAirLogParams struct {
-	YtID      string
-	Title     string
-	Artist    string
-	StartedAt time.Time
-	DurationS int32
+	YtID            string
+	Title           string
+	Artist          string
+	StartedAt       time.Time
+	DurationS       int32
+	Source          string
+	RequestedByName string
+	Reason          string
 }
 
 func (q *Queries) AppendAirLog(ctx context.Context, arg AppendAirLogParams) error {
@@ -114,6 +123,9 @@ func (q *Queries) AppendAirLog(ctx context.Context, arg AppendAirLogParams) erro
 		arg.Artist,
 		arg.StartedAt,
 		arg.DurationS,
+		arg.Source,
+		arg.RequestedByName,
+		arg.Reason,
 	)
 	return err
 }
@@ -255,10 +267,10 @@ func (q *Queries) CreatePlaylist(ctx context.Context, name string) (CreatePlayli
 }
 
 const createRequest = `-- name: CreateRequest :one
-INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status, reason)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 `
 
 type CreateRequestParams struct {
@@ -271,6 +283,7 @@ type CreateRequestParams struct {
 	DurationS    int64
 	ThumbnailUrl string
 	Status       string
+	Reason       string
 }
 
 type CreateRequestRow struct {
@@ -288,6 +301,7 @@ type CreateRequestRow struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (CreateRequestRow, error) {
@@ -301,6 +315,7 @@ func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (C
 		arg.DurationS,
 		arg.ThumbnailUrl,
 		arg.Status,
+		arg.Reason,
 	)
 	var i CreateRequestRow
 	err := row.Scan(
@@ -318,6 +333,7 @@ func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (C
 		&i.Attempts,
 		&i.CreatedAt,
 		&i.AiredAt,
+		&i.Reason,
 	)
 	return i, err
 }
@@ -533,7 +549,7 @@ func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error 
 }
 
 const latestAirLog = `-- name: LatestAirLog :one
-SELECT id, yt_id, title, artist, started_at, duration_s
+SELECT id, yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
 FROM air_log ORDER BY started_at DESC, id DESC LIMIT 1
 `
 
@@ -547,6 +563,9 @@ func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
 		&i.Artist,
 		&i.StartedAt,
 		&i.DurationS,
+		&i.Source,
+		&i.RequestedByName,
+		&i.Reason,
 	)
 	return i, err
 }
@@ -820,7 +839,7 @@ func (q *Queries) MarkRequestReady(ctx context.Context, id string) (int64, error
 
 const nextReadyRequest = `-- name: NextReadyRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status = 'ready'
 ORDER BY (source = 'ai'), created_at, id LIMIT 1
 `
@@ -840,6 +859,7 @@ type NextReadyRequestRow struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 // Air order: listener requests FIFO, then AI picks FIFO — (source = 'ai')
@@ -862,13 +882,14 @@ func (q *Queries) NextReadyRequest(ctx context.Context) (NextReadyRequestRow, er
 		&i.Attempts,
 		&i.CreatedAt,
 		&i.AiredAt,
+		&i.Reason,
 	)
 	return i, err
 }
 
 const oldestApprovedRequest = `-- name: OldestApprovedRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status = 'approved'
 ORDER BY created_at, id LIMIT 1
 `
@@ -888,6 +909,7 @@ type OldestApprovedRequestRow struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequestRow, error) {
@@ -908,13 +930,14 @@ func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequ
 		&i.Attempts,
 		&i.CreatedAt,
 		&i.AiredAt,
+		&i.Reason,
 	)
 	return i, err
 }
 
 const pendingRequests = `-- name: PendingRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status IN ('approved', 'ready')
 ORDER BY (source = 'ai'), created_at, id
 `
@@ -934,6 +957,7 @@ type PendingRequestsRow struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, error) {
@@ -960,6 +984,7 @@ func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, er
 			&i.Attempts,
 			&i.CreatedAt,
 			&i.AiredAt,
+			&i.Reason,
 		); err != nil {
 			return nil, err
 		}
@@ -1055,7 +1080,7 @@ func (q *Queries) RenamePlaylist(ctx context.Context, arg RenamePlaylistParams) 
 
 const requestsByUser = `-- name: RequestsByUser :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE requested_by = $1
 ORDER BY created_at DESC, id DESC LIMIT $2
 `
@@ -1080,6 +1105,7 @@ type RequestsByUserRow struct {
 	Attempts     int32
 	CreatedAt    time.Time
 	AiredAt      *time.Time
+	Reason       string
 }
 
 func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) ([]RequestsByUserRow, error) {
@@ -1106,6 +1132,7 @@ func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) 
 			&i.Attempts,
 			&i.CreatedAt,
 			&i.AiredAt,
+			&i.Reason,
 		); err != nil {
 			return nil, err
 		}
