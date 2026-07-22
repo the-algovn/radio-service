@@ -3,6 +3,7 @@ package acquire
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -74,6 +75,30 @@ func TestWorkerRetriesThenFails(t *testing.T) {
 	require.Equal(t, request.StatusFailed, mine[0].Status)
 	require.Equal(t, "yt-dlp: timeout", mine[0].FailReason)
 	require.Len(t, prod.frames, 1) // failure removes it from the queue → snapshot
+}
+
+// A probed-too-long error must fail the request on the FIRST RunOnce, with
+// no BumpAttempts retry cycle — a hostile client can't buy three attempts'
+// worth of downloads just by lying about duration.
+func TestWorkerTooLongFailsImmediatelyNoRetry(t *testing.T) {
+	reqs := request.NewMemStore()
+	ctx := context.Background()
+	_, err := reqs.Create(ctx, request.Item{Source: request.SourceListener, RequestedBy: "u1",
+		YTID: "yta", Title: "T", Channel: "C", DurationS: 240, Status: request.StatusApproved})
+	require.NoError(t, err)
+
+	prod := &memProducer{}
+	w := newWorker(reqs, func(context.Context, string, string, string) (library.Track, bool, error) {
+		return library.Track{}, false, fmt.Errorf("probed 36000s: %w", ErrTooLong)
+	}, prod)
+
+	w.RunOnce(ctx)
+	mine, err := reqs.ByUser(ctx, "u1", 1)
+	require.NoError(t, err)
+	require.Equal(t, request.StatusFailed, mine[0].Status)
+	require.Equal(t, "bài dài quá mười phút, đài không phát được", mine[0].FailReason)
+	require.Zero(t, mine[0].Attempts) // no BumpAttempts retry cycle
+	require.Len(t, prod.frames, 1)    // exactly one queue snapshot published
 }
 
 func TestWorkerIdleWhenNothingApproved(t *testing.T) {

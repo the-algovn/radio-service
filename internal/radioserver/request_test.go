@@ -3,6 +3,7 @@ package radioserver
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 )
@@ -56,6 +58,36 @@ func TestRequestTrackValidation(t *testing.T) {
 	_, err = s.RequestTrack(ctx, &radiov1.RequestTrackRequest{Candidate: cand("x", 601)})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 	require.Contains(t, status.Convert(err).Message(), "bài dài quá mười phút, đài không phát được")
+}
+
+// The library row is ground truth for a cached track: a client claiming
+// 240s for a yt_id whose already-downloaded/probed duration is 700s must be
+// rejected, even though the client-supplied duration alone would pass.
+func TestRequestTrackCachedLibraryDurationIsGroundTruth(t *testing.T) {
+	s := newTestServer(t)
+	require.NoError(t, s.deps.Library.Add(context.Background(), library.Track{
+		YTID: "long1", Title: "t-long1", Channel: "c-long1", DurationS: 700, ArtifactID: "a-long1",
+	}))
+	ctx := authCtx(t, map[string]string{"sub": "u1"})
+
+	_, err := s.RequestTrack(ctx, &radiov1.RequestTrackRequest{Candidate: cand("long1", 240)})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), msgTooLong)
+}
+
+func TestRequestTrackTitleAndChannelLengthCap(t *testing.T) {
+	s := newTestServer(t)
+	ctx := authCtx(t, map[string]string{"sub": "u1"})
+
+	_, err := s.RequestTrack(ctx, &radiov1.RequestTrackRequest{Candidate: &radiov1.Candidate{
+		YtId: "t1", Title: strings.Repeat("x", 201), Channel: "c", DurationS: 100,
+	}})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	_, err = s.RequestTrack(ctx, &radiov1.RequestTrackRequest{Candidate: &radiov1.Candidate{
+		YtId: "t2", Title: "t", Channel: strings.Repeat("y", 201), DurationS: 100,
+	}})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
 func TestRequestTrackGuards(t *testing.T) {

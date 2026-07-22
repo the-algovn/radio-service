@@ -2,6 +2,7 @@ package acquire
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -12,6 +13,11 @@ import (
 
 // MaxAttempts is how many downloads a request gets before failed (spec §5).
 const MaxAttempts = 3
+
+// reasonTooLong is the fail reason recorded when a probed duration exceeds
+// the cap — the client's claimed duration was a lie, so it's not worth
+// spending MaxAttempts retries on.
+const reasonTooLong = "bài dài quá mười phút, đài không phát được"
 
 const pollEvery = 5 * time.Second
 
@@ -57,6 +63,15 @@ func (w *Worker) RunOnce(ctx context.Context) {
 		return
 	}
 	if _, _, err := w.d.Acquire(ctx, it.YTID, it.Title, it.Channel); err != nil {
+		if errors.Is(err, ErrTooLong) {
+			w.d.Logger.Error("worker: acquire failed (too long)", "yt_id", it.YTID, "err", err)
+			if ferr := w.d.Requests.MarkFailed(ctx, it.ID, reasonTooLong); ferr != nil {
+				w.d.Logger.Error("worker: mark failed failed", "id", it.ID, "err", ferr)
+				return
+			}
+			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Logger)
+			return
+		}
 		attempts, berr := w.d.Requests.BumpAttempts(ctx, it.ID, err.Error())
 		if berr != nil {
 			w.d.Logger.Error("worker: bump attempts failed", "id", it.ID, "err", berr)

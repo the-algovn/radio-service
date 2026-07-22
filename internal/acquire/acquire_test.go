@@ -97,3 +97,49 @@ func TestAcquireBlankTitleFallsBackToYTID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "yt9", tr.Title)
 }
+
+func TestAcquireCappedRejectsProbedOverCap(t *testing.T) {
+	lib := library.NewMemLibrary()
+	arts := &fakeArtifacts{}
+	a := New(Deps{
+		Download: func(_ context.Context, ytID, destDir string) (string, error) {
+			p := filepath.Join(destDir, ytID+".m4a")
+			require.NoError(t, os.WriteFile(p, []byte("audio"), 0o644))
+			return p, nil
+		},
+		Probe: func(context.Context, string) (float64, error) { return 36000, nil },
+		Loudnorm: func(context.Context, string) (float64, float64, float64, error) {
+			t.Fatal("loudnorm must not run once the duration cap is exceeded")
+			return 0, 0, 0, nil
+		},
+		Store: arts, Library: lib, TmpDir: t.TempDir(), MaxDurationS: 600,
+	})
+
+	_, _, err := a.Acquire(context.Background(), "yt1", "x", "y")
+	require.ErrorIs(t, err, ErrTooLong)
+	require.Empty(t, arts.saved) // never persisted to the artifact store
+
+	_, found, gerr := lib.Get(context.Background(), "yt1")
+	require.NoError(t, gerr)
+	require.False(t, found) // never persisted to the library
+}
+
+func TestAcquireUncappedAllowsProbedOverSixHundred(t *testing.T) {
+	lib := library.NewMemLibrary()
+	arts := &fakeArtifacts{}
+	a := New(Deps{
+		Download: func(_ context.Context, ytID, destDir string) (string, error) {
+			p := filepath.Join(destDir, ytID+".m4a")
+			require.NoError(t, os.WriteFile(p, []byte("audio"), 0o644))
+			return p, nil
+		},
+		Probe:    func(context.Context, string) (float64, error) { return 36000, nil },
+		Loudnorm: func(context.Context, string) (float64, float64, float64, error) { return -13.2, -1.1, 6.4, nil },
+		Store:    arts, Library: lib, TmpDir: t.TempDir(), // MaxDurationS unset: uncapped, mirrors the lab bench
+	})
+
+	tr, _, err := a.Acquire(context.Background(), "yt1", "x", "y")
+	require.NoError(t, err)
+	require.Equal(t, 36000.0, tr.DurationS)
+	require.Len(t, arts.saved, 1)
+}

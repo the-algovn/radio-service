@@ -405,6 +405,12 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 	if c == nil || c.GetYtId() == "" || c.GetTitle() == "" {
 		return nil, status.Error(codes.InvalidArgument, "candidate with yt_id and title is required")
 	}
+	if utf8.RuneCountInString(strings.TrimSpace(c.GetTitle())) > maxNameRunes {
+		return nil, status.Error(codes.InvalidArgument, "title exceeds 200 characters")
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(c.GetChannel())) > maxNameRunes {
+		return nil, status.Error(codes.InvalidArgument, "channel exceeds 200 characters")
+	}
 	if c.GetDurationS() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "candidate duration is required")
 	}
@@ -440,7 +446,14 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 		return nil, status.Error(codes.FailedPrecondition, msgRecentAired)
 	}
 	st := request.StatusApproved
-	if _, cached, _ := s.deps.Library.Get(ctx, c.GetYtId()); cached {
+	if tr, cached, _ := s.deps.Library.Get(ctx, c.GetYtId()); cached {
+		// The library row is ground truth here: for a cached track, the
+		// client's claimed duration was already checked above but the real
+		// probed duration is what matters — a hostile client could claim
+		// 240s for a track the library knows is 30 minutes long.
+		if tr.DurationS > float64(maxRequestSeconds) {
+			return nil, status.Error(codes.InvalidArgument, msgTooLong)
+		}
 		st = request.StatusReady
 	}
 	it, err := s.deps.Requests.Create(ctx, request.Item{

@@ -6,6 +6,7 @@ package acquire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,10 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/library"
 )
+
+// ErrTooLong wraps the error Acquire returns when the probed duration
+// exceeds MaxDurationS.
+var ErrTooLong = errors.New("track exceeds the duration cap")
 
 type Deps struct {
 	Download func(ctx context.Context, ytID, destDir string) (string, error)
@@ -22,6 +27,10 @@ type Deps struct {
 	Library  library.Library
 	TmpDir   string
 	Logger   *slog.Logger
+	// MaxDurationS rejects a probed track longer than this many seconds
+	// before it is normalized/stored/added to the library. 0 = uncapped
+	// (the lab bench's DownloadTrack stays uncapped by never setting this).
+	MaxDurationS float64
 }
 
 type Acquirer struct{ d Deps }
@@ -53,6 +62,9 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	dur, err := a.d.Probe(ctx, p)
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("probe: %w", err)
+	}
+	if a.d.MaxDurationS > 0 && dur > a.d.MaxDurationS {
+		return library.Track{}, false, fmt.Errorf("probed %.0fs: %w", dur, ErrTooLong)
 	}
 	i, tp, lra, err := a.d.Loudnorm(ctx, p)
 	if err != nil {
