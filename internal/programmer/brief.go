@@ -3,7 +3,8 @@ package programmer
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+
+	"github.com/the-algovn/radio-service/internal/brain"
 )
 
 // The picks output contract — same discipline as brain's script contract:
@@ -35,14 +36,10 @@ type Pick struct {
 // of query/yt_id) are dropped; more than 2 truncates; zero valid picks is
 // an error.
 func ParsePicks(raw string) ([]Pick, error) {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
 	var doc struct {
 		Picks []Pick `json:"picks"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &doc); err != nil {
+	if err := json.Unmarshal([]byte(brain.ExtractJSON(raw)), &doc); err != nil {
 		return nil, fmt.Errorf("model output is not the expected JSON: %w", err)
 	}
 	var out []Pick

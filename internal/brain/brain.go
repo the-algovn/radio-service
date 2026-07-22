@@ -36,13 +36,23 @@ func BuildPrompts(persona, briefJSON string) (system, user string) {
 	return system, user
 }
 
+// ExtractJSON returns the outermost {…} object embedded in a model reply,
+// tolerating code fences or stray prose around it — Anthropic, unlike
+// Gemini's JSON mode, is not constrained to bare JSON. When no object is
+// present it returns the trimmed input so the caller's json error stays
+// meaningful ("beginning of value") rather than silently blank.
+func ExtractJSON(raw string) string {
+	i := strings.IndexByte(raw, '{')
+	j := strings.LastIndexByte(raw, '}')
+	if i < 0 || j < i {
+		return strings.TrimSpace(raw)
+	}
+	return raw[i : j+1]
+}
+
 func ParseOutput(raw string) (Output, error) {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
 	var out Output
-	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &out); err != nil {
+	if err := json.Unmarshal([]byte(ExtractJSON(raw)), &out); err != nil {
 		return Output{}, fmt.Errorf("model output is not the expected JSON: %w", err)
 	}
 	if out.Script == "" {

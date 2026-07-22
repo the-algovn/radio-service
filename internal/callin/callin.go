@@ -6,7 +6,6 @@ package callin
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/the-algovn/radio-service/internal/brain"
 )
@@ -64,9 +63,5 @@ func Normalize(r Result) (Result, error) {
 }
 
 func unmarshalLoose(raw string, v any) error {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	return jsonUnmarshal([]byte(strings.TrimSpace(s)), v)
+	return jsonUnmarshal([]byte(brain.ExtractJSON(raw)), v)
 }
