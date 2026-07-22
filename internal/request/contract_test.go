@@ -253,7 +253,11 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, s.MarkFailed(ctx, b.ID, "yt-dlp: 403")) // failed uses created_at ordering key
 		c, err := s.Create(ctx, mk(request.SourceListener, "u2", "c", request.StatusReady))
 		require.NoError(t, err)
-		require.NoError(t, s.MarkAired(ctx, c.ID, time.Now()))
+		// Ordering is COALESCE(aired_at, created_at) DESC, which mixes an
+		// app-clock timestamp (aired_at) with a DB-clock one (b's created_at).
+		// ±1h margins on a/c dwarf any realistic clock skew between the two
+		// clocks, keeping the ordering assertion deterministic.
+		require.NoError(t, s.MarkAired(ctx, c.ID, time.Now().Add(time.Hour)))
 
 		rec, err := s.RecentTerminal(ctx, 2)
 		require.NoError(t, err)
