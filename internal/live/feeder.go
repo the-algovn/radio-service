@@ -220,8 +220,9 @@ type bootResumeEntry struct {
 // passed since the process last wrote an air-log entry (e.g. across a
 // restart), independent of the injected Clock that only paces this
 // session's own encoder ticks. A resume candidate needs only a fresh,
-// unexpired air-log entry whose track still exists in the library —
-// playlists are curation tools and no longer gate what airs. Every failure
+// unexpired air-log entry whose track still exists in the library — the
+// engine consumes the request queue and the shuffle bed only, so nothing
+// else gates what airs. Every failure
 // mode here (log/library errors or an expired entry) is treated as "no
 // resume" rather than fatal — RunSession's first real boundary() call right
 // after this hits the same store/library and will surface any persistent
