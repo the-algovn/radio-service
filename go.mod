@@ -10,7 +10,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	github.com/the-algovn/protos/gen/go v0.13.0
+	github.com/the-algovn/protos/gen/go v0.14.0
 	github.com/twmb/franz-go v1.21.5
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
