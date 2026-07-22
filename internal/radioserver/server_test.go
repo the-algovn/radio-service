@@ -25,7 +25,7 @@ func newTestServer(t *testing.T, ytIDs ...string) *Server {
 			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 60, ArtifactID: "a-" + id,
 		}))
 	}
-	return New(Deps{Store: playlist.NewMemStore(lib)})
+	return New(Deps{Store: playlist.NewMemStore(lib), Search: &fakeSearch{}, Now: time.Now})
 }
 
 // mkPlaylist creates a playlist with the given tracks and returns its id.

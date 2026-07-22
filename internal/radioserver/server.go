@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
 )
@@ -29,18 +30,26 @@ const (
 // on-air state changes; the engine's 5s poll is the fallback.
 type Notifier interface{ Poke() }
 
+// Searcher is the yt-dlp search surface (satisfied by *ingest.Runner).
+type Searcher interface {
+	Search(ctx context.Context, query string, n int) ([]ingest.Candidate, error)
+}
+
 type Deps struct {
 	Store     playlist.Store
 	Log       live.AirLog
 	Listeners live.Listeners
 	Notifier  Notifier
 	Logger    *slog.Logger
+	Search    Searcher         // yt-dlp search (nil only in tests that skip it)
+	Now       func() time.Time // injected clock; nil → time.Now
 }
 
 type Server struct {
 	radiov1.UnimplementedRadioServiceServer
 	deps   Deps
 	logger *slog.Logger
+	search *buckets
 }
 
 func New(deps Deps) *Server {
@@ -48,7 +57,10 @@ func New(deps Deps) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{deps: deps, logger: logger}
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	return &Server{deps: deps, logger: logger, search: newBuckets(deps.Now)}
 }
 
 // mapErr converts playlist sentinels to gRPC statuses; anything else is
@@ -320,4 +332,38 @@ func (s *Server) Heartbeat(ctx context.Context, req *radiov1.HeartbeatRequest) (
 		return nil, status.Errorf(codes.Internal, "heartbeat: %v", err)
 	}
 	return &radiov1.HeartbeatResponse{}, nil
+}
+
+const msgSearchRate = "tìm nhanh quá, chờ chút nha"
+
+func (s *Server) SearchCandidates(ctx context.Context, req *radiov1.SearchCandidatesRequest) (*radiov1.SearchCandidatesResponse, error) {
+	sub, _, err := identityFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "sign in to search")
+	}
+	q := strings.TrimSpace(req.GetQuery())
+	if q == "" {
+		return nil, status.Error(codes.InvalidArgument, "query is required")
+	}
+	if utf8.RuneCountInString(q) > 200 {
+		return nil, status.Error(codes.InvalidArgument, "query exceeds 200 characters")
+	}
+	if !s.search.allow(sub) {
+		return nil, status.Error(codes.ResourceExhausted, msgSearchRate)
+	}
+	cs, err := s.deps.Search.Search(ctx, q, 10)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "search: %v", err)
+	}
+	resp := &radiov1.SearchCandidatesResponse{}
+	for _, sc := range ingest.Rank(q, cs) {
+		if len(resp.Candidates) == 8 {
+			break
+		}
+		resp.Candidates = append(resp.Candidates, &radiov1.Candidate{
+			YtId: sc.YTID, Title: sc.Title, Channel: sc.Channel,
+			DurationS: int32(sc.DurationS), ThumbnailUrl: sc.ThumbnailURL,
+		})
+	}
+	return resp, nil
 }
