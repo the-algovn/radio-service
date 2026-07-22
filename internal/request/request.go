@@ -1,9 +1,9 @@
 // Package request is the station's play queue and request record in one:
 // a row is a listener request or an AI pick, moving approved → ready →
 // aired | failed (spec §3, statuses from products/radio/architecture.md).
-// It mirrors internal/playlist's layout: a Store interface, PGStore
-// (prod/local) via sqlc, MemStore for hermetic tests, and a contract suite
-// run against both.
+// It mirrors the layout of the playlist-era station store (removed in
+// v1.2): a Store interface, PGStore (prod/local) via sqlc, MemStore for
+// hermetic tests, and a contract suite run against both.
 package request
 
 import (

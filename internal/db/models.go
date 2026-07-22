@@ -34,19 +34,6 @@ type LedgerLine struct {
 	CostUsd   float64
 }
 
-type Playlist struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
-type PlaylistItem struct {
-	PlaylistID string
-	Position   int32
-	YtID       string
-}
-
 type RadioListener struct {
 	SessionID string
 	LastSeen  time.Time
@@ -72,12 +59,11 @@ type Request struct {
 }
 
 type Station struct {
-	ID               bool
-	ActivePlaylistID pgtype.UUID
-	OnAir            bool
-	OnAirSince       *time.Time
-	UpdatedAt        time.Time
-	AiEnabled        bool
+	ID         bool
+	OnAir      bool
+	OnAirSince *time.Time
+	UpdatedAt  time.Time
+	AiEnabled  bool
 }
 
 type Track struct {

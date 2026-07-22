@@ -10,8 +10,9 @@ import (
 
 // PGStore stores station state on the singleton station row via sqlc.
 // GoOnAir takes SELECT … FOR UPDATE on that row inside a transaction (the
-// same LockStationRow pattern internal/playlist used) so the OnAirSince
-// anchor is preserved on idempotent calls without a read-then-write race.
+// same LockStationRow pattern the playlist-era station store used, before
+// it was removed in v1.2) so the OnAirSince anchor is preserved on
+// idempotent calls without a read-then-write race.
 type PGStore struct{ pool *pgxpool.Pool }
 
 func NewPGStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }

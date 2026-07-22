@@ -1,7 +1,7 @@
 // Package station is the singleton station-state store: the on-air flag
 // (with its ear-sync anchor) and the AI pause switch. It replaces the
-// playlist-era station half of internal/playlist (v1.2 — the engine
-// programs itself; playlists are gone). Layout mirrors internal/request:
+// playlist-era station store (removed in v1.2 — the engine programs
+// itself; playlists are gone). Layout mirrors internal/request:
 // Store interface, MemStore, PGStore, one contract suite for both.
 package station
 
