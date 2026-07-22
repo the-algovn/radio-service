@@ -17,6 +17,10 @@ import (
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
+type fakeLedger struct{ spent float64 }
+
+func (f *fakeLedger) SpentSince(context.Context, time.Time) (float64, error) { return f.spent, nil }
+
 func newTestServer(t *testing.T, ytIDs ...string) *Server {
 	t.Helper()
 	lib := library.NewMemLibrary()
@@ -28,7 +32,8 @@ func newTestServer(t *testing.T, ytIDs ...string) *Server {
 	return New(Deps{
 		Store: station.NewMemStore(), Log: live.NewMemAirLog(), Search: &fakeSearch{},
 		Requests: request.NewMemStore(), Library: lib, Location: time.FixedZone("ICT", 7*3600),
-		Now: time.Now,
+		Listeners: live.NewMemListeners(time.Now),
+		Now:       time.Now, Skipper: &fakeSkipper{}, Ledger: &fakeLedger{spent: 0.25}, BudgetUSD: 1.0,
 	})
 }
 

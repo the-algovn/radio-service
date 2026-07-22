@@ -6,6 +6,7 @@ package radioserver
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ const (
 	msgDupQueued    = "bài này đang trong hàng đợi rồi, sắp phát thôi"
 	msgRecentAired  = "vừa phát xong, để khuya nhé"
 	msgTooLong      = "bài dài quá mười phút, đài không phát được"
+
+	msgOperatorRemoved = "đài đã gỡ yêu cầu này"
+	recentTerminalCap  = 20
 )
 
 // Notifier lets the server nudge the broadcast engine (same process) when
@@ -46,6 +50,15 @@ type Notifier interface{ Poke() }
 // Searcher is the yt-dlp search surface (satisfied by *ingest.Runner).
 type Searcher interface {
 	Search(ctx context.Context, query string, n int) ([]ingest.Candidate, error)
+}
+
+// Skipper asks the feeder to end the airing track (v1.2 moderation).
+type Skipper interface{ RequestSkip() }
+
+// Ledger is the spend reader for the operator dashboard (PGLedger and
+// MemLedger satisfy it — same shape the programmer uses).
+type Ledger interface {
+	SpentSince(ctx context.Context, since time.Time) (float64, error)
 }
 
 type Deps struct {
@@ -60,6 +73,9 @@ type Deps struct {
 	Library   library.Library
 	Producer  live.Producer
 	Location  *time.Location // station-local civil day for daily quotas; nil → UTC
+	Skipper   Skipper
+	Ledger    Ledger
+	BudgetUSD float64
 }
 
 type Server struct {
@@ -96,7 +112,22 @@ func (s *Server) GetStation(ctx context.Context, _ *radiov1.GetStationRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get station: %v", err)
 	}
-	return &radiov1.GetStationResponse{Station: stationProto(st)}, nil
+	listeners, err := s.deps.Listeners.Count(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "listeners: %v", err)
+	}
+	libCount, err := s.deps.Library.Count(ctx, "")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "library count: %v", err)
+	}
+	spent, err := s.deps.Ledger.SpentSince(ctx, request.DayStart(s.deps.Now(), s.deps.Location))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "spend: %v", err)
+	}
+	return &radiov1.GetStationResponse{Station: stationProto(st), Stats: &radiov1.StationStats{
+		Listeners: int32(listeners), LibraryCount: int32(libCount),
+		SpendTodayUsd: spent, BudgetUsd: s.deps.BudgetUSD,
+	}}, nil
 }
 
 func (s *Server) GoOnAir(ctx context.Context, _ *radiov1.GoOnAirRequest) (*radiov1.GoOnAirResponse, error) {
@@ -241,6 +272,7 @@ func requestProto(it request.Item) *radiov1.TrackRequest {
 		DurationS: int32(it.DurationS), ThumbnailUrl: it.ThumbnailURL,
 		Status: it.Status, FailReason: it.FailReason,
 		CreatedAt: it.CreatedAt.Format(time.RFC3339),
+		Reason:    it.Reason,
 	}
 }
 
@@ -331,4 +363,78 @@ func (s *Server) ListMyRequests(ctx context.Context, _ *radiov1.ListMyRequestsRe
 		resp.Requests = append(resp.Requests, requestProto(it))
 	}
 	return resp, nil
+}
+
+func (s *Server) stationRequests(ctx context.Context) (*radiov1.ListStationRequestsResponse, error) {
+	pending, err := s.deps.Requests.Pending(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "pending read: %v", err)
+	}
+	recent, err := s.deps.Requests.RecentTerminal(ctx, recentTerminalCap)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "recent read: %v", err)
+	}
+	resp := &radiov1.ListStationRequestsResponse{}
+	for _, it := range pending {
+		resp.Pending = append(resp.Pending, requestProto(it))
+	}
+	for _, it := range recent {
+		resp.Recent = append(resp.Recent, requestProto(it))
+	}
+	return resp, nil
+}
+
+func (s *Server) ListStationRequests(ctx context.Context, _ *radiov1.ListStationRequestsRequest) (*radiov1.ListStationRequestsResponse, error) {
+	return s.stationRequests(ctx)
+}
+
+func (s *Server) ReorderRequests(ctx context.Context, req *radiov1.ReorderRequestsRequest) (*radiov1.ListStationRequestsResponse, error) {
+	if len(req.GetIds()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "ids are required")
+	}
+	if err := s.deps.Requests.Reorder(ctx, req.GetIds()); err != nil {
+		if errors.Is(err, request.ErrStale) {
+			return nil, status.Error(codes.InvalidArgument, "stale queue — refresh and retry")
+		}
+		return nil, status.Errorf(codes.Internal, "reorder: %v", err)
+	}
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	return s.stationRequests(ctx)
+}
+
+func (s *Server) RemoveRequest(ctx context.Context, req *radiov1.RemoveRequestRequest) (*radiov1.ListStationRequestsResponse, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if err := s.deps.Requests.FailPending(ctx, req.GetId(), msgOperatorRemoved); err != nil {
+		if errors.Is(err, request.ErrNotFound) {
+			return nil, status.Error(codes.FailedPrecondition, "request is not pending")
+		}
+		return nil, status.Errorf(codes.Internal, "remove: %v", err)
+	}
+	s.logger.Info("operator removed request", "id", req.GetId())
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	return s.stationRequests(ctx)
+}
+
+func (s *Server) SkipTrack(ctx context.Context, _ *radiov1.SkipTrackRequest) (*radiov1.SkipTrackResponse, error) {
+	st, err := s.deps.Store.GetStation(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get station: %v", err)
+	}
+	if !st.OnAir {
+		return nil, status.Error(codes.FailedPrecondition, "station is off air")
+	}
+	s.deps.Skipper.RequestSkip()
+	s.logger.Info("operator skipped the airing track")
+	return &radiov1.SkipTrackResponse{}, nil
+}
+
+func (s *Server) SetAIEnabled(ctx context.Context, req *radiov1.SetAIEnabledRequest) (*radiov1.SetAIEnabledResponse, error) {
+	st, err := s.deps.Store.SetAIEnabled(ctx, req.GetEnabled())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "set ai enabled: %v", err)
+	}
+	s.logger.Info("ai pause toggled", "enabled", req.GetEnabled())
+	return &radiov1.SetAIEnabledResponse{Station: stationProto(st)}, nil
 }

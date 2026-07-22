@@ -231,6 +231,9 @@ func main() {
 		Producer:  producer,
 		Search:    runner,
 		Location:  loc,
+		Skipper:   feeder,
+		Ledger:    ledger,
+		BudgetUSD: budget,
 	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
