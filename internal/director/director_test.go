@@ -1,6 +1,7 @@
 package director
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/the-algovn/radio-service/internal/live"
+	"github.com/the-algovn/radio-service/internal/spend"
 )
 
 // dirClock is a settable clock for director tests (Tick unused here).
@@ -153,4 +155,119 @@ func TestRingCapsAtFive(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Len(t, dr.ring, 5)
+}
+
+func onAir(t *testing.T, f *prepFixture) {
+	t.Helper()
+	_, err := f.dr.d.Station.GoOnAir(context.Background())
+	require.NoError(t, err)
+}
+
+func withListener(t *testing.T, f *prepFixture) {
+	t.Helper()
+	require.NoError(t, f.dr.d.Listeners.Beat(context.Background(), "s1"))
+}
+
+func seedAirLog(t *testing.T, f *prepFixture) {
+	t.Helper()
+	require.NoError(t, f.log.Append(context.Background(),
+		live.Entry{YTID: "a", Title: "Bài A", StartedAt: time.Now()}))
+}
+
+func slotFilled(dr *Director) bool {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	return dr.slot != nil
+}
+
+func TestRunOnceOffAirNoPrep(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	seedAirLog(t, f)
+	f.dr.TrackFinished(live.Entry{YTID: "a"}) // backsell due
+	f.dr.RunOnce(context.Background())
+	require.False(t, slotFilled(f.dr))
+	require.Zero(t, f.model.calls)
+}
+
+func TestRunOncePreparesWhenDue(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir(t, f)
+	withListener(t, f)
+	seedAirLog(t, f)
+	f.dr.RunOnce(context.Background()) // on-air transition observed; nothing due yet
+	require.False(t, slotFilled(f.dr))
+	f.dr.TrackFinished(live.Entry{YTID: "a"}) // 1 finished + current = 2 >= 2 → due
+	f.dr.RunOnce(context.Background())
+	require.True(t, slotFilled(f.dr))
+	require.Equal(t, 1, f.model.calls)
+	// Slot occupied → next tick must not prep again.
+	f.dr.RunOnce(context.Background())
+	require.Equal(t, 1, f.model.calls)
+}
+
+func TestRunOnceNoListenersNoPrep(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir(t, f)
+	seedAirLog(t, f)
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	f.dr.RunOnce(context.Background())
+	require.False(t, slotFilled(f.dr))
+	require.Zero(t, f.model.calls)
+}
+
+func TestRunOnceBudgetReachedNoPrep(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir(t, f)
+	withListener(t, f)
+	seedAirLog(t, f)
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	require.NoError(t, f.ledger.Append(context.Background(), spend.Line{TS: time.Now(), Kind: "llm", CostUSD: 1.0}))
+	f.dr.RunOnce(context.Background())
+	require.False(t, slotFilled(f.dr))
+	require.Zero(t, f.model.calls)
+}
+
+func TestRunOncePauseCancelsPendingClip(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir(t, f)
+	p := slotClip(t, f.dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a"})
+	_, err := f.dr.d.Station.SetAIEnabled(context.Background(), false)
+	require.NoError(t, err)
+	f.dr.RunOnce(context.Background())
+	require.False(t, slotFilled(f.dr))
+	_, serr := os.Stat(p)
+	require.True(t, os.IsNotExist(serr), "pause deletes the pending clip file")
+}
+
+func TestRunOnceOnAirTransitionResetsStationIDTimer(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	// Off-air first tick: lastStationID stays zero but nothing preps.
+	f.dr.RunOnce(context.Background())
+	onAir(t, f)
+	// First on-air tick observes the transition → timer = now → NOT due,
+	// even though zero-time would have made it "due" an hour after 1970.
+	f.dr.RunOnce(context.Background())
+	require.False(t, slotFilled(f.dr))
+	f.clk.advance(61 * time.Minute)
+	f.dr.RunOnce(context.Background())
+	require.True(t, slotFilled(f.dr))
+	f.dr.mu.Lock()
+	require.Equal(t, live.ClipStationID, f.dr.slot.Kind)
+	f.dr.mu.Unlock()
+}
+
+func TestRunExitsOnCancel(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.dr.Run(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Run did not exit on cancel")
+	}
 }

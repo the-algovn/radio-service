@@ -174,3 +174,74 @@ func (dr *Director) pushRing(summary string, phrases []string) {
 		dr.ring = dr.ring[len(dr.ring)-ringCap:]
 	}
 }
+
+// Run ticks the wake loop until ctx cancellation (programmer-shaped).
+func (dr *Director) Run(ctx context.Context) error {
+	tick := dr.d.Clock.Tick(tickEvery)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick:
+			dr.RunOnce(ctx)
+		}
+	}
+}
+
+// RunOnce evaluates the wake gates (spec §3) in order: on-air → ai_enabled →
+// listeners>0 → daily budget → segment due → slot empty; every failure is a
+// quiet skip (music covers the air). Pause/off-air additionally cancel a
+// pending clip; the off→on transition resets the station-id timer so the
+// first ID airs ~StationIDMin into each broadcast session.
+func (dr *Director) RunOnce(ctx context.Context) {
+	st, err := dr.d.Station.GetStation(ctx)
+	if err != nil {
+		dr.d.Logger.Error("director: station read failed", "err", err)
+		return
+	}
+	now := dr.d.Clock.Now()
+
+	dr.mu.Lock()
+	if !st.OnAir || !st.AIEnabled {
+		dr.cancelPendingLocked("paused or off-air")
+	}
+	if st.OnAir && !dr.wasOnAir {
+		dr.lastStationID = now
+	}
+	dr.wasOnAir = st.OnAir
+	dr.mu.Unlock()
+	if !st.OnAir || !st.AIEnabled {
+		return
+	}
+
+	if n, err := dr.d.Listeners.Count(ctx); err != nil || n == 0 {
+		return
+	}
+	spent, err := dr.d.Ledger.SpentSince(ctx, request.DayStart(now, dr.d.Location))
+	if err != nil {
+		dr.d.Logger.Error("director: spend read failed", "err", err)
+		return
+	}
+	if spent >= dr.d.BudgetUSD {
+		dr.d.Logger.Warn("director: daily budget reached; idling", "spent_usd", spent)
+		return
+	}
+
+	dr.mu.Lock()
+	kind := ""
+	if dr.slot == nil {
+		kind = dr.dueKindLocked(now)
+	}
+	dr.mu.Unlock()
+	if kind == "" {
+		return
+	}
+
+	clip, ok := dr.prepare(ctx, kind)
+	if !ok {
+		return
+	}
+	dr.mu.Lock()
+	dr.slot = &clip
+	dr.mu.Unlock()
+}
