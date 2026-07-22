@@ -246,3 +246,48 @@ func TestBriefContainsPlaysRequestsAndSample(t *testing.T) {
 	require.NotEmpty(t, brief.LibrarySample)
 	require.LessOrEqual(t, len(brief.LibrarySample), briefSample)
 }
+
+func TestPicksStoreCappedReason(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("library pick keeps its reason", func(t *testing.T) {
+		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"  đổi gió một chút  "}]}`})
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, "đổi gió một chút", pending[0].Reason) // trimmed
+	})
+
+	t.Run("query pick keeps its reason", func(t *testing.T) {
+		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"query":"nhạc đêm","reason":"khuya rồi"}]}`})
+		f.search.byQuery["nhạc đêm"] = []ingest.Candidate{
+			{YTID: "new1", Title: "Bài Mới", Channel: "Ca Sĩ - Topic", DurationS: 250, ViewCount: 90000},
+		}
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, "khuya rồi", pending[0].Reason)
+	})
+
+	t.Run("over-long reason is capped at 200 runes", func(t *testing.T) {
+		long := strings.Repeat("đ", 250)
+		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"` + long + `"}]}`})
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, strings.Repeat("đ", 200), pending[0].Reason)
+	})
+
+	t.Run("fake mode stores no reason", func(t *testing.T) {
+		f := newFixture(t, &scriptedModel{})
+		f.prog.d.Fake = true
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Empty(t, pending[0].Reason)
+	})
+}

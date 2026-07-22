@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/the-algovn/radio-service/internal/brain"
@@ -30,6 +31,7 @@ const (
 	briefPlays       = 10
 	briefSample      = 10
 	searchN          = 10
+	maxReasonRunes   = 200
 )
 
 type Searcher interface {
@@ -73,6 +75,17 @@ func New(d Deps) *Programmer {
 		d.Location = time.UTC
 	}
 	return &Programmer{d: d}
+}
+
+// capReason trims and caps the model's stated reason — it is a UI string;
+// the cap bounds every downstream payload (spec §3).
+func capReason(s string) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= maxReasonRunes {
+		return s
+	}
+	return string(r[:maxReasonRunes])
 }
 
 func (p *Programmer) Run(ctx context.Context) error {
@@ -186,7 +199,7 @@ func (p *Programmer) enqueue(ctx context.Context, pk Pick) bool {
 		}
 		_, err = p.d.Requests.Create(ctx, request.Item{
 			Source: request.SourceAI, YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
-			DurationS: int64(tr.DurationS), Status: request.StatusReady,
+			DurationS: int64(tr.DurationS), Status: request.StatusReady, Reason: capReason(pk.Reason),
 		})
 		if err != nil {
 			p.d.Logger.Error("programmer: enqueue failed", "err", err)
@@ -214,7 +227,7 @@ func (p *Programmer) enqueue(ctx context.Context, pk Pick) bool {
 		}
 		_, err := p.d.Requests.Create(ctx, request.Item{
 			Source: request.SourceAI, YTID: sc.YTID, Title: sc.Title, Channel: sc.Channel,
-			DurationS: sc.DurationS, ThumbnailURL: sc.ThumbnailURL, Status: status,
+			DurationS: sc.DurationS, ThumbnailURL: sc.ThumbnailURL, Status: status, Reason: capReason(pk.Reason),
 		})
 		if err != nil {
 			p.d.Logger.Error("programmer: enqueue failed", "err", err)
