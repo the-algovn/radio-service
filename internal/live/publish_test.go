@@ -44,3 +44,34 @@ func TestRequestQueuePayload(t *testing.T) {
 	]`, got)
 	require.Equal(t, "[]", string(RequestQueuePayload(nil))) // empty array, never null
 }
+
+func TestNowPlayingPayloadProvenance(t *testing.T) {
+	e := Entry{Title: "T", Artist: "A", StartedAt: time.Unix(0, 0).UTC(), DurationS: 1,
+		Source: "ai", Reason: "hợp đêm mưa"}
+	got := string(NowPlayingPayload(e, 0))
+	require.Contains(t, got, `"source":"ai"`)
+	require.Contains(t, got, `"reason":"hợp đêm mưa"`)
+	require.NotContains(t, got, "requestedByName") // empty ⇒ absent
+
+	lis := Entry{Title: "T", Artist: "A", StartedAt: time.Unix(0, 0).UTC(), DurationS: 1,
+		Source: "listener", RequestedByName: "Ngọc"}
+	got = string(NowPlayingPayload(lis, 0))
+	require.Contains(t, got, `"source":"listener"`)
+	require.Contains(t, got, `"requestedByName":"Ngọc"`)
+	require.NotContains(t, got, "reason")
+
+	// shuffle: all three absent — existing exact-JSON tests stay green
+	got = string(NowPlayingPayload(Entry{Title: "T", StartedAt: time.Unix(0, 0).UTC(), DurationS: 1}, 0))
+	require.NotContains(t, got, "source")
+}
+
+func TestRequestQueuePayloadReason(t *testing.T) {
+	got := string(RequestQueuePayload([]request.Item{
+		{Title: "B", Channel: "ch-b", Source: request.SourceAI, Reason: "đổi gió"},
+	}))
+	require.Contains(t, got, `"reason":"đổi gió"`)
+	got = string(RequestQueuePayload([]request.Item{
+		{Title: "A", Channel: "ch-a", Source: request.SourceListener, DisplayName: "Ngọc"},
+	}))
+	require.NotContains(t, got, "reason")
+}

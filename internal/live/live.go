@@ -12,10 +12,15 @@ import (
 
 // Entry is one aired (or airing) track — denormalized at air time so history
 // survives library deletes. The latest Entry is the restart resume anchor.
+// Provenance (v1.1): Source ""=shuffle/legacy | "listener" | "ai";
+// RequestedByName set for listener requests; Reason for AI picks.
 type Entry struct {
 	YTID, Title, Artist string
 	StartedAt           time.Time
 	DurationS           int
+	Source              string
+	RequestedByName     string
+	Reason              string
 }
 
 type AirLog interface {

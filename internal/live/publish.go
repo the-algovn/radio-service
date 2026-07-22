@@ -54,6 +54,9 @@ type nowPlayingJSON struct {
 	StartedAt       string `json:"startedAt"`
 	DurationSeconds int    `json:"durationSeconds"`
 	Listeners       int    `json:"listeners"`
+	Source          string `json:"source,omitempty"`
+	RequestedByName string `json:"requestedByName,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 func NowPlayingPayload(e Entry, listeners int) []byte {
@@ -62,6 +65,7 @@ func NowPlayingPayload(e Entry, listeners int) []byte {
 		// RFC3339Nano preserves sub-second sample-clock precision (== RFC3339 for whole seconds).
 		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
 		DurationSeconds: e.DurationS, Listeners: listeners,
+		Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
 	})
 	return b
 }
@@ -75,6 +79,7 @@ type requestQueueItemJSON struct {
 	HasDedication   bool   `json:"hasDedication"`
 	Source          string `json:"source"`
 	RequestedByName string `json:"requestedByName,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // RequestQueuePayload is the radio.queue SSE frame: the pending request
@@ -85,7 +90,7 @@ func RequestQueuePayload(items []request.Item) []byte {
 	for _, it := range items {
 		out = append(out, requestQueueItemJSON{
 			Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
-			Source: it.Source, RequestedByName: it.DisplayName,
+			Source: it.Source, RequestedByName: it.DisplayName, Reason: it.Reason,
 		})
 	}
 	b, _ := json.Marshal(out)

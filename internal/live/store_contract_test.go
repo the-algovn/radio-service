@@ -105,4 +105,36 @@ func testAirLogRecentAndSince(t *testing.T, log live.AirLog) {
 	ids, err = log.RecentYTIDs(ctx, 2)
 	require.NoError(t, err)
 	require.Equal(t, []string{"t3", "t2"}, ids)
+
+	// provenance round-trip incl. Latest (the boot-resume path).
+	// base.Add(24h) is deliberately far past every other entry in this
+	// suite (incl. the v1 tie-break group) so Latest MUST return this row.
+	require.NoError(t, log.Append(ctx, live.Entry{
+		YTID: "prov", Title: "t-prov", Artist: "c-prov",
+		StartedAt: base.Add(24 * time.Hour), DurationS: 240,
+		Source: "listener", RequestedByName: "Ngọc", Reason: "",
+	}))
+	latest, found, err := log.Latest(ctx)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "listener", latest.Source)
+	require.Equal(t, "Ngọc", latest.RequestedByName)
+	require.Empty(t, latest.Reason)
+
+	require.NoError(t, log.Append(ctx, live.Entry{
+		YTID: "prov2", Title: "t2", Artist: "c2",
+		StartedAt: base.Add(-2 * time.Hour), DurationS: 60,
+		Source: "ai", Reason: "khuya rồi, đổi không khí",
+	}))
+	hist, err := log.History(ctx, 50)
+	require.NoError(t, err)
+	foundProv := false
+	for _, e := range hist {
+		if e.YTID == "prov2" {
+			foundProv = true
+			require.Equal(t, "ai", e.Source)
+			require.Equal(t, "khuya rồi, đổi không khí", e.Reason)
+		}
+	}
+	require.True(t, foundProv)
 }

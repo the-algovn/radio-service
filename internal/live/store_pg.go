@@ -20,6 +20,7 @@ func (l *PGAirLog) Append(ctx context.Context, e Entry) error {
 	return db.New(l.pool).AppendAirLog(ctx, db.AppendAirLogParams{
 		YtID: e.YTID, Title: e.Title, Artist: e.Artist,
 		StartedAt: e.StartedAt, DurationS: int32(e.DurationS),
+		Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
 	})
 }
 
@@ -32,7 +33,8 @@ func (l *PGAirLog) Latest(ctx context.Context) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	return Entry{YTID: row.YtID, Title: row.Title, Artist: row.Artist,
-		StartedAt: row.StartedAt, DurationS: int(row.DurationS)}, true, nil
+		StartedAt: row.StartedAt, DurationS: int(row.DurationS),
+		Source: row.Source, RequestedByName: row.RequestedByName, Reason: row.Reason}, true, nil
 }
 
 func (l *PGAirLog) History(ctx context.Context, limit int) ([]Entry, error) {
@@ -43,7 +45,8 @@ func (l *PGAirLog) History(ctx context.Context, limit int) ([]Entry, error) {
 	out := make([]Entry, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Entry{YTID: r.YtID, Title: r.Title, Artist: r.Artist,
-			StartedAt: r.StartedAt, DurationS: int(r.DurationS)})
+			StartedAt: r.StartedAt, DurationS: int(r.DurationS),
+			Source: r.Source, RequestedByName: r.RequestedByName, Reason: r.Reason})
 	}
 	return out, nil
 }
