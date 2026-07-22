@@ -50,6 +50,9 @@ type FeederDeps struct {
 	Logger    *slog.Logger
 	// Rand picks the shuffle-bed track (0 <= result < n). nil → math/rand.Intn.
 	Rand func(n int) int
+	// Talk hands pre-rendered DJ talk clips to the boundary (v2). nil =
+	// feature absent; the feeder behaves exactly as before.
+	Talk TalkSource
 }
 
 type Feeder struct {
@@ -91,6 +94,13 @@ func (f *Feeder) SessionDir() string { return f.sessionDir.Load().(string) }
 // RequestSkip asks the currently-airing track to end at the next tick — a
 // no-op when nothing consumes it (the flag is reset at session start).
 func (f *Feeder) RequestSkip() { f.skip.Store(true) }
+
+// startedAt converts the sample clock to wall time: anchor + samplesFed/48000,
+// split into whole seconds + sub-second remainder so it cannot overflow int64
+// nanoseconds (samplesFed can exceed ~9.2e9 ≈ 53h continuous at 48kHz).
+func (f *Feeder) startedAt(samplesFed int64) time.Time {
+	return f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
+}
 
 func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 	if f.d.Producer == nil {
@@ -273,6 +283,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		samplesFed = int64(resume.offsetS * 48000)
 	}
 
+	var lastFinished Entry // zero until the first music item ends this session
+
 	dir := filepath.Join(f.d.Dir, fmt.Sprintf("session-%d", f.seq.Add(1)))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -309,6 +321,29 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			track, entry, offsetS = resume.track, resume.entry, resume.offsetS
 			resume = nil
 		} else {
+			// Talk break first — take-if-ready, never waits (v2). Placed
+			// before boundary() so a due break airs at the seam between
+			// tracks; lastFinished carries the backsell freshness anchor.
+			if f.d.Talk != nil {
+				if clip, ok := f.d.Talk.Take(lastFinished); ok {
+					stopClip, crashed, cerr := f.airClip(ctx, sess, clip, &samplesFed, tick, republish)
+					if cerr != nil {
+						return cerr
+					}
+					if crashed {
+						newDir, newSess, rerr := f.restartSession(ctx, dir)
+						if rerr != nil {
+							return rerr
+						}
+						dir, sess = newDir, newSess
+						continue // clip remainder skipped by design — no -ss reopen for talk
+					}
+					if stopClip {
+						return nil
+					}
+					continue
+				}
+			}
 			it, skip, stop, err := f.boundary(ctx)
 			if stop || ctx.Err() != nil {
 				return nil
@@ -353,10 +388,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		if resumed {
 			trackStartSamples = 0
 		} else {
-			// Overflow-safe: samplesFed can exceed ~9.2e9 (≈53h continuous at
-			// 48kHz) before time.Duration(samplesFed)*time.Second would overflow
-			// int64 nanoseconds. Split into whole seconds + sub-second remainder.
-			startedAt := f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
+			startedAt := f.startedAt(samplesFed)
 			entry = Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
 				StartedAt: startedAt, DurationS: int(track.DurationS),
 				Source: item.source, RequestedByName: item.requestedByName, Reason: item.reason}
@@ -431,6 +463,15 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		if stopSession {
 			return nil
 		}
+		// One music item finished (EOF, operator skip, or crash-cap skip) —
+		// it was announced and air-logged, so it counts on the format clock
+		// and becomes the backsell freshness anchor. Talk clips never reach
+		// here (airClip's branch continues the loop above); failed-open
+		// tracks continue before this point and were never announced.
+		if f.d.Talk != nil {
+			f.d.Talk.TrackFinished(entry)
+		}
+		lastFinished = entry
 	}
 }
 
@@ -482,6 +523,33 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS flo
 		return nil, nil, true, nil
 	}
 	return rd, func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }, false, nil
+}
+
+// airClip airs one pre-rendered talk clip: a raw s16le/48kHz/stereo file fed
+// through the same airTrack pacing as music. Open-before-announce applies —
+// the dj frame publishes only after the file opens — and the clip file is
+// deleted on every exit path (aired, cut by skip/off-air, crashed, failed
+// open). crashed=true means the encoder died mid-clip: the caller restarts
+// the session and skips the remainder (talk clips are never -ss reopened).
+// No air-log entry is written — history stays music-only and boot-resume
+// anchors on the last real track.
+func (f *Feeder) airClip(ctx context.Context, sess Session, clip Clip, samplesFed *int64, tick, republish <-chan time.Time) (stop, crashed bool, err error) {
+	rd, oerr := os.Open(clip.Path)
+	if oerr != nil {
+		f.d.Logger.Error("talk clip open failed; skipping break", "path", clip.Path, "err", oerr)
+		_ = os.Remove(clip.Path)
+		return false, false, nil
+	}
+	defer func() {
+		_ = rd.Close()
+		_ = os.Remove(clip.Path)
+	}()
+	entry := Entry{Title: "Tiểu Dương Dương",
+		StartedAt: f.startedAt(*samplesFed), DurationS: int(clip.DurationS + 0.5)}
+	n, _ := f.d.Listeners.Count(ctx)
+	f.publish(ctx, TopicNowPlaying, DJPayload(entry, n))
+	return f.airTrack(ctx, sess, rd, samplesFed, tick, republish,
+		func(listeners int) []byte { return DJPayload(entry, listeners) })
 }
 
 // ResumeOffset computes how far into e the broadcast is at `now`. expired

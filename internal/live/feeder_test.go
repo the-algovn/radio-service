@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -677,4 +679,190 @@ func TestStaleSkipClearedAtSessionStart(t *testing.T) {
 	require.Len(t, prod.byTopic(TopicNowPlaying), 1) // still the first track
 	cancel()
 	<-done
+}
+
+// --- talk-break fakes and tests (v2) ---
+
+// fakeTalkSource hands out clips in order, but only after at least minFinished
+// TrackFinished calls (mimics prepare-ahead: nothing ready at session start).
+type fakeTalkSource struct {
+	mu          sync.Mutex
+	clips       []Clip
+	minFinished int
+	finished    []Entry
+	takes       []Entry
+}
+
+func (s *fakeTalkSource) TrackFinished(e Entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finished = append(s.finished, e)
+}
+
+func (s *fakeTalkSource) Take(just Entry) (Clip, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.takes = append(s.takes, just)
+	if len(s.clips) == 0 || len(s.finished) < s.minFinished {
+		return Clip{}, false
+	}
+	c := s.clips[0]
+	s.clips = s.clips[1:]
+	return c, true
+}
+
+func (s *fakeTalkSource) finishedYTIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, e := range s.finished {
+		out = append(out, e.YTID)
+	}
+	return out
+}
+
+// writeClipFile writes n bytes of silence as a raw PCM clip file.
+func writeClipFile(t *testing.T, dir string, n int) string {
+	t.Helper()
+	p := filepath.Join(dir, "clip.pcm")
+	require.NoError(t, os.WriteFile(p, make([]byte, n), 0o644))
+	return p
+}
+
+func pumpFrames(t *testing.T, clk *fakeClock, prod *fakeProducer, done <-chan error, topic string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(topic)) < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d frames on %s (have %d)", want, topic, len(prod.byTopic(topic)))
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("session ended early: %v", err)
+		default:
+			clk.step(250 * time.Millisecond)
+		}
+	}
+}
+
+// A ready clip airs between tracks: track frame, dj frame, track frame; the
+// sample clock advances by the clip's real PCM length; the file is deleted;
+// the clip itself never fires TrackFinished.
+func TestTalkClipAirsBetweenTracks(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	clipPath := writeClipFile(t, t.TempDir(), chunkBytes*2) // 0.5s of PCM
+	talk := &fakeTalkSource{minFinished: 1, clips: []Clip{{
+		Path: clipPath, DurationS: 0.5, Kind: ClipStationID,
+	}}}
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	f.d.Talk = talk
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 3)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	frames := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, frames[0], `"kind":"track"`)
+	require.Contains(t, frames[1], `"kind":"dj"`)
+	require.Contains(t, frames[1], `"title":"Tiểu Dương Dương"`)
+	require.Contains(t, frames[1], `"durationSeconds":1`) // 0.5 rounds to 1... see note below
+	require.Contains(t, frames[2], `"kind":"track"`)
+
+	// Sample clock: dj started when track a (2 chunks = 0.5s) ended; the next
+	// track started 0.5s (the clip's PCM length) after the dj frame.
+	var f1, f2 struct {
+		StartedAt time.Time `json:"startedAt"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(frames[1]), &f1))
+	require.NoError(t, json.Unmarshal([]byte(frames[2]), &f2))
+	require.Equal(t, 500*time.Millisecond, f2.StartedAt.Sub(f1.StartedAt))
+
+	_, err := os.Stat(clipPath)
+	require.True(t, os.IsNotExist(err), "clip file must be deleted after airing")
+	// Track a finished normally; the dj clip must NOT appear here; track b was
+	// cut by the ctx cancel (session stop), which by contract does not fire
+	// TrackFinished either.
+	require.Equal(t, []string{"a"}, talk.finishedYTIDs())
+}
+
+// Take receives the entry that just finished (freshness anchor input) — zero
+// Entry before any music aired this session.
+func TestTakeReceivesJustFinishedEntry(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	talk := &fakeTalkSource{} // never ready
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	f.d.Talk = talk
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	talk.mu.Lock()
+	defer talk.mu.Unlock()
+	require.GreaterOrEqual(t, len(talk.takes), 2)
+	require.Equal(t, "", talk.takes[0].YTID, "first Take: nothing finished yet")
+	require.Equal(t, "a", talk.takes[1].YTID, "second Take: track a just finished")
+}
+
+// A clip whose file fails to open is skipped silently — no dj frame, music
+// continues in the same boundary pass.
+func TestTalkClipOpenFailureFallsThroughToMusic(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	talk := &fakeTalkSource{clips: []Clip{{Path: "/nonexistent/clip.pcm", DurationS: 1, Kind: ClipStationID}}}
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	f.d.Talk = talk
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	for _, fr := range prod.byTopic(TopicNowPlaying) {
+		require.NotContains(t, fr, `"kind":"dj"`)
+	}
+}
+
+// Encoder crash mid-clip: the session restarts, the clip's remainder is
+// skipped (never re-fed), its file is deleted, and music continues.
+func TestTalkClipCrashSkipsRemainder(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a")
+	enc := &crashingEncoder{aliveFrom: 1} // session 0 crashes instantly
+	prod, clk := &fakeProducer{}, newFakeClock()
+	clipPath := writeClipFile(t, t.TempDir(), chunkBytes*4)
+	talk := &fakeTalkSource{clips: []Clip{{Path: clipPath, DurationS: 1, Kind: ClipStationID}}}
+	f := newTestFeeder(store, lib, reqs, &enc.fakeEncoder, prod, clk, t.TempDir())
+	f.d.Encoder = enc
+	f.d.Talk = talk
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2) // dj frame + track a on the restarted session
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	require.GreaterOrEqual(t, enc.count(), 2, "encoder must have been restarted")
+	_, err := os.Stat(clipPath)
+	require.True(t, os.IsNotExist(err), "clip file must be deleted after a crash")
+	frames := prod.byTopic(TopicNowPlaying)
+	// RunSession's teardown defer always appends the off-air sentinel last
+	// (see TestOperatorOffAirEndsSession et al.), so the frame right before
+	// it is the one that proves music continued after the crash.
+	require.Contains(t, frames[len(frames)-2], `"kind":"track"`)
 }
