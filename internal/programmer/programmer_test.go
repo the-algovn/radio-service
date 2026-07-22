@@ -281,6 +281,16 @@ func TestPicksStoreCappedReason(t *testing.T) {
 		require.Equal(t, strings.Repeat("đ", 200), pending[0].Reason)
 	})
 
+	t.Run("trim then cap: untrimmed length exceeds 200 but trimmed is exactly 200", func(t *testing.T) {
+		reason := "  " + strings.Repeat("đ", 200) + "  "
+		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"` + reason + `"}]}`})
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		require.Equal(t, strings.Repeat("đ", 200), pending[0].Reason)
+	})
+
 	t.Run("fake mode stores no reason", func(t *testing.T) {
 		f := newFixture(t, &scriptedModel{})
 		f.prog.d.Fake = true

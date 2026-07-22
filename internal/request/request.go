@@ -49,8 +49,8 @@ type Item struct {
 // listener requests FIFO first, then AI picks FIFO.
 type Store interface {
 	// Create persists it (Source, RequestedBy, DisplayName, YTID, Title,
-	// Channel, DurationS, ThumbnailURL, Status are read from it) and returns
-	// the stored item with ID and CreatedAt filled.
+	// Channel, DurationS, ThumbnailURL, Reason, Status are read from it) and
+	// returns the stored item with ID and CreatedAt filled.
 	Create(ctx context.Context, it Item) (Item, error)
 	// NextReady returns what should air next: the oldest ready listener
 	// request, else the oldest ready AI pick. found=false when none.
