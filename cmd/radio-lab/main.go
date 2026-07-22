@@ -29,6 +29,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
+	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
@@ -168,12 +169,59 @@ func main() {
 	// registration below share the same stores.
 	airLog := live.NewPGAirLog(pool)
 	listeners := live.NewPGListeners(pool)
+
+	// DJ talk breaks (v2): director prepares clips ahead; the feeder airs
+	// them via FeederDeps.Talk. Off unless RADIO_DJ_ENABLED=true.
+	var talk live.TalkSource
+	var dj *director.Director
+	if config.GetBool("RADIO_DJ_ENABLED", false) {
+		mustNonNegInt := func(key, def string) int {
+			v, err := strconv.Atoi(config.Get(key, def))
+			if err != nil || v < 0 {
+				logger.Error("config", "err", key+" must be a non-negative integer", "raw", config.Get(key, def))
+				os.Exit(1)
+			}
+			return v
+		}
+		djRate, err := strconv.ParseFloat(config.Get("RADIO_DJ_RATE", "1.0"), 64)
+		if err != nil || djRate < 0 {
+			logger.Error("config", "err", "RADIO_DJ_RATE must be a non-negative number", "raw", config.Get("RADIO_DJ_RATE", "1.0"))
+			os.Exit(1)
+		}
+		djDir := filepath.Join(dataDir, "dj")
+		// Startup sweep: clips are regenerable; orphans from a crash are junk.
+		_ = os.RemoveAll(djDir)
+		if err := os.MkdirAll(djDir, 0o755); err != nil {
+			logger.Error("mkdir dj failed", "err", err)
+			os.Exit(1)
+		}
+		dj = director.New(director.Deps{
+			Model: models[defaultModel], Voice: voiceProv, VoiceFake: voiceFake,
+			Ledger: ledger, Station: stationStore, Listeners: listeners,
+			AirLog: airLog, Requests: requests,
+			PersonaDir:     config.Get("PERSONA_DIR", "persona"),
+			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
+			DataDir:        djDir, BudgetUSD: budget,
+			VoiceID:      config.Get("RADIO_DJ_VOICE", "vi-VN-Chirp3-HD-Aoede"),
+			Rate:         djRate,
+			BreakEvery:   mustNonNegInt("RADIO_DJ_BREAK_EVERY", "2"),
+			StationIDMin: mustNonNegInt("RADIO_DJ_STATION_ID_MIN", "60"),
+			MaxChars:     mustNonNegInt("RADIO_DJ_MAX_CHARS", "450"),
+			Clock:        live.RealClock(), Location: loc, Logger: logger,
+		})
+		talk = dj
+		logger.Info("dj talk breaks enabled",
+			"voice", config.Get("RADIO_DJ_VOICE", "vi-VN-Chirp3-HD-Aoede"),
+			"voice_fake", voiceFake, "model", defaultModel)
+	}
+
 	feeder := live.NewFeeder(live.FeederDeps{
 		Store: stationStore, Requests: requests, Library: lib,
 		Log: airLog, Listeners: listeners,
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
 		Producer: producer, Clock: live.RealClock(), Dir: hlsDir, Logger: logger,
+		Talk: talk,
 	})
 	engine := live.NewEngine(feeder, logger)
 	go func() {
@@ -219,6 +267,14 @@ func main() {
 			logger.Error("programmer exited", "err", err)
 		}
 	}()
+
+	if dj != nil {
+		go func() {
+			if err := dj.Run(ctx); err != nil {
+				logger.Error("director exited", "err", err)
+			}
+		}()
+	}
 
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
 		Store:     stationStore,
