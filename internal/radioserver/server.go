@@ -58,7 +58,6 @@ func mapErr(op string, err error) error {
 	case errors.Is(err, playlist.ErrNotFound):
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
 	case errors.Is(err, playlist.ErrEmptyPlaylist),
-		errors.Is(err, playlist.ErrNoActivePlaylist),
 		errors.Is(err, playlist.ErrActiveOnAir):
 		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
 	case errors.Is(err, playlist.ErrStale):

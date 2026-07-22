@@ -267,18 +267,10 @@ func (m *MemStore) SetActive(_ context.Context, playlistID string) (Station, err
 func (m *MemStore) GoOnAir(_ context.Context) (Station, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.station.onAir {
-		return m.stationLocked(), nil
+	if !m.station.onAir {
+		now := time.Now()
+		m.station.onAir, m.station.since = true, &now
 	}
-	p := m.find(m.station.activeID)
-	if p == nil {
-		return Station{}, ErrNoActivePlaylist
-	}
-	if len(p.items) == 0 {
-		return Station{}, ErrEmptyPlaylist
-	}
-	now := time.Now()
-	m.station.onAir, m.station.since = true, &now
 	return m.stationLocked(), nil
 }
 

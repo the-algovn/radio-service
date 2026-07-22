@@ -98,8 +98,13 @@ func TestStationGuards(t *testing.T) {
 	require.False(t, st.GetStation().GetOnAir())
 	require.Empty(t, st.GetStation().GetOnAirSince())
 
-	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err)) // no active playlist
+	// v1: on-air needs only a non-empty library (Task 11 adds the
+	// empty-library FailedPrecondition; this fixture's library has tracks).
+	on0, err := s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+	require.True(t, on0.GetStation().GetOnAir())
+	_, err = s.GoOffAir(ctx, &radiov1.GoOffAirRequest{})
+	require.NoError(t, err)
 
 	id := mkPlaylist(t, s, "mix", "a")
 	act, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})

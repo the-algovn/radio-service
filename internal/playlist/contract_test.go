@@ -136,9 +136,13 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Empty(t, s.ActivePlaylistID)
 		require.Nil(t, s.OnAirSince)
 
-		// on-air without active playlist
-		_, err = st.GoOnAir(ctx)
-		require.ErrorIs(t, err, playlist.ErrNoActivePlaylist)
+		// v1: GoOnAir no longer needs an active playlist — the engine falls
+		// back to library shuffle (spec §4.2). Idempotency and the
+		// OnAirSince anchor still hold.
+		s, err = st.GoOnAir(ctx)
+		require.NoError(t, err)
+		require.True(t, s.OnAir)
+		require.NotNil(t, s.OnAirSince)
 
 		empty, err := st.Create(ctx, "empty")
 		require.NoError(t, err)
@@ -223,7 +227,9 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, err)
 		_, _, err = st.RemoveTrack(ctx, p.ID, "a") // off-air: emptying active is allowed
 		require.NoError(t, err)
+		// v1: an emptied (or absent) active playlist no longer blocks
+		// GoOnAir — the engine falls back to library shuffle.
 		_, err = st.GoOnAir(ctx)
-		require.ErrorIs(t, err, playlist.ErrEmptyPlaylist)
+		require.NoError(t, err)
 	})
 }

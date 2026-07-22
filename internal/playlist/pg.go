@@ -327,16 +327,6 @@ func (s *PGStore) GoOnAir(ctx context.Context) (Station, error) {
 			out, err = stationOf(ctx, q, st.ActivePlaylistID, true, st.OnAirSince)
 			return err
 		}
-		if st.ActivePlaylistID == "" {
-			return ErrNoActivePlaylist
-		}
-		n, err := q.CountPlaylistItems(ctx, st.ActivePlaylistID)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return ErrEmptyPlaylist
-		}
 		row, err := q.StationGoOnAir(ctx)
 		if err != nil {
 			return err

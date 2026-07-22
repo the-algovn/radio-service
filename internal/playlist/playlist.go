@@ -1,10 +1,12 @@
 // Package playlist is the radio product's playlist + station-state store.
 // It mirrors internal/library's layout: a Store interface, PGStore
 // (prod/local) backed by Postgres via sqlc, and MemStore for hermetic tests.
-// State guards (on-air preconditions, delete/empty-while-on-air, stale
+// State guards (empty-playlist activation, delete/empty-while-on-air, stale
 // reorder) live in the implementations behind sentinel errors so the pg impl
 // can enforce them inside the mutation's transaction (SELECT … FOR UPDATE on
 // the singleton station row); internal/radioserver maps them to gRPC codes.
+// GoOnAir itself is an unconditional idempotent flip — the engine falls back
+// to library shuffle when there's no active playlist (spec §4.2).
 package playlist
 
 import (
@@ -14,11 +16,10 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("not found")
-	ErrEmptyPlaylist    = errors.New("playlist is empty")
-	ErrActiveOnAir      = errors.New("playlist is active while on air")
-	ErrNoActivePlaylist = errors.New("no active playlist")
-	ErrStale            = errors.New("stale track list")
+	ErrNotFound      = errors.New("not found")
+	ErrEmptyPlaylist = errors.New("playlist is empty")
+	ErrActiveOnAir   = errors.New("playlist is active while on air")
+	ErrStale         = errors.New("stale track list")
 )
 
 type Summary struct {
