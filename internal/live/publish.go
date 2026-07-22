@@ -70,6 +70,18 @@ func NowPlayingPayload(e Entry, listeners int) []byte {
 	return b
 }
 
+// DJPayload is the now-playing frame for an airing talk break (kind "dj").
+// listeners rides along so the SPA chip doesn't drop to 0 during breaks; the
+// script text never touches this world-readable channel.
+func DJPayload(e Entry, listeners int) []byte {
+	b, _ := json.Marshal(nowPlayingJSON{
+		Kind: "dj", Title: e.Title,
+		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
+		DurationSeconds: e.DurationS, Listeners: listeners,
+	})
+	return b
+}
+
 func OffAirPayload() []byte { return []byte(`{"offAir":true}`) }
 
 type requestQueueItemJSON struct {
