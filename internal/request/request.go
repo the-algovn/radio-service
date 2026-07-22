@@ -34,15 +34,15 @@ type Item struct {
 	Channel      string
 	DurationS    int64
 	ThumbnailURL string
-	Status       string
-	FailReason   string
-	Attempts     int
-	CreatedAt    time.Time
-	AiredAt      *time.Time
 	// Reason is the DJ's stated pick reason (AI-only vocabulary; "" for
 	// listener requests and fake-mode picks). Capped at 200 runes by the
 	// programmer at enqueue.
-	Reason string
+	Reason     string
+	Status     string
+	FailReason string
+	Attempts   int
+	CreatedAt  time.Time
+	AiredAt    *time.Time
 }
 
 // Store is the queue + request record. Air/display order everywhere is:
