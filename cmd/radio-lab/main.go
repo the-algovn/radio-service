@@ -202,7 +202,7 @@ func main() {
 			PersonaDir:     config.Get("PERSONA_DIR", "persona"),
 			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
 			DataDir:        djDir, BudgetUSD: budget,
-			VoiceID:      config.Get("RADIO_DJ_VOICE", "vi-VN-Chirp3-HD-Aoede"),
+			VoiceID:      config.Get("RADIO_DJ_VOICE", "vi-VN-Neural2-A"),
 			Rate:         djRate,
 			BreakEvery:   mustNonNegInt("RADIO_DJ_BREAK_EVERY", "2"),
 			StationIDMin: mustNonNegInt("RADIO_DJ_STATION_ID_MIN", "60"),
@@ -211,7 +211,7 @@ func main() {
 		})
 		talk = dj
 		logger.Info("dj talk breaks enabled",
-			"voice", config.Get("RADIO_DJ_VOICE", "vi-VN-Chirp3-HD-Aoede"),
+			"voice", config.Get("RADIO_DJ_VOICE", "vi-VN-Neural2-A"),
 			"voice_fake", voiceFake, "model", defaultModel)
 	}
 
