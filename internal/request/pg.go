@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/the-algovn/radio-service/internal/db"
@@ -163,4 +164,73 @@ func (s *PGStore) BumpAttempts(ctx context.Context, id, reason string) (int, err
 		return 0, err
 	}
 	return int(n), nil
+}
+
+func (s *PGStore) withTx(ctx context.Context, fn func(q *db.Queries) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(db.New(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PGStore) Reorder(ctx context.Context, ids []string) error {
+	return s.withTx(ctx, func(q *db.Queries) error {
+		current, err := q.PendingRequestIDs(ctx)
+		if err != nil {
+			return err
+		}
+		if len(ids) != len(current) {
+			return ErrStale
+		}
+		set := make(map[string]bool, len(current))
+		for _, id := range current {
+			set[id] = true
+		}
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if !set[id] || seen[id] {
+				return ErrStale
+			}
+			seen[id] = true
+		}
+		for i, id := range ids {
+			if err := q.SetRequestPosition(ctx, db.SetRequestPositionParams{
+				ID:       id,
+				Position: pgtype.Int4{Int32: int32(i), Valid: true},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *PGStore) RecentTerminal(ctx context.Context, n int) ([]Item, error) {
+	rows, err := db.New(s.pool).RecentTerminalRequests(ctx, int32(n))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Item, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName,
+			r.YtID, r.Title, r.Channel, r.DurationS, r.ThumbnailUrl, r.Status,
+			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason))
+	}
+	return out, nil
+}
+
+func (s *PGStore) FailPending(ctx context.Context, id, reason string) error {
+	n, err := db.New(s.pool).MarkPendingRequestFailed(ctx, db.MarkPendingRequestFailedParams{ID: id, FailReason: reason})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

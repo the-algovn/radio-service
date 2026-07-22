@@ -182,6 +182,84 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		_, err = s.BumpAttempts(ctx, missing, "x")
 		require.ErrorIs(t, err, request.ErrNotFound)
 	})
+
+	t.Run("reorder pins an explicit tier above the natural order", func(t *testing.T) {
+		s := newStore(t)
+		l1, err := s.Create(ctx, mk(request.SourceListener, "u1", "l1", request.StatusReady))
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+		a1, err := s.Create(ctx, mk(request.SourceAI, "", "a1", request.StatusReady))
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+		l2, err := s.Create(ctx, mk(request.SourceListener, "u2", "l2", request.StatusApproved))
+		require.NoError(t, err)
+
+		// natural order: l1, l2, a1 — pin the AI pick first
+		require.NoError(t, s.Reorder(ctx, []string{a1.ID, l1.ID, l2.ID}))
+		pending, err := s.Pending(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []string{a1.ID, l1.ID, l2.ID},
+			[]string{pending[0].ID, pending[1].ID, pending[2].ID})
+
+		// NextReady honors the explicit order: a1 (ready) now beats l1
+		next, found, err := s.NextReady(ctx)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, a1.ID, next.ID)
+
+		// a NEW arrival lands in the natural tier, AFTER positioned items
+		time.Sleep(10 * time.Millisecond)
+		l3, err := s.Create(ctx, mk(request.SourceListener, "u3", "l3", request.StatusReady))
+		require.NoError(t, err)
+		pending, err = s.Pending(ctx)
+		require.NoError(t, err)
+		require.Equal(t, l3.ID, pending[3].ID)
+	})
+
+	t.Run("reorder rejects stale sets", func(t *testing.T) {
+		s := newStore(t)
+		a, err := s.Create(ctx, mk(request.SourceListener, "u1", "a", request.StatusReady))
+		require.NoError(t, err)
+		b, err := s.Create(ctx, mk(request.SourceListener, "u1", "b", request.StatusReady))
+		require.NoError(t, err)
+
+		require.ErrorIs(t, s.Reorder(ctx, []string{a.ID}), request.ErrStale)                // missing
+		require.ErrorIs(t, s.Reorder(ctx, []string{a.ID, b.ID, "ghost"}), request.ErrStale) // extra
+		require.ErrorIs(t, s.Reorder(ctx, []string{a.ID, a.ID}), request.ErrStale)          // duplicate
+		require.NoError(t, s.Reorder(ctx, []string{b.ID, a.ID}))                            // exact set OK
+	})
+
+	t.Run("fail-pending guards status and records the reason", func(t *testing.T) {
+		s := newStore(t)
+		a, err := s.Create(ctx, mk(request.SourceListener, "u1", "a", request.StatusReady))
+		require.NoError(t, err)
+		require.NoError(t, s.FailPending(ctx, a.ID, "đài đã gỡ yêu cầu này"))
+		mine, err := s.ByUser(ctx, "u1", 1)
+		require.NoError(t, err)
+		require.Equal(t, request.StatusFailed, mine[0].Status)
+		require.Equal(t, "đài đã gỡ yêu cầu này", mine[0].FailReason)
+
+		require.ErrorIs(t, s.FailPending(ctx, a.ID, "x"), request.ErrNotFound) // already terminal
+		require.ErrorIs(t, s.FailPending(ctx, "00000000-0000-0000-0000-000000000000", "x"), request.ErrNotFound)
+	})
+
+	t.Run("recent terminal, newest first with cap", func(t *testing.T) {
+		s := newStore(t)
+		a, err := s.Create(ctx, mk(request.SourceListener, "u1", "a", request.StatusReady))
+		require.NoError(t, err)
+		require.NoError(t, s.MarkAired(ctx, a.ID, time.Now().Add(-2*time.Hour)))
+		b, err := s.Create(ctx, mk(request.SourceAI, "", "b", request.StatusApproved))
+		require.NoError(t, err)
+		require.NoError(t, s.MarkFailed(ctx, b.ID, "yt-dlp: 403")) // failed uses created_at ordering key
+		c, err := s.Create(ctx, mk(request.SourceListener, "u2", "c", request.StatusReady))
+		require.NoError(t, err)
+		require.NoError(t, s.MarkAired(ctx, c.ID, time.Now()))
+
+		rec, err := s.RecentTerminal(ctx, 2)
+		require.NoError(t, err)
+		require.Len(t, rec, 2)
+		require.Equal(t, c.ID, rec[0].ID) // newest aired first
+	})
 }
 
 func TestDayStart(t *testing.T) {

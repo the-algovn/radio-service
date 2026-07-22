@@ -13,6 +13,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrStale = errors.New("stale pending set")
 
 const (
 	SourceListener = "listener"
@@ -75,6 +76,15 @@ type Store interface {
 	// BumpAttempts increments attempts, records reason as the latest
 	// fail_reason, and returns the new count. Status is unchanged.
 	BumpAttempts(ctx context.Context, id, reason string) (int, error)
+	// Reorder assigns explicit positions 0..n-1 to ids, which must equal
+	// the CURRENT pending set exactly (set-equality) — ErrStale otherwise.
+	Reorder(ctx context.Context, ids []string) error
+	// RecentTerminal returns the last n aired/failed items, newest first
+	// (aired_at for aired, created_at for failed).
+	RecentTerminal(ctx context.Context, n int) ([]Item, error)
+	// FailPending flips approved|ready → failed with reason; ErrNotFound
+	// when the id is unknown or already terminal.
+	FailPending(ctx context.Context, id, reason string) error
 }
 
 // DayStart returns the start of the station-local civil day containing now

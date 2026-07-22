@@ -3,18 +3,20 @@ package request
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
 
 // MemStore is an in-memory Store for hermetic tests.
 type MemStore struct {
-	mu    sync.Mutex
-	seq   int
-	items []*Item // insertion order (== created_at order)
+	mu        sync.Mutex
+	seq       int
+	items     []*Item        // insertion order (== created_at order)
+	positions map[string]int // id → explicit position; absent = natural tier
 }
 
-func NewMemStore() *MemStore { return &MemStore{} }
+func NewMemStore() *MemStore { return &MemStore{positions: map[string]int{}} }
 
 func (m *MemStore) Create(_ context.Context, it Item) (Item, error) {
 	m.mu.Lock()
@@ -39,13 +41,28 @@ func (m *MemStore) find(id string) *Item {
 	return nil
 }
 
-// pendingLocked returns approved+ready in air order: listener FIFO, then ai
-// FIFO. m.items is already FIFO, so two passes suffice.
+// pendingLocked returns approved+ready in air order: the positioned tier
+// (ascending position), then the natural tier (listener FIFO, then ai FIFO).
 func (m *MemStore) pendingLocked() []*Item {
+	var positioned, natural []*Item
+	for _, it := range m.items {
+		if it.Status != StatusApproved && it.Status != StatusReady {
+			continue
+		}
+		if _, ok := m.positions[it.ID]; ok {
+			positioned = append(positioned, it)
+		} else {
+			natural = append(natural, it)
+		}
+	}
+	sort.SliceStable(positioned, func(i, j int) bool {
+		return m.positions[positioned[i].ID] < m.positions[positioned[j].ID]
+	})
 	var out []*Item
+	out = append(out, positioned...)
 	for _, src := range []string{SourceListener, SourceAI} {
-		for _, it := range m.items {
-			if it.Source == src && (it.Status == StatusApproved || it.Status == StatusReady) {
+		for _, it := range natural {
+			if it.Source == src {
 				out = append(out, it)
 			}
 		}
@@ -179,4 +196,70 @@ func (m *MemStore) BumpAttempts(_ context.Context, id, reason string) (int, erro
 	it.Attempts++
 	it.FailReason = reason
 	return it.Attempts, nil
+}
+
+func (m *MemStore) Reorder(_ context.Context, ids []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := map[string]bool{}
+	for _, it := range m.pendingLocked() {
+		current[it.ID] = true
+	}
+	if len(ids) != len(current) {
+		return ErrStale
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if !current[id] || seen[id] {
+			return ErrStale
+		}
+		seen[id] = true
+	}
+	for i, id := range ids {
+		m.positions[id] = i
+	}
+	return nil
+}
+
+func (m *MemStore) RecentTerminal(_ context.Context, n int) ([]Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	type keyed struct {
+		it *Item
+		at time.Time
+	}
+	var term []keyed
+	for _, it := range m.items {
+		switch it.Status {
+		case StatusAired:
+			at := it.CreatedAt
+			if it.AiredAt != nil {
+				at = *it.AiredAt
+			}
+			term = append(term, keyed{it, at})
+		case StatusFailed:
+			term = append(term, keyed{it, it.CreatedAt})
+		}
+	}
+	sort.SliceStable(term, func(i, j int) bool { return term[i].at.After(term[j].at) })
+	if len(term) > n {
+		term = term[:n]
+	}
+	out := make([]Item, 0, len(term))
+	for _, k := range term {
+		out = append(out, *k.it)
+	}
+	return out, nil
+}
+
+func (m *MemStore) FailPending(_ context.Context, id, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it := m.find(id)
+	if it == nil || (it.Status != StatusApproved && it.Status != StatusReady) {
+		return ErrNotFound
+	}
+	it.Status = StatusFailed
+	it.FailReason = reason
+	return nil
 }
