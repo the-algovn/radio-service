@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -23,6 +25,7 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
@@ -30,7 +33,9 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/programmer"
 	"github.com/the-algovn/radio-service/internal/radioserver"
+	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -115,13 +120,14 @@ func main() {
 			defaultModel = "anthropic"
 		}
 	}
+	runner := &ingest.Runner{}
 	srv := server.New(server.Deps{
 		Ledger: ledger, Library: lib,
 		Store: store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
 		FixturesDir:     config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
-		Ingest:          &ingest.Runner{}, TmpDir: tmpDir,
+		Ingest:          runner, TmpDir: tmpDir,
 		Logger: logger,
 	})
 	radiolabv1.RegisterLabServiceServer(gs, srv)
@@ -130,6 +136,17 @@ func main() {
 	// playlistStore is hoisted so the RadioService registration below and
 	// the feeder share the same store.
 	playlistStore := playlist.NewPGStore(pool)
+	requests := request.NewPGStore(pool)
+	loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
+	if err != nil {
+		logger.Error("load station timezone failed", "err", err)
+		os.Exit(1)
+	}
+	budget, err := strconv.ParseFloat(config.Get("RADIO_DAILY_BUDGET_USD", "1.0"), 64)
+	if err != nil {
+		logger.Error("config", "err", "RADIO_DAILY_BUDGET_USD is not a number", "raw", config.Get("RADIO_DAILY_BUDGET_USD", "1.0"))
+		os.Exit(1)
+	}
 	hlsDir := config.Get("HLS_DIR", filepath.Join(dataDir, "hls"))
 	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
 		logger.Error("mkdir hls failed", "err", err)
@@ -152,7 +169,7 @@ func main() {
 	airLog := live.NewPGAirLog(pool)
 	listeners := live.NewPGListeners(pool)
 	feeder := live.NewFeeder(live.FeederDeps{
-		Store: playlistStore, Library: lib,
+		Store: playlistStore, Requests: requests, Library: lib,
 		Log: airLog, Listeners: listeners,
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
@@ -175,12 +192,45 @@ func main() {
 		_ = hlsSrv.Close()
 	}()
 
+	acquirer := acquire.New(acquire.Deps{
+		Download: runner.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm,
+		Store: store, Library: lib, TmpDir: tmpDir, Logger: logger,
+	})
+	worker := acquire.NewWorker(acquire.WorkerDeps{
+		Requests: requests, Acquire: acquirer.Acquire, Producer: producer,
+		Clock: live.RealClock(), Logger: logger,
+	})
+	go func() {
+		if err := worker.Run(ctx); err != nil {
+			logger.Error("ingest worker exited", "err", err)
+		}
+	}()
+
+	prog := programmer.New(programmer.Deps{
+		Model: models[defaultModel], Fake: defaultModel == "fake",
+		PersonaDir: config.Get("PERSONA_DIR", "persona"),
+		Station: playlistStore, Requests: requests, Library: lib,
+		Log: airLog, Listeners: listeners, Search: runner, Ledger: ledger,
+		BudgetUSD: budget, Producer: producer, Clock: live.RealClock(),
+		Location: loc, Logger: logger,
+	})
+	go func() {
+		if err := prog.Run(ctx); err != nil {
+			logger.Error("programmer exited", "err", err)
+		}
+	}()
+
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
 		Store:     playlistStore,
 		Log:       airLog,
 		Listeners: listeners,
 		Notifier:  engine,
 		Logger:    logger,
+		Requests:  requests,
+		Library:   lib,
+		Producer:  producer,
+		Search:    runner,
+		Location:  loc,
 	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
