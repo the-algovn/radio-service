@@ -82,10 +82,27 @@ func testAirLogRecentAndSince(t *testing.T, log live.AirLog) {
 	ok, err := log.AiredSince(ctx, "a", base.Add(-time.Minute))
 	require.NoError(t, err)
 	require.True(t, ok)
+	ok, err = log.AiredSince(ctx, "a", base) // a started AT base; inclusive >=
+	require.NoError(t, err)
+	require.True(t, ok)
 	ok, err = log.AiredSince(ctx, "a", base.Add(time.Minute)) // a started AT base
 	require.NoError(t, err)
 	require.False(t, ok)
 	ok, err = log.AiredSince(ctx, "zz", base.Add(-time.Hour))
 	require.NoError(t, err)
 	require.False(t, ok)
+
+	// Tie-break: entries sharing an identical StartedAt must return
+	// latest-inserted first, matching the pg twin's ORDER BY started_at DESC,
+	// id DESC (id is BIGSERIAL, so ties break by most-recently-inserted).
+	tieAt := base.Add(time.Hour)
+	for _, id := range []string{"t1", "t2", "t3"} {
+		require.NoError(t, log.Append(ctx, live.Entry{
+			YTID: id, Title: "t-" + id, Artist: "c-" + id,
+			StartedAt: tieAt, DurationS: 240,
+		}))
+	}
+	ids, err = log.RecentYTIDs(ctx, 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"t3", "t2"}, ids)
 }

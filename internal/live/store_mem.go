@@ -65,7 +65,15 @@ func (m *MemAirLog) AiredSince(_ context.Context, ytID string, since time.Time) 
 func (m *MemAirLog) RecentYTIDs(_ context.Context, n int) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sorted := append([]Entry(nil), m.entries...)
+	// Reverse insertion order first so that, among entries sharing the same
+	// StartedAt, later-inserted entries precede earlier-inserted ones; the
+	// stable sort below then preserves that ordering — matching the pg twin's
+	// ORDER BY started_at DESC, id DESC (id is BIGSERIAL, so ties break by
+	// most-recently-inserted first).
+	sorted := make([]Entry, len(m.entries))
+	for i, e := range m.entries {
+		sorted[len(m.entries)-1-i] = e
+	}
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].StartedAt.After(sorted[j].StartedAt) })
 	if len(sorted) > n {
 		sorted = sorted[:n]
