@@ -380,7 +380,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		stopSession := false
 	feedTrack:
 		for {
-			stopTrack, crashed, aerr := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish, entry)
+			stopTrack, crashed, aerr := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish,
+				func(n int) []byte { return NowPlayingPayload(entry, n) })
 			if !crashed {
 				cleanup()
 				if aerr != nil {
@@ -499,7 +500,7 @@ func ResumeOffset(e Entry, now time.Time) (offsetS float64, expired bool) {
 	return off, false
 }
 
-// airTrack feeds one track's already-open PCM reader, paced one chunk per
+// airTrack feeds one item's already-open PCM reader, paced one chunk per
 // clock tick. Returns:
 //   - stop=true: the session must end entirely (ctx cancelled, or off-air
 //     observed within one chunk). No resume, no next track.
@@ -517,7 +518,10 @@ func ResumeOffset(e Entry, now time.Time) (offsetS float64, expired bool) {
 // checked on every tick right after writing that tick's chunk, so an
 // operator's flip takes effect within ~250ms rather than waiting for the
 // track to finish.
-func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, samplesFed *int64, tick, republish <-chan time.Time, entry Entry) (stop, crashed bool, err error) {
+//
+// frame builds the republish now-playing payload for this item (track or
+// talk clip) from a fresh listeners count.
+func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, samplesFed *int64, tick, republish <-chan time.Time, frame func(listeners int) []byte) (stop, crashed bool, err error) {
 	buf := make([]byte, chunkBytes)
 	for {
 		select {
@@ -530,7 +534,7 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, sampl
 			return false, true, nil
 		case <-republish:
 			n, _ := f.d.Listeners.Count(ctx)
-			f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
+			f.publish(ctx, TopicNowPlaying, frame(n))
 		case <-tick:
 			// one paced chunk per tick
 			n, rerr := io.ReadFull(rd, buf)
