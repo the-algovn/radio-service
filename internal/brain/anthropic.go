@@ -22,8 +22,14 @@ func (a *Anthropic) Name() string { return a.model }
 
 func (a *Anthropic) Generate(ctx context.Context, system, user string) (string, Usage, error) {
 	body, _ := json.Marshal(map[string]any{
-		"model": a.model, "max_tokens": 1024, "system": system,
-		"messages": []map[string]string{{"role": "user", "content": user}},
+		"model": a.model, "max_tokens": 2048, "system": system,
+		// Anthropic has no JSON mode; prefill an assistant "{" so the reply
+		// is forced to continue a JSON object instead of narrating in
+		// persona. The leading brace is restored below.
+		"messages": []map[string]string{
+			{"role": "user", "content": user},
+			{"role": "assistant", "content": "{"},
+		},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.base+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
@@ -43,8 +49,9 @@ func (a *Anthropic) Generate(ctx context.Context, system, user string) (string, 
 		return "", Usage{}, fmt.Errorf("anthropic %d: %s", resp.StatusCode, e.Error.Message)
 	}
 	var out struct {
-		Content []struct{ Text string }
-		Usage   struct {
+		Content    []struct{ Text string }
+		StopReason string `json:"stop_reason"`
+		Usage      struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
 		}
@@ -55,5 +62,11 @@ func (a *Anthropic) Generate(ctx context.Context, system, user string) (string, 
 	if len(out.Content) == 0 {
 		return "", Usage{}, fmt.Errorf("anthropic: empty response")
 	}
-	return out.Content[0].Text, Usage{In: out.Usage.InputTokens, Out: out.Usage.OutputTokens}, nil
+	u := Usage{In: out.Usage.InputTokens, Out: out.Usage.OutputTokens}
+	if out.StopReason == "max_tokens" {
+		return "", u, fmt.Errorf("anthropic: output truncated at max_tokens")
+	}
+	// Restore the "{" prefill the assistant turn ate — the reply is only the
+	// continuation.
+	return "{" + out.Content[0].Text, u, nil
 }
