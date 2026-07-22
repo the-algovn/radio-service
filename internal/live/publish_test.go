@@ -44,7 +44,3 @@ func TestRequestQueuePayload(t *testing.T) {
 	]`, got)
 	require.Equal(t, "[]", string(RequestQueuePayload(nil))) // empty array, never null
 }
-
-func TestQueuePayloadEmptyIsBareArray(t *testing.T) {
-	require.Equal(t, "[]", string(QueuePayload(nil, "whatever")))
-}

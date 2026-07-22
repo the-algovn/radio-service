@@ -2,7 +2,6 @@ package radioserver
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 func newTestServer(t *testing.T, ytIDs ...string) *Server {
@@ -25,7 +25,11 @@ func newTestServer(t *testing.T, ytIDs ...string) *Server {
 			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 60, ArtifactID: "a-" + id,
 		}))
 	}
-	return New(Deps{Store: playlist.NewMemStore(lib), Search: &fakeSearch{}, Now: time.Now})
+	return New(Deps{
+		Store: playlist.NewMemStore(lib), Log: live.NewMemAirLog(), Search: &fakeSearch{},
+		Requests: request.NewMemStore(), Library: lib, Location: time.FixedZone("ICT", 7*3600),
+		Now: time.Now,
+	})
 }
 
 // mkPlaylist creates a playlist with the given tracks and returns its id.
@@ -161,7 +165,7 @@ func newLiveTestServer(t *testing.T, ytIDs ...string) (*Server, playlist.Store, 
 	st := playlist.NewMemStore(lib)
 	log := live.NewMemAirLog()
 	ls := live.NewMemListeners(time.Now)
-	return New(Deps{Store: st, Log: log, Listeners: ls}), st, log, ls
+	return New(Deps{Store: st, Log: log, Listeners: ls, Library: lib}), st, log, ls
 }
 
 func TestGetNowPlayingOffAirIsEmpty(t *testing.T) {
@@ -195,24 +199,6 @@ func TestGetNowPlayingOnAir(t *testing.T) {
 	_ = st
 }
 
-func TestGetQueueRotation(t *testing.T) {
-	s, _, log, _ := newLiveTestServer(t, "a", "b", "c")
-	ctx := context.Background()
-	id := mkPlaylist(t, s, "mix", "a", "b", "c")
-	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
-	require.NoError(t, err)
-	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
-	require.NoError(t, err)
-	require.NoError(t, log.Append(ctx, live.Entry{YTID: "b", Title: "t-b", Artist: "c-b", StartedAt: time.Now(), DurationS: 60}))
-
-	resp, err := s.GetQueue(ctx, &radiov1.GetQueueRequest{})
-	require.NoError(t, err)
-	items := resp.GetItems()
-	require.Len(t, items, 2)
-	require.Equal(t, "t-c", items[0].GetTitle()) // after current b, wrapping
-	require.Equal(t, "t-a", items[1].GetTitle())
-}
-
 func TestGetHistoryAndHeartbeat(t *testing.T) {
 	s, _, log, ls := newLiveTestServer(t)
 	ctx := context.Background()
@@ -241,7 +227,7 @@ func TestGoOnAirPokesNotifier(t *testing.T) {
 	lib := library.NewMemLibrary()
 	require.NoError(t, lib.Add(context.Background(), library.Track{YTID: "a", Title: "t", Channel: "c", DurationS: 60, ArtifactID: "x"}))
 	pokes := 0
-	s := New(Deps{Store: playlist.NewMemStore(lib), Notifier: notifierFunc(func() { pokes++ })})
+	s := New(Deps{Store: playlist.NewMemStore(lib), Library: lib, Notifier: notifierFunc(func() { pokes++ })})
 	id := mkPlaylist(t, s, "mix", "a")
 	ctx := context.Background()
 	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
@@ -256,45 +242,3 @@ func TestGoOnAirPokesNotifier(t *testing.T) {
 type notifierFunc func()
 
 func (f notifierFunc) Poke() { f() }
-
-// failingAirLog wraps an AirLog and makes Latest return an error.
-type failingAirLog struct {
-	log live.AirLog
-}
-
-func (f *failingAirLog) Append(ctx context.Context, e live.Entry) error {
-	return f.log.Append(ctx, e)
-}
-
-func (f *failingAirLog) Latest(ctx context.Context) (live.Entry, bool, error) {
-	return live.Entry{}, false, errors.New("test error")
-}
-
-func (f *failingAirLog) History(ctx context.Context, limit int) ([]live.Entry, error) {
-	return f.log.History(ctx, limit)
-}
-
-func (f *failingAirLog) AiredSince(ctx context.Context, ytID string, since time.Time) (bool, error) {
-	return f.log.AiredSince(ctx, ytID, since)
-}
-
-func (f *failingAirLog) RecentYTIDs(ctx context.Context, n int) ([]string, error) {
-	return f.log.RecentYTIDs(ctx, n)
-}
-
-func TestGetQueueAirLogError(t *testing.T) {
-	s, st, log, _ := newLiveTestServer(t, "a")
-	ctx := context.Background()
-	id := mkPlaylist(t, s, "mix", "a")
-	_, err := s.SetActivePlaylist(ctx, &radiov1.SetActivePlaylistRequest{PlaylistId: id})
-	require.NoError(t, err)
-	_, err = s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
-	require.NoError(t, err)
-
-	// Replace with a failing AirLog
-	s.deps.Log = &failingAirLog{log: log}
-	_ = st // unused in this test
-
-	_, err = s.GetQueue(ctx, &radiov1.GetQueueRequest{})
-	require.Equal(t, codes.Internal, status.Code(err))
-}

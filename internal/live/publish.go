@@ -8,7 +8,6 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
 )
 
@@ -68,41 +67,6 @@ func NowPlayingPayload(e Entry, listeners int) []byte {
 }
 
 func OffAirPayload() []byte { return []byte(`{"offAir":true}`) }
-
-// QueueAfter returns the rotation order starting after currentYTID
-// (wrapping), excluding the current track. Unknown current → the whole list.
-func QueueAfter(items []playlist.Item, currentYTID string) []playlist.Item {
-	cur := -1
-	for i, it := range items {
-		if it.YTID == currentYTID {
-			cur = i
-			break
-		}
-	}
-	if cur < 0 {
-		return items
-	}
-	out := make([]playlist.Item, 0, len(items)-1)
-	out = append(out, items[cur+1:]...)
-	out = append(out, items[:cur]...)
-	return out
-}
-
-type queueItemJSON struct {
-	Title         string `json:"title"`
-	Artist        string `json:"artist,omitempty"`
-	HasDedication bool   `json:"hasDedication"`
-}
-
-func QueuePayload(items []playlist.Item, currentYTID string) []byte {
-	after := QueueAfter(items, currentYTID)
-	out := make([]queueItemJSON, 0, len(after))
-	for _, it := range after {
-		out = append(out, queueItemJSON{Title: it.Title, Artist: it.Channel})
-	}
-	b, _ := json.Marshal(out)
-	return b
-}
 
 type requestQueueItemJSON struct {
 	Title           string `json:"title"`

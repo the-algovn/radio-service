@@ -17,13 +17,27 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/playlist"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 const (
 	maxNameRunes    = 200
 	maxSessionIDLen = 100
+
+	maxPendingPerUser = 3
+	maxPerDay         = 10
+	recentAirWindow   = 2 * time.Hour
+	maxRequestSeconds = 600
+	myRequestsCap     = 50
+
+	msgPendingQuota = "bạn đang có ba bài chờ phát rồi, đợi chút nha"
+	msgDailyQuota   = "hôm nay bạn yêu cầu đủ mười bài rồi, mai lại nhé"
+	msgDupQueued    = "bài này đang trong hàng đợi rồi, sắp phát thôi"
+	msgRecentAired  = "vừa phát xong, để khuya nhé"
+	msgTooLong      = "bài dài quá mười phút, đài không phát được"
 )
 
 // Notifier lets the server nudge the broadcast engine (same process) when
@@ -43,6 +57,10 @@ type Deps struct {
 	Logger    *slog.Logger
 	Search    Searcher         // yt-dlp search (nil only in tests that skip it)
 	Now       func() time.Time // injected clock; nil → time.Now
+	Requests  request.Store
+	Library   library.Library
+	Producer  live.Producer
+	Location  *time.Location // station-local civil day for daily quotas; nil → UTC
 }
 
 type Server struct {
@@ -59,6 +77,9 @@ func New(deps Deps) *Server {
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now
+	}
+	if deps.Location == nil {
+		deps.Location = time.UTC
 	}
 	return &Server{deps: deps, logger: logger, search: newBuckets(deps.Now)}
 }
@@ -234,6 +255,13 @@ func (s *Server) SetActivePlaylist(ctx context.Context, req *radiov1.SetActivePl
 }
 
 func (s *Server) GoOnAir(ctx context.Context, _ *radiov1.GoOnAirRequest) (*radiov1.GoOnAirResponse, error) {
+	n, err := s.deps.Library.Count(ctx, "")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "library count: %v", err)
+	}
+	if n == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "library is empty — nothing to broadcast")
+	}
 	st, err := s.deps.Store.GoOnAir(ctx)
 	if err != nil {
 		return nil, mapErr("go on air", err)
@@ -284,26 +312,16 @@ func (s *Server) GetNowPlaying(ctx context.Context, _ *radiov1.GetNowPlayingRequ
 }
 
 func (s *Server) GetQueue(ctx context.Context, _ *radiov1.GetQueueRequest) (*radiov1.GetQueueResponse, error) {
-	st, err := s.deps.Store.GetStation(ctx)
+	items, err := s.deps.Requests.Pending(ctx)
 	if err != nil {
-		return nil, mapErr("get station", err)
-	}
-	if !st.OnAir || st.ActivePlaylistID == "" {
-		return &radiov1.GetQueueResponse{}, nil
-	}
-	_, items, err := s.deps.Store.Get(ctx, st.ActivePlaylistID)
-	if err != nil {
-		return nil, mapErr("get playlist", err)
-	}
-	current := ""
-	if e, found, err := s.deps.Log.Latest(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "air log: %v", err)
-	} else if found {
-		current = e.YTID
+		return nil, status.Errorf(codes.Internal, "queue read: %v", err)
 	}
 	resp := &radiov1.GetQueueResponse{}
-	for _, it := range live.QueueAfter(items, current) {
-		resp.Items = append(resp.Items, &radiov1.QueueItem{Title: it.Title, Artist: it.Channel})
+	for _, it := range items {
+		resp.Items = append(resp.Items, &radiov1.QueueItem{
+			Title: it.Title, Artist: it.Channel, ThumbnailUrl: it.ThumbnailURL,
+			Source: it.Source, RequestedByName: it.DisplayName,
+		})
 	}
 	return resp, nil
 }
@@ -364,6 +382,92 @@ func (s *Server) SearchCandidates(ctx context.Context, req *radiov1.SearchCandid
 			YtId: sc.YTID, Title: sc.Title, Channel: sc.Channel,
 			DurationS: int32(sc.DurationS), ThumbnailUrl: sc.ThumbnailURL,
 		})
+	}
+	return resp, nil
+}
+
+func requestProto(it request.Item) *radiov1.TrackRequest {
+	return &radiov1.TrackRequest{
+		Id: it.ID, Source: it.Source, RequestedByName: it.DisplayName,
+		YtId: it.YTID, Title: it.Title, Channel: it.Channel,
+		DurationS: int32(it.DurationS), ThumbnailUrl: it.ThumbnailURL,
+		Status: it.Status, FailReason: it.FailReason,
+		CreatedAt: it.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequest) (*radiov1.RequestTrackResponse, error) {
+	sub, name, err := identityFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "sign in to request a song")
+	}
+	c := req.GetCandidate()
+	if c == nil || c.GetYtId() == "" || c.GetTitle() == "" {
+		return nil, status.Error(codes.InvalidArgument, "candidate with yt_id and title is required")
+	}
+	if c.GetDurationS() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "candidate duration is required")
+	}
+	if c.GetDurationS() > maxRequestSeconds {
+		return nil, status.Error(codes.InvalidArgument, msgTooLong)
+	}
+	pending, err := s.deps.Requests.CountPendingByUser(ctx, sub)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "pending count: %v", err)
+	}
+	if pending >= maxPendingPerUser {
+		return nil, status.Error(codes.ResourceExhausted, msgPendingQuota)
+	}
+	today, err := s.deps.Requests.CountSince(ctx, sub, request.DayStart(s.deps.Now(), s.deps.Location))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "daily count: %v", err)
+	}
+	if today >= maxPerDay {
+		return nil, status.Error(codes.ResourceExhausted, msgDailyQuota)
+	}
+	dup, err := s.deps.Requests.HasPendingYTID(ctx, c.GetYtId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "dup check: %v", err)
+	}
+	if dup {
+		return nil, status.Error(codes.AlreadyExists, msgDupQueued)
+	}
+	aired, err := s.deps.Log.AiredSince(ctx, c.GetYtId(), s.deps.Now().Add(-recentAirWindow))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "air check: %v", err)
+	}
+	if aired {
+		return nil, status.Error(codes.FailedPrecondition, msgRecentAired)
+	}
+	st := request.StatusApproved
+	if _, cached, _ := s.deps.Library.Get(ctx, c.GetYtId()); cached {
+		st = request.StatusReady
+	}
+	it, err := s.deps.Requests.Create(ctx, request.Item{
+		Source: request.SourceListener, RequestedBy: sub, DisplayName: name,
+		YTID: c.GetYtId(), Title: c.GetTitle(), Channel: c.GetChannel(),
+		DurationS: int64(c.GetDurationS()), ThumbnailURL: c.GetThumbnailUrl(), Status: st,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "create request: %v", err)
+	}
+	s.logger.Info("listener request queued", "yt_id", it.YTID, "sub", sub, "status", it.Status)
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	return &radiov1.RequestTrackResponse{Request: requestProto(it)}, nil
+}
+
+func (s *Server) ListMyRequests(ctx context.Context, _ *radiov1.ListMyRequestsRequest) (*radiov1.ListMyRequestsResponse, error) {
+	sub, _, err := identityFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "sign in to see your requests")
+	}
+	items, err := s.deps.Requests.ByUser(ctx, sub, myRequestsCap)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list requests: %v", err)
+	}
+	resp := &radiov1.ListMyRequestsResponse{}
+	for _, it := range items {
+		resp.Requests = append(resp.Requests, requestProto(it))
 	}
 	return resp, nil
 }
