@@ -166,7 +166,8 @@ func TestGetQueueReturnsPendingWithBadges(t *testing.T) {
 	s := newTestServer(t)
 	ctx0 := context.Background()
 	_, err := s.deps.Requests.Create(ctx0, request.Item{Source: request.SourceAI,
-		YTID: "ai1", Title: "AI Pick", Channel: "c", DurationS: 100, Status: request.StatusReady})
+		YTID: "ai1", Title: "AI Pick", Channel: "c", DurationS: 100, Status: request.StatusReady,
+		Reason: "đổi gió"})
 	require.NoError(t, err)
 	_, err = s.deps.Requests.Create(ctx0, request.Item{Source: request.SourceListener,
 		RequestedBy: "u1", DisplayName: "Ngọc", YTID: "l1", Title: "Yêu Cầu", Channel: "c",
@@ -184,6 +185,8 @@ func TestGetQueueReturnsPendingWithBadges(t *testing.T) {
 	require.Equal(t, "https://img/l1", items[0].GetThumbnailUrl())
 	require.Equal(t, "ai", items[1].GetSource())
 	require.False(t, items[0].GetHasDedication())
+	require.Equal(t, "đổi gió", items[1].GetReason())
+	require.Empty(t, items[0].GetReason()) // listener rows carry no reason
 }
 
 func TestGoOnAirNeedsNonEmptyLibrary(t *testing.T) {

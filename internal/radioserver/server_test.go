@@ -223,6 +223,44 @@ func TestGetHistoryAndHeartbeat(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, status.Code(err)) // oversized
 }
 
+func TestNowPlayingAndHistoryCarryProvenance(t *testing.T) {
+	s, _, _, _ := newLiveTestServer(t, "a") // Listeners must be set: on-air GetNowPlaying calls it
+	ctx := context.Background()
+	_, err := s.GoOnAir(ctx, &radiov1.GoOnAirRequest{})
+	require.NoError(t, err)
+
+	// currently airing: a listener request
+	require.NoError(t, s.deps.Log.Append(ctx, live.Entry{
+		YTID: "a", Title: "t-a", Artist: "c-a",
+		StartedAt: time.Now().Add(-10 * time.Second), DurationS: 240,
+		Source: "listener", RequestedByName: "Ngọc",
+	}))
+	np, err := s.GetNowPlaying(ctx, &radiov1.GetNowPlayingRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "listener", np.GetNowPlaying().GetSource())
+	require.Equal(t, "Ngọc", np.GetNowPlaying().GetRequestedByName())
+	require.Empty(t, np.GetNowPlaying().GetReason())
+
+	// finished earlier: an AI pick → history carries source + reason
+	require.NoError(t, s.deps.Log.Append(ctx, live.Entry{
+		YTID: "b", Title: "t-b", Artist: "c-b",
+		StartedAt: time.Now().Add(-2 * time.Hour), DurationS: 60,
+		Source: "ai", Reason: "hợp đêm mưa",
+	}))
+	h, err := s.GetHistory(ctx, &radiov1.GetHistoryRequest{})
+	require.NoError(t, err)
+	var hit *radiov1.HistoryItem
+	for _, it := range h.GetItems() {
+		if it.GetTitle() == "t-b" {
+			hit = it
+		}
+	}
+	require.NotNil(t, hit)
+	require.Equal(t, "ai", hit.GetSource())
+	require.Equal(t, "hợp đêm mưa", hit.GetReason())
+	require.Empty(t, hit.GetRequestedByName())
+}
+
 func TestGoOnAirPokesNotifier(t *testing.T) {
 	lib := library.NewMemLibrary()
 	require.NoError(t, lib.Add(context.Background(), library.Track{YTID: "a", Title: "t", Channel: "c", DurationS: 60, ArtifactID: "x"}))

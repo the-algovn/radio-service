@@ -308,6 +308,7 @@ func (s *Server) GetNowPlaying(ctx context.Context, _ *radiov1.GetNowPlayingRequ
 		Kind: "track", Title: e.Title, Artist: e.Artist,
 		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
 		DurationSeconds: int32(e.DurationS), Listeners: int32(n),
+		Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
 	}}, nil
 }
 
@@ -321,6 +322,7 @@ func (s *Server) GetQueue(ctx context.Context, _ *radiov1.GetQueueRequest) (*rad
 		resp.Items = append(resp.Items, &radiov1.QueueItem{
 			Title: it.Title, Artist: it.Channel, ThumbnailUrl: it.ThumbnailURL,
 			Source: it.Source, RequestedByName: it.DisplayName,
+			Reason: it.Reason,
 		})
 	}
 	return resp, nil
@@ -336,6 +338,7 @@ func (s *Server) GetHistory(ctx context.Context, _ *radiov1.GetHistoryRequest) (
 		resp.Items = append(resp.Items, &radiov1.HistoryItem{
 			Title: e.Title, Artist: e.Artist,
 			AiredAt: e.StartedAt.UTC().Format(time.RFC3339Nano),
+			Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
 		})
 	}
 	return resp, nil
