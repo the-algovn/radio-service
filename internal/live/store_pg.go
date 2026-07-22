@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -45,6 +46,14 @@ func (l *PGAirLog) History(ctx context.Context, limit int) ([]Entry, error) {
 			StartedAt: r.StartedAt, DurationS: int(r.DurationS)})
 	}
 	return out, nil
+}
+
+func (l *PGAirLog) AiredSince(ctx context.Context, ytID string, since time.Time) (bool, error) {
+	return db.New(l.pool).AiredSince(ctx, db.AiredSinceParams{YtID: ytID, StartedAt: since})
+}
+
+func (l *PGAirLog) RecentYTIDs(ctx context.Context, n int) ([]string, error) {
+	return db.New(l.pool).RecentAirLogYTIDs(ctx, int32(n))
 }
 
 // PGListeners stores heartbeats in Postgres; Beat opportunistically prunes.

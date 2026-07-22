@@ -31,4 +31,7 @@ type Library interface {
 	// Delete removes a track by yt_id and returns its artifact_id so the
 	// caller can delete the MinIO blob. found is false (err nil) when absent.
 	Delete(ctx context.Context, ytID string) (artifactID string, found bool, err error)
+	// AllIDs returns every yt_id in the library, sorted ascending — the
+	// shuffle fallback and the programmer's brief sample read this.
+	AllIDs(ctx context.Context) ([]string, error)
 }

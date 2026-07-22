@@ -57,6 +57,10 @@ func TestPGLibraryRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, all, 2)
 
+	ids, err := l.AllIDs(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"abc123", "def456"}, ids) // sorted ascending
+
 	byTitle, err := l.List(ctx, "lo-fi", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, byTitle, 1)

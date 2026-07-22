@@ -22,6 +22,12 @@ type AirLog interface {
 	Append(ctx context.Context, e Entry) error
 	Latest(ctx context.Context) (Entry, bool, error)
 	History(ctx context.Context, limit int) ([]Entry, error)
+	// AiredSince reports whether ytID started airing at or after since —
+	// the 2h re-request guard reads this (shuffle plays have no request row).
+	AiredSince(ctx context.Context, ytID string, since time.Time) (bool, error)
+	// RecentYTIDs returns the yt_ids of the latest n entries, newest first —
+	// the shuffle no-repeat window and the AI-pick filters read this.
+	RecentYTIDs(ctx context.Context, n int) ([]string, error)
 }
 
 type Listeners interface {

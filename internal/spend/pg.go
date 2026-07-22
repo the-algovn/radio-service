@@ -2,6 +2,7 @@ package spend
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -40,4 +41,10 @@ func (l *PGLedger) All(ctx context.Context) ([]Line, error) {
 // TotalCost is the SUM(cost_usd) primitive the Spec-3 budget cap reuses.
 func (l *PGLedger) TotalCost(ctx context.Context) (float64, error) {
 	return db.New(l.pool).SumLedgerCost(ctx)
+}
+
+// SpentSince sums cost at or after since — the programmer's daily budget
+// gate (station day boundaries come from the caller).
+func (l *PGLedger) SpentSince(ctx context.Context, since time.Time) (float64, error) {
+	return db.New(l.pool).SumLedgerCostSince(ctx, since)
 }

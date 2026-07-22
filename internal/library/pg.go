@@ -65,6 +65,10 @@ func (l *PGLibrary) Delete(ctx context.Context, ytID string) (string, bool, erro
 	return artifactID, true, nil
 }
 
+func (l *PGLibrary) AllIDs(ctx context.Context) ([]string, error) {
+	return db.New(l.pool).AllTrackIDs(ctx)
+}
+
 func trackFromRow(r db.Track) Track {
 	return Track{
 		YTID: r.YtID, Title: r.Title, Channel: r.Channel, ArtifactID: r.ArtifactID,

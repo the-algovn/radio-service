@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -46,6 +47,32 @@ func (m *MemAirLog) History(_ context.Context, limit int) ([]Entry, error) {
 		if e.StartedAt.Add(time.Duration(e.DurationS) * time.Second).Before(now) {
 			out = append(out, e)
 		}
+	}
+	return out, nil
+}
+
+func (m *MemAirLog) AiredSince(_ context.Context, ytID string, since time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.entries {
+		if e.YTID == ytID && !e.StartedAt.Before(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *MemAirLog) RecentYTIDs(_ context.Context, n int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sorted := append([]Entry(nil), m.entries...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].StartedAt.After(sorted[j].StartedAt) })
+	if len(sorted) > n {
+		sorted = sorted[:n]
+	}
+	out := make([]string, 0, len(sorted))
+	for _, e := range sorted {
+		out = append(out, e.YTID)
 	}
 	return out, nil
 }

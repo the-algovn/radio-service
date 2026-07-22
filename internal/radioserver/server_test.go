@@ -269,6 +269,14 @@ func (f *failingAirLog) History(ctx context.Context, limit int) ([]live.Entry, e
 	return f.log.History(ctx, limit)
 }
 
+func (f *failingAirLog) AiredSince(ctx context.Context, ytID string, since time.Time) (bool, error) {
+	return f.log.AiredSince(ctx, ytID, since)
+}
+
+func (f *failingAirLog) RecentYTIDs(ctx context.Context, n int) ([]string, error) {
+	return f.log.RecentYTIDs(ctx, n)
+}
+
 func TestGetQueueAirLogError(t *testing.T) {
 	s, st, log, _ := newLiveTestServer(t, "a")
 	ctx := context.Background()

@@ -45,6 +45,11 @@ func runStoreContract(t *testing.T, newStores storeFactory) {
 		require.Equal(t, "b", hist[0].YTID)
 	})
 
+	t.Run("air log recent and since", func(t *testing.T) {
+		log, _ := newStores(t)
+		testAirLogRecentAndSince(t, log)
+	})
+
 	t.Run("listeners window", func(t *testing.T) {
 		_, ls := newStores(t)
 		n, err := ls.Count(ctx)
@@ -58,4 +63,29 @@ func runStoreContract(t *testing.T, newStores storeFactory) {
 		require.NoError(t, err)
 		require.Equal(t, 2, n)
 	})
+}
+
+func testAirLogRecentAndSince(t *testing.T, log live.AirLog) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
+	for i, id := range []string{"a", "b", "c"} {
+		require.NoError(t, log.Append(ctx, live.Entry{
+			YTID: id, Title: "t-" + id, Artist: "c-" + id,
+			StartedAt: base.Add(time.Duration(i) * 5 * time.Minute), DurationS: 240,
+		}))
+	}
+
+	ids, err := log.RecentYTIDs(ctx, 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"c", "b"}, ids) // newest first, limit respected
+
+	ok, err := log.AiredSince(ctx, "a", base.Add(-time.Minute))
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = log.AiredSince(ctx, "a", base.Add(time.Minute)) // a started AT base
+	require.NoError(t, err)
+	require.False(t, ok)
+	ok, err = log.AiredSince(ctx, "zz", base.Add(-time.Hour))
+	require.NoError(t, err)
+	require.False(t, ok)
 }

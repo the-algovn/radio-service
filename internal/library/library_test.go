@@ -79,6 +79,17 @@ func TestMemLibraryListDefaultLimit(t *testing.T) {
 	require.Len(t, out, 50)
 }
 
+func TestAllIDsSorted(t *testing.T) {
+	lib := NewMemLibrary()
+	ctx := context.Background()
+	for _, id := range []string{"zz", "aa", "mm"} {
+		require.NoError(t, lib.Add(ctx, Track{YTID: id, Title: id, ArtifactID: "a-" + id}))
+	}
+	ids, err := lib.AllIDs(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"aa", "mm", "zz"}, ids)
+}
+
 func TestMemLibraryListPaginationAndCount(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemLibrary()

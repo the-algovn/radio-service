@@ -71,6 +71,17 @@ func (m *MemLibrary) filtered(query string) []Track {
 	return out
 }
 
+func (m *MemLibrary) AllIDs(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.tracks))
+	for id := range m.tracks {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (m *MemLibrary) Delete(_ context.Context, ytID string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
