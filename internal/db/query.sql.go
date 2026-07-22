@@ -52,6 +52,48 @@ func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow,
 	return items, nil
 }
 
+const airedSince = `-- name: AiredSince :one
+SELECT EXISTS(
+  SELECT 1 FROM air_log WHERE yt_id = $1 AND started_at >= $2
+)
+`
+
+type AiredSinceParams struct {
+	YtID      string
+	StartedAt time.Time
+}
+
+func (q *Queries) AiredSince(ctx context.Context, arg AiredSinceParams) (bool, error) {
+	row := q.db.QueryRow(ctx, airedSince, arg.YtID, arg.StartedAt)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const allTrackIDs = `-- name: AllTrackIDs :many
+SELECT yt_id FROM track ORDER BY yt_id
+`
+
+func (q *Queries) AllTrackIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, allTrackIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var yt_id string
+		if err := rows.Scan(&yt_id); err != nil {
+			return nil, err
+		}
+		items = append(items, yt_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const appendAirLog = `-- name: AppendAirLog :exec
 INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
 VALUES ($1, $2, $3, $4, $5)
@@ -107,6 +149,23 @@ func (q *Queries) BeatListener(ctx context.Context, sessionID string) error {
 	return err
 }
 
+const bumpRequestAttempts = `-- name: BumpRequestAttempts :one
+UPDATE request SET attempts = attempts + 1, fail_reason = $2 WHERE id = $1
+RETURNING attempts
+`
+
+type BumpRequestAttemptsParams struct {
+	ID         string
+	FailReason string
+}
+
+func (q *Queries) BumpRequestAttempts(ctx context.Context, arg BumpRequestAttemptsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, bumpRequestAttempts, arg.ID, arg.FailReason)
+	var attempts int32
+	err := row.Scan(&attempts)
+	return attempts, err
+}
+
 const countListeners = `-- name: CountListeners :one
 SELECT count(*) FROM radio_listener
 WHERE last_seen > now() - interval '75 seconds'
@@ -119,12 +178,40 @@ func (q *Queries) CountListeners(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const countPendingByUser = `-- name: CountPendingByUser :one
+SELECT count(*) FROM request
+WHERE requested_by = $1 AND status IN ('approved', 'ready')
+`
+
+func (q *Queries) CountPendingByUser(ctx context.Context, requestedBy string) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingByUser, requestedBy)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countPlaylistItems = `-- name: CountPlaylistItems :one
 SELECT count(*) FROM playlist_item WHERE playlist_id = $1
 `
 
 func (q *Queries) CountPlaylistItems(ctx context.Context, playlistID string) (int64, error) {
 	row := q.db.QueryRow(ctx, countPlaylistItems, playlistID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countRequestsSince = `-- name: CountRequestsSince :one
+SELECT count(*) FROM request WHERE requested_by = $1 AND created_at >= $2
+`
+
+type CountRequestsSinceParams struct {
+	RequestedBy string
+	CreatedAt   time.Time
+}
+
+func (q *Queries) CountRequestsSince(ctx context.Context, arg CountRequestsSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countRequestsSince, arg.RequestedBy, arg.CreatedAt)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -163,6 +250,74 @@ func (q *Queries) CreatePlaylist(ctx context.Context, name string) (CreatePlayli
 		&i.Name,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createRequest = `-- name: CreateRequest :one
+INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+`
+
+type CreateRequestParams struct {
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+}
+
+type CreateRequestRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
+func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (CreateRequestRow, error) {
+	row := q.db.QueryRow(ctx, createRequest,
+		arg.Source,
+		arg.RequestedBy,
+		arg.DisplayName,
+		arg.YtID,
+		arg.Title,
+		arg.Channel,
+		arg.DurationS,
+		arg.ThumbnailUrl,
+		arg.Status,
+	)
+	var i CreateRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.Source,
+		&i.RequestedBy,
+		&i.DisplayName,
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.DurationS,
+		&i.ThumbnailUrl,
+		&i.Status,
+		&i.FailReason,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.AiredAt,
 	)
 	return i, err
 }
@@ -286,6 +441,19 @@ func (q *Queries) GetTrack(ctx context.Context, ytID string) (Track, error) {
 		&i.AddedAt,
 	)
 	return i, err
+}
+
+const hasPendingYTID = `-- name: HasPendingYTID :one
+SELECT EXISTS(
+  SELECT 1 FROM request WHERE yt_id = $1 AND status IN ('approved', 'ready')
+)
+`
+
+func (q *Queries) HasPendingYTID(ctx context.Context, ytID string) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPendingYTID, ytID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const insertLedgerLine = `-- name: InsertLedgerLine :exec
@@ -604,6 +772,205 @@ func (q *Queries) LockStationRow(ctx context.Context) (LockStationRowRow, error)
 	return i, err
 }
 
+const markRequestAired = `-- name: MarkRequestAired :execrows
+UPDATE request SET status = 'aired', aired_at = $2 WHERE id = $1
+`
+
+type MarkRequestAiredParams struct {
+	ID      string
+	AiredAt *time.Time
+}
+
+func (q *Queries) MarkRequestAired(ctx context.Context, arg MarkRequestAiredParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markRequestAired, arg.ID, arg.AiredAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markRequestFailed = `-- name: MarkRequestFailed :execrows
+UPDATE request SET status = 'failed', fail_reason = $2 WHERE id = $1
+`
+
+type MarkRequestFailedParams struct {
+	ID         string
+	FailReason string
+}
+
+func (q *Queries) MarkRequestFailed(ctx context.Context, arg MarkRequestFailedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markRequestFailed, arg.ID, arg.FailReason)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markRequestReady = `-- name: MarkRequestReady :execrows
+UPDATE request SET status = 'ready' WHERE id = $1 AND status = 'approved'
+`
+
+func (q *Queries) MarkRequestReady(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, markRequestReady, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const nextReadyRequest = `-- name: NextReadyRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status = 'ready'
+ORDER BY (source = 'ai'), created_at, id LIMIT 1
+`
+
+type NextReadyRequestRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
+// Air order: listener requests FIFO, then AI picks FIFO — (source = 'ai')
+// sorts false (listener) before true.
+func (q *Queries) NextReadyRequest(ctx context.Context) (NextReadyRequestRow, error) {
+	row := q.db.QueryRow(ctx, nextReadyRequest)
+	var i NextReadyRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.Source,
+		&i.RequestedBy,
+		&i.DisplayName,
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.DurationS,
+		&i.ThumbnailUrl,
+		&i.Status,
+		&i.FailReason,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.AiredAt,
+	)
+	return i, err
+}
+
+const oldestApprovedRequest = `-- name: OldestApprovedRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status = 'approved'
+ORDER BY created_at, id LIMIT 1
+`
+
+type OldestApprovedRequestRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
+func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequestRow, error) {
+	row := q.db.QueryRow(ctx, oldestApprovedRequest)
+	var i OldestApprovedRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.Source,
+		&i.RequestedBy,
+		&i.DisplayName,
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.DurationS,
+		&i.ThumbnailUrl,
+		&i.Status,
+		&i.FailReason,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.AiredAt,
+	)
+	return i, err
+}
+
+const pendingRequests = `-- name: PendingRequests :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status IN ('approved', 'ready')
+ORDER BY (source = 'ai'), created_at, id
+`
+
+type PendingRequestsRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
+func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, error) {
+	rows, err := q.db.Query(ctx, pendingRequests)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PendingRequestsRow{}
+	for rows.Next() {
+		var i PendingRequestsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Source,
+			&i.RequestedBy,
+			&i.DisplayName,
+			&i.YtID,
+			&i.Title,
+			&i.Channel,
+			&i.DurationS,
+			&i.ThumbnailUrl,
+			&i.Status,
+			&i.FailReason,
+			&i.Attempts,
+			&i.CreatedAt,
+			&i.AiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const playlistStats = `-- name: PlaylistStats :one
 SELECT count(pi.yt_id)::int AS track_count,
        COALESCE(sum(t.duration_s), 0)::bigint AS total_duration_s
@@ -633,6 +1000,30 @@ func (q *Queries) PruneListeners(ctx context.Context) error {
 	return err
 }
 
+const recentAirLogYTIDs = `-- name: RecentAirLogYTIDs :many
+SELECT yt_id FROM air_log ORDER BY started_at DESC, id DESC LIMIT $1
+`
+
+func (q *Queries) RecentAirLogYTIDs(ctx context.Context, limit int32) ([]string, error) {
+	rows, err := q.db.Query(ctx, recentAirLogYTIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var yt_id string
+		if err := rows.Scan(&yt_id); err != nil {
+			return nil, err
+		}
+		items = append(items, yt_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const renamePlaylist = `-- name: RenamePlaylist :one
 UPDATE playlist SET name = $2, updated_at = now() WHERE id = $1
 RETURNING id::text AS id, name, created_at, updated_at
@@ -660,6 +1051,70 @@ func (q *Queries) RenamePlaylist(ctx context.Context, arg RenamePlaylistParams) 
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const requestsByUser = `-- name: RequestsByUser :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE requested_by = $1
+ORDER BY created_at DESC, id DESC LIMIT $2
+`
+
+type RequestsByUserParams struct {
+	RequestedBy string
+	Limit       int32
+}
+
+type RequestsByUserRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
+func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) ([]RequestsByUserRow, error) {
+	rows, err := q.db.Query(ctx, requestsByUser, arg.RequestedBy, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RequestsByUserRow{}
+	for rows.Next() {
+		var i RequestsByUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Source,
+			&i.RequestedBy,
+			&i.DisplayName,
+			&i.YtID,
+			&i.Title,
+			&i.Channel,
+			&i.DurationS,
+			&i.ThumbnailUrl,
+			&i.Status,
+			&i.FailReason,
+			&i.Attempts,
+			&i.CreatedAt,
+			&i.AiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setStationActive = `-- name: SetStationActive :exec
@@ -713,6 +1168,18 @@ SELECT COALESCE(SUM(cost_usd), 0)::double precision AS total FROM ledger_line
 
 func (q *Queries) SumLedgerCost(ctx context.Context) (float64, error) {
 	row := q.db.QueryRow(ctx, sumLedgerCost)
+	var total float64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const sumLedgerCostSince = `-- name: SumLedgerCostSince :one
+SELECT COALESCE(SUM(cost_usd), 0)::double precision AS total
+FROM ledger_line WHERE ts >= $1
+`
+
+func (q *Queries) SumLedgerCostSince(ctx context.Context, ts time.Time) (float64, error) {
+	row := q.db.QueryRow(ctx, sumLedgerCostSince, ts)
 	var total float64
 	err := row.Scan(&total)
 	return total, err

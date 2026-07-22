@@ -49,6 +49,23 @@ type RadioListener struct {
 	LastSeen  time.Time
 }
 
+type Request struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+}
+
 type Station struct {
 	ID               bool
 	ActivePlaylistID pgtype.UUID

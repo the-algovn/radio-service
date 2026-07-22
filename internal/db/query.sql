@@ -147,3 +147,75 @@ WHERE last_seen > now() - interval '75 seconds';
 
 -- name: PruneListeners :exec
 DELETE FROM radio_listener WHERE last_seen < now() - interval '10 minutes';
+
+-- name: CreateRequest :one
+INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at;
+
+-- Air order: listener requests FIFO, then AI picks FIFO — (source = 'ai')
+-- sorts false (listener) before true.
+-- name: NextReadyRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status = 'ready'
+ORDER BY (source = 'ai'), created_at, id LIMIT 1;
+
+-- name: OldestApprovedRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status = 'approved'
+ORDER BY created_at, id LIMIT 1;
+
+-- name: PendingRequests :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE status IN ('approved', 'ready')
+ORDER BY (source = 'ai'), created_at, id;
+
+-- name: RequestsByUser :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at
+FROM request WHERE requested_by = $1
+ORDER BY created_at DESC, id DESC LIMIT $2;
+
+-- name: CountPendingByUser :one
+SELECT count(*) FROM request
+WHERE requested_by = $1 AND status IN ('approved', 'ready');
+
+-- name: CountRequestsSince :one
+SELECT count(*) FROM request WHERE requested_by = $1 AND created_at >= $2;
+
+-- name: HasPendingYTID :one
+SELECT EXISTS(
+  SELECT 1 FROM request WHERE yt_id = $1 AND status IN ('approved', 'ready')
+);
+
+-- name: MarkRequestReady :execrows
+UPDATE request SET status = 'ready' WHERE id = $1 AND status = 'approved';
+
+-- name: MarkRequestAired :execrows
+UPDATE request SET status = 'aired', aired_at = $2 WHERE id = $1;
+
+-- name: MarkRequestFailed :execrows
+UPDATE request SET status = 'failed', fail_reason = $2 WHERE id = $1;
+
+-- name: BumpRequestAttempts :one
+UPDATE request SET attempts = attempts + 1, fail_reason = $2 WHERE id = $1
+RETURNING attempts;
+
+-- name: AiredSince :one
+SELECT EXISTS(
+  SELECT 1 FROM air_log WHERE yt_id = $1 AND started_at >= $2
+);
+
+-- name: RecentAirLogYTIDs :many
+SELECT yt_id FROM air_log ORDER BY started_at DESC, id DESC LIMIT $1;
+
+-- name: AllTrackIDs :many
+SELECT yt_id FROM track ORDER BY yt_id;
+
+-- name: SumLedgerCostSince :one
+SELECT COALESCE(SUM(cost_usd), 0)::double precision AS total
+FROM ledger_line WHERE ts >= $1;
