@@ -1,7 +1,7 @@
 // Package radioserver implements algovn.radio.v1.RadioService — the public
 // radio product's operator surface (Slice 1: playlists + station control).
 // Input validation and sentinel→gRPC-code mapping live here; state guards
-// live in playlist.Store.
+// live in station.Store and request.Store.
 package radioserver
 
 import (
