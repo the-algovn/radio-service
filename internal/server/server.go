@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/callin"
@@ -374,50 +375,22 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	if req.GetYtId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
 	}
-	if tr, found, _ := s.deps.Library.Get(ctx, req.GetYtId()); found {
-		a, err := s.deps.Store.Get(ctx, tr.ArtifactID)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "store get: %v", err)
-		}
-		return &radiolabv1.DownloadTrackResponse{
-			Artifact: s.artifactToProto(ctx, a), DurationS: tr.DurationS,
-			InputI: tr.InputI, InputTp: tr.InputTP, InputLra: tr.InputLRA, Cached: true,
-		}, nil
-	}
-	tmp, err := os.MkdirTemp(s.deps.TmpDir, "dl-*")
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "tmp: %v", err)
-	}
-	defer os.RemoveAll(tmp)
-	p, err := s.deps.Ingest.Download(ctx, req.GetYtId(), tmp)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "download: %v", err)
-	}
-	dur, err := ingest.Probe(ctx, p)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "probe: %v", err)
-	}
-	i, tp, lra, err := ingest.Loudnorm(ctx, p)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "loudnorm: %v", err)
-	}
-	label := req.GetTitle()
-	if label == "" {
-		label = req.GetYtId()
-	}
-	a, err := s.deps.Store.SaveFile(ctx, "track", p, label, map[string]string{
-		"yt_id": req.GetYtId(), "duration_s": fmt.Sprintf("%.1f", dur), "input_i": fmt.Sprintf("%.1f", i),
+	acq := acquire.New(acquire.Deps{
+		Download: s.deps.Ingest.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm,
+		Store: s.deps.Store, Library: s.deps.Library, TmpDir: s.deps.TmpDir, Logger: s.logger,
 	})
+	tr, cached, err := acq.Acquire(ctx, req.GetYtId(), req.GetTitle(), req.GetChannel())
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "store: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "acquire: %v", err)
 	}
-	if err := s.deps.Library.Add(ctx, library.Track{
-		YTID: req.GetYtId(), Title: label, Channel: req.GetChannel(), DurationS: dur,
-		ArtifactID: a.ID, InputI: i, InputTP: tp, InputLRA: lra,
-	}); err != nil {
-		s.logger.Error("library add failed", "yt_id", req.GetYtId(), "err", err)
+	a, err := s.deps.Store.Get(ctx, tr.ArtifactID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "store get: %v", err)
 	}
-	return &radiolabv1.DownloadTrackResponse{Artifact: s.artifactToProto(ctx, a), DurationS: dur, InputI: i, InputTp: tp, InputLra: lra}, nil
+	return &radiolabv1.DownloadTrackResponse{
+		Artifact: s.artifactToProto(ctx, a), DurationS: tr.DurationS,
+		InputI: tr.InputI, InputTp: tr.InputTP, InputLra: tr.InputLRA, Cached: cached,
+	}, nil
 }
 
 func (s *Server) RenderPreview(ctx context.Context, req *radiolabv1.RenderPreviewRequest) (*radiolabv1.RenderPreviewResponse, error) {
