@@ -17,9 +17,9 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 const (
@@ -47,7 +47,7 @@ type Deps struct {
 	Model      brain.Model
 	Fake       bool // fake model wired: skip the LLM, re-spin one random library track
 	PersonaDir string
-	Station    playlist.Store
+	Station    station.Store
 	Requests   request.Store
 	Library    library.Library
 	Log        live.AirLog
@@ -107,6 +107,9 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 	st, err := p.d.Station.GetStation(ctx)
 	if err != nil || !st.OnAir {
 		return
+	}
+	if !st.AIEnabled {
+		return // operator paused the DJ (v1.2) — requests and shuffle unaffected
 	}
 	n, err := p.d.Listeners.Count(ctx)
 	if err != nil || n == 0 {

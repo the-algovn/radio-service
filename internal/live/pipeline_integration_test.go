@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/the-algovn/radio-service/internal/library"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 // makeTone writes an n-second 440Hz sine m4a for the pipeline to chew on.
@@ -47,14 +47,8 @@ func TestRealPipelineProducesLiveHLS(t *testing.T) {
 		YTID: "tone-a", Title: "Tone A", Channel: "test", DurationS: 4,
 		ArtifactID: "art-a", InputI: -20, InputTP: -3, InputLRA: 5,
 	}))
-	st := playlist.NewMemStore(lib)
-	p, err := st.Create(ctx, "tones")
-	require.NoError(t, err)
-	_, _, err = st.AddTrack(ctx, p.ID, "tone-a")
-	require.NoError(t, err)
-	_, err = st.SetActive(ctx, p.ID)
-	require.NoError(t, err)
-	_, err = st.GoOnAir(ctx)
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(ctx)
 	require.NoError(t, err)
 
 	f := NewFeeder(FeederDeps{

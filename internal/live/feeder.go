@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/the-algovn/radio-service/internal/library"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 const (
@@ -36,7 +36,7 @@ func (realClock) Tick(d time.Duration) <-chan time.Time {
 func RealClock() Clock { return realClock{} }
 
 type FeederDeps struct {
-	Store     playlist.Store
+	Store     station.Store
 	Requests  request.Store // the play queue; boundary priority 1–2
 	Library   library.Library
 	Log       AirLog

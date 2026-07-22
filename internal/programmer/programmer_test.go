@@ -14,9 +14,9 @@ import (
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 type scriptedModel struct {
@@ -53,7 +53,7 @@ type fixture struct {
 	prog    *Programmer
 	model   *scriptedModel
 	search  *scriptedSearch
-	station playlist.Store
+	station station.Store
 	reqs    *request.MemStore
 	lib     *library.MemLibrary
 	log     *live.MemAirLog
@@ -73,7 +73,7 @@ func newFixture(t *testing.T, model *scriptedModel) *fixture {
 			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 240, ArtifactID: "a-" + id,
 		}))
 	}
-	st := playlist.NewMemStore(lib)
+	st := station.NewMemStore()
 	_, err := st.GoOnAir(ctx)
 	require.NoError(t, err)
 	lst := live.NewMemListeners(time.Now)
@@ -133,6 +133,32 @@ func TestGatesProduceNoModelCalls(t *testing.T) {
 		require.NoError(t, f.ledger.Append(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: "gemini", CostUSD: 1.0}))
 		f.prog.RunOnce(ctx)
 		require.Zero(t, f.model.calls)
+	})
+}
+
+func TestPausedAIProducesNothing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("real mode: zero model calls", func(t *testing.T) {
+		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2"}]}`})
+		_, err := f.station.SetAIEnabled(ctx, false)
+		require.NoError(t, err)
+		f.prog.RunOnce(ctx)
+		require.Zero(t, f.model.calls)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Empty(t, pending)
+	})
+
+	t.Run("fake mode: zero enqueues", func(t *testing.T) {
+		f := newFixture(t, &scriptedModel{})
+		f.prog.d.Fake = true
+		_, err := f.station.SetAIEnabled(ctx, false)
+		require.NoError(t, err)
+		f.prog.RunOnce(ctx)
+		pending, err := f.reqs.Pending(ctx)
+		require.NoError(t, err)
+		require.Empty(t, pending)
 	})
 }
 

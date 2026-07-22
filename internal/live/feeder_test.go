@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/the-algovn/radio-service/internal/library"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 // --- fakes ---
@@ -195,7 +195,7 @@ func (p *fakeProducer) byTopic(topic string) []string {
 
 // fixture: station on-air; tracks in the library only (playlists are
 // curation tools now — the engine never reads them). Requests seed per-test.
-func newFixture(t *testing.T, ytIDs ...string) (playlist.Store, library.Library, *request.MemStore) {
+func newFixture(t *testing.T, ytIDs ...string) (station.Store, library.Library, *request.MemStore) {
 	t.Helper()
 	lib := library.NewMemLibrary()
 	ctx := context.Background()
@@ -204,13 +204,13 @@ func newFixture(t *testing.T, ytIDs ...string) (playlist.Store, library.Library,
 			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 60, ArtifactID: "art-" + id,
 		}))
 	}
-	st := playlist.NewMemStore(lib)
+	st := station.NewMemStore()
 	_, err := st.GoOnAir(ctx)
 	require.NoError(t, err)
 	return st, lib, request.NewMemStore()
 }
 
-func newTestFeeder(store playlist.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
+func newTestFeeder(store station.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
 	return NewFeeder(FeederDeps{
 		Store: store, Requests: reqs, Library: lib,
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),

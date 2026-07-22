@@ -32,12 +32,12 @@ import (
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
-	"github.com/the-algovn/radio-service/internal/playlist"
 	"github.com/the-algovn/radio-service/internal/programmer"
 	"github.com/the-algovn/radio-service/internal/radioserver"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
@@ -133,9 +133,9 @@ func main() {
 	radiolabv1.RegisterLabServiceServer(gs, srv)
 
 	// Broadcast engine (Slice 2): feeder + HLS listener + optional Kafka feeds.
-	// playlistStore is hoisted so the RadioService registration below and
+	// stationStore is hoisted so the RadioService registration below and
 	// the feeder share the same store.
-	playlistStore := playlist.NewPGStore(pool)
+	stationStore := station.NewPGStore(pool)
 	requests := request.NewPGStore(pool)
 	loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
 	if err != nil {
@@ -169,7 +169,7 @@ func main() {
 	airLog := live.NewPGAirLog(pool)
 	listeners := live.NewPGListeners(pool)
 	feeder := live.NewFeeder(live.FeederDeps{
-		Store: playlistStore, Requests: requests, Library: lib,
+		Store: stationStore, Requests: requests, Library: lib,
 		Log: airLog, Listeners: listeners,
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
@@ -209,7 +209,7 @@ func main() {
 	prog := programmer.New(programmer.Deps{
 		Model: models[defaultModel], Fake: defaultModel == "fake",
 		PersonaDir: config.Get("PERSONA_DIR", "persona"),
-		Station: playlistStore, Requests: requests, Library: lib,
+		Station:    stationStore, Requests: requests, Library: lib,
 		Log: airLog, Listeners: listeners, Search: runner, Ledger: ledger,
 		BudgetUSD: budget, Producer: producer, Clock: live.RealClock(),
 		Location: loc, Logger: logger,
@@ -221,7 +221,7 @@ func main() {
 	}()
 
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
-		Store:     playlistStore,
+		Store:     stationStore,
 		Log:       airLog,
 		Listeners: listeners,
 		Notifier:  engine,
