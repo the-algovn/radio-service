@@ -92,10 +92,14 @@ func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 }
 
 // airItem is boundary's pick: the library track to air and, when it came
-// from the request queue, the request id to mark aired/failed.
+// from the request queue, the request id to mark aired/failed plus its
+// provenance (copied onto the air-log Entry; empty for shuffle picks).
 type airItem struct {
-	track     library.Track
-	requestID string
+	track           library.Track
+	requestID       string
+	source          string
+	requestedByName string
+	reason          string
 }
 
 const shuffleWindowCap = 50
@@ -134,7 +138,8 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 			}
 			return airItem{}, true, false, nil
 		}
-		return airItem{track: track, requestID: req.ID}, false, false, nil
+		return airItem{track: track, requestID: req.ID,
+			source: req.Source, requestedByName: req.DisplayName, reason: req.Reason}, false, false, nil
 	}
 
 	// Shuffle bed: uniform over the library minus the last-N aired.
@@ -286,13 +291,13 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		var track library.Track
 		var entry Entry
 		var offsetS float64
-		requestID := ""
+		var item airItem
 		resumed := resume != nil
 		if resumed {
 			track, entry, offsetS = resume.track, resume.entry, resume.offsetS
 			resume = nil
 		} else {
-			item, skip, stop, err := f.boundary(ctx)
+			it, skip, stop, err := f.boundary(ctx)
 			if stop || ctx.Err() != nil {
 				return nil
 			}
@@ -302,7 +307,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			if skip { // vanished track: boundary already handled it
 				continue
 			}
-			track, requestID = item.track, item.requestID
+			item = it
+			track = item.track
 		}
 
 		// Open the artifact + decoder BEFORE announcing anything: a track
@@ -314,9 +320,9 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			return err
 		}
 		if openSkip {
-			if requestID != "" {
-				if err := f.d.Requests.MarkFailed(ctx, requestID, "artifact failed to open"); err != nil {
-					f.d.Logger.Error("mark request failed", "id", requestID, "err", err)
+			if item.requestID != "" {
+				if err := f.d.Requests.MarkFailed(ctx, item.requestID, "artifact failed to open"); err != nil {
+					f.d.Logger.Error("mark request failed", "id", item.requestID, "err", err)
 				}
 			}
 			continue
@@ -340,16 +346,17 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			// int64 nanoseconds. Split into whole seconds + sub-second remainder.
 			startedAt := f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
 			entry = Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
-				StartedAt: startedAt, DurationS: int(track.DurationS)}
+				StartedAt: startedAt, DurationS: int(track.DurationS),
+				Source: item.source, RequestedByName: item.requestedByName, Reason: item.reason}
 			if err := f.d.Log.Append(ctx, entry); err != nil {
 				f.d.Logger.Error("air log append failed", "err", err)
 			}
 			trackStartSamples = samplesFed
 			// Mark the request aired only now: openTrack succeeded and the
 			// air-log entry is written, so this track genuinely aired.
-			if requestID != "" {
-				if err := f.d.Requests.MarkAired(ctx, requestID, entry.StartedAt); err != nil {
-					f.d.Logger.Error("mark request aired", "id", requestID, "err", err)
+			if item.requestID != "" {
+				if err := f.d.Requests.MarkAired(ctx, item.requestID, entry.StartedAt); err != nil {
+					f.d.Logger.Error("mark request aired", "id", item.requestID, "err", err)
 				}
 			}
 		}

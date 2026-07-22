@@ -281,6 +281,52 @@ func titleOf(frame string) string {
 	return v.Title
 }
 
+// Provenance flows: a listener request airs with name+source, an AI pick
+// with reason, and the shuffle bed with none of the three.
+func TestNowPlayingCarriesProvenance(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b", "req", "pick")
+	ctx0 := context.Background()
+	_, err := reqs.Create(ctx0, request.Item{Source: request.SourceAI,
+		YTID: "pick", Title: "t-pick", Channel: "c-pick", DurationS: 60,
+		Status: request.StatusReady, Reason: "hợp đêm mưa"})
+	require.NoError(t, err)
+	_, err = reqs.Create(ctx0, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", DisplayName: "Ngọc", YTID: "req", Title: "t-req",
+		Channel: "c-req", DurationS: 60, Status: request.StatusReady})
+	require.NoError(t, err)
+
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	nps := prod.byTopic(TopicNowPlaying)
+	// frame 0: the listener request
+	require.Contains(t, nps[0], `"source":"listener"`)
+	require.Contains(t, nps[0], `"requestedByName":"Ngọc"`)
+	require.NotContains(t, nps[0], `"reason"`)
+	// frame 1: the AI pick
+	require.Contains(t, nps[1], `"source":"ai"`)
+	require.Contains(t, nps[1], `"reason":"hợp đêm mưa"`)
+	require.NotContains(t, nps[1], "requestedByName")
+	// frame 2: shuffle — unattributed
+	require.NotContains(t, nps[2], `"source"`)
+	require.NotContains(t, nps[2], "requestedByName")
+	require.NotContains(t, nps[2], `"reason"`)
+}
+
 // A ready listener request airs before a ready AI pick, which airs before
 // shuffle; aired requests are marked and leave the queue payload.
 func TestBoundaryPriorityRequestThenAIThenShuffle(t *testing.T) {
