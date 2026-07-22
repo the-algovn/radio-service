@@ -68,6 +68,7 @@ type Request struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Position     pgtype.Int4
 }
 
 type Station struct {
@@ -76,6 +77,7 @@ type Station struct {
 	OnAir            bool
 	OnAirSince       *time.Time
 	UpdatedAt        time.Time
+	AiEnabled        bool
 }
 
 type Track struct {

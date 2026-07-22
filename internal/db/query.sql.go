@@ -8,6 +8,8 @@ package db
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const airHistory = `-- name: AirHistory :many
@@ -412,7 +414,7 @@ func (q *Queries) GetPlaylistRow(ctx context.Context, id string) (GetPlaylistRow
 }
 
 const getStationRow = `-- name: GetStationRow :one
-SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 FROM station WHERE id = TRUE
 `
 
@@ -420,6 +422,7 @@ type GetStationRowRow struct {
 	ActivePlaylistID string
 	OnAir            bool
 	OnAirSince       *time.Time
+	AiEnabled        bool
 }
 
 // Station queries below use extra ::text casts that aren't semantically
@@ -433,7 +436,12 @@ type GetStationRowRow struct {
 func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 	row := q.db.QueryRow(ctx, getStationRow)
 	var i GetStationRowRow
-	err := row.Scan(&i.ActivePlaylistID, &i.OnAir, &i.OnAirSince)
+	err := row.Scan(
+		&i.ActivePlaylistID,
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+	)
 	return i, err
 }
 
@@ -774,7 +782,7 @@ func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track
 }
 
 const lockStationRow = `-- name: LockStationRow :one
-SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 FROM station WHERE id = TRUE FOR UPDATE
 `
 
@@ -782,13 +790,37 @@ type LockStationRowRow struct {
 	ActivePlaylistID string
 	OnAir            bool
 	OnAirSince       *time.Time
+	AiEnabled        bool
 }
 
 func (q *Queries) LockStationRow(ctx context.Context) (LockStationRowRow, error) {
 	row := q.db.QueryRow(ctx, lockStationRow)
 	var i LockStationRowRow
-	err := row.Scan(&i.ActivePlaylistID, &i.OnAir, &i.OnAirSince)
+	err := row.Scan(
+		&i.ActivePlaylistID,
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+	)
 	return i, err
+}
+
+const markPendingRequestFailed = `-- name: MarkPendingRequestFailed :execrows
+UPDATE request SET status = 'failed', fail_reason = $2
+WHERE id = $1 AND status IN ('approved', 'ready')
+`
+
+type MarkPendingRequestFailedParams struct {
+	ID         string
+	FailReason string
+}
+
+func (q *Queries) MarkPendingRequestFailed(ctx context.Context, arg MarkPendingRequestFailedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markPendingRequestFailed, arg.ID, arg.FailReason)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const markRequestAired = `-- name: MarkRequestAired :execrows
@@ -841,7 +873,7 @@ const nextReadyRequest = `-- name: NextReadyRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status = 'ready'
-ORDER BY (source = 'ai'), created_at, id LIMIT 1
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id LIMIT 1
 `
 
 type NextReadyRequestRow struct {
@@ -935,11 +967,36 @@ func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequ
 	return i, err
 }
 
+const pendingRequestIDs = `-- name: PendingRequestIDs :many
+SELECT id::text AS id FROM request WHERE status IN ('approved', 'ready')
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id
+`
+
+func (q *Queries) PendingRequestIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, pendingRequestIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pendingRequests = `-- name: PendingRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status IN ('approved', 'ready')
-ORDER BY (source = 'ai'), created_at, id
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id
 `
 
 type PendingRequestsRow struct {
@@ -1049,6 +1106,68 @@ func (q *Queries) RecentAirLogYTIDs(ctx context.Context, limit int32) ([]string,
 	return items, nil
 }
 
+const recentTerminalRequests = `-- name: RecentTerminalRequests :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+FROM request WHERE status IN ('aired', 'failed')
+ORDER BY COALESCE(aired_at, created_at) DESC, id DESC
+LIMIT $1
+`
+
+type RecentTerminalRequestsRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+	Reason       string
+}
+
+func (q *Queries) RecentTerminalRequests(ctx context.Context, limit int32) ([]RecentTerminalRequestsRow, error) {
+	rows, err := q.db.Query(ctx, recentTerminalRequests, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RecentTerminalRequestsRow{}
+	for rows.Next() {
+		var i RecentTerminalRequestsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Source,
+			&i.RequestedBy,
+			&i.DisplayName,
+			&i.YtID,
+			&i.Title,
+			&i.Channel,
+			&i.DurationS,
+			&i.ThumbnailUrl,
+			&i.Status,
+			&i.FailReason,
+			&i.Attempts,
+			&i.CreatedAt,
+			&i.AiredAt,
+			&i.Reason,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const renamePlaylist = `-- name: RenamePlaylist :one
 UPDATE playlist SET name = $2, updated_at = now() WHERE id = $1
 RETURNING id::text AS id, name, created_at, updated_at
@@ -1144,6 +1263,44 @@ func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) 
 	return items, nil
 }
 
+const setRequestPosition = `-- name: SetRequestPosition :exec
+UPDATE request SET position = $2 WHERE id = $1
+`
+
+type SetRequestPositionParams struct {
+	ID       string
+	Position pgtype.Int4
+}
+
+func (q *Queries) SetRequestPosition(ctx context.Context, arg SetRequestPositionParams) error {
+	_, err := q.db.Exec(ctx, setRequestPosition, arg.ID, arg.Position)
+	return err
+}
+
+const setStationAIEnabled = `-- name: SetStationAIEnabled :one
+UPDATE station SET ai_enabled = $1, updated_at = now() WHERE id = TRUE
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
+`
+
+type SetStationAIEnabledRow struct {
+	ActivePlaylistID string
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+}
+
+func (q *Queries) SetStationAIEnabled(ctx context.Context, aiEnabled bool) (SetStationAIEnabledRow, error) {
+	row := q.db.QueryRow(ctx, setStationAIEnabled, aiEnabled)
+	var i SetStationAIEnabledRow
+	err := row.Scan(
+		&i.ActivePlaylistID,
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+	)
+	return i, err
+}
+
 const setStationActive = `-- name: SetStationActive :exec
 UPDATE station SET active_playlist_id = $1::text::uuid, updated_at = now() WHERE id = TRUE
 `
@@ -1155,37 +1312,49 @@ func (q *Queries) SetStationActive(ctx context.Context, activePlaylistID string)
 
 const stationGoOffAir = `-- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
-RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 `
 
 type StationGoOffAirRow struct {
 	ActivePlaylistID string
 	OnAir            bool
 	OnAirSince       *time.Time
+	AiEnabled        bool
 }
 
 func (q *Queries) StationGoOffAir(ctx context.Context) (StationGoOffAirRow, error) {
 	row := q.db.QueryRow(ctx, stationGoOffAir)
 	var i StationGoOffAirRow
-	err := row.Scan(&i.ActivePlaylistID, &i.OnAir, &i.OnAirSince)
+	err := row.Scan(
+		&i.ActivePlaylistID,
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+	)
 	return i, err
 }
 
 const stationGoOnAir = `-- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
-RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 `
 
 type StationGoOnAirRow struct {
 	ActivePlaylistID string
 	OnAir            bool
 	OnAirSince       *time.Time
+	AiEnabled        bool
 }
 
 func (q *Queries) StationGoOnAir(ctx context.Context) (StationGoOnAirRow, error) {
 	row := q.db.QueryRow(ctx, stationGoOnAir)
 	var i StationGoOnAirRow
-	err := row.Scan(&i.ActivePlaylistID, &i.OnAir, &i.OnAirSince)
+	err := row.Scan(
+		&i.ActivePlaylistID,
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+	)
 	return i, err
 }
 

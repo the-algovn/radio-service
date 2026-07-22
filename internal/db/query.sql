@@ -104,11 +104,11 @@ INSERT INTO playlist_item (playlist_id, position, yt_id) VALUES ($1, $2, $3);
 -- ::text::uuid round-trip on the SetStationActive param are cast
 -- workarounds only — behavior is unchanged from a plain uuid column.
 -- name: GetStationRow :one
-SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 FROM station WHERE id = TRUE;
 
 -- name: LockStationRow :one
-SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since
+SELECT COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled
 FROM station WHERE id = TRUE FOR UPDATE;
 
 -- name: SetStationActive :exec
@@ -116,11 +116,11 @@ UPDATE station SET active_playlist_id = sqlc.arg(active_playlist_id)::text::uuid
 
 -- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
-RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since;
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled;
 
 -- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
-RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since;
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled;
 
 -- name: AppendAirLog :exec
 INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason)
@@ -160,7 +160,7 @@ RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, chan
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status = 'ready'
-ORDER BY (source = 'ai'), created_at, id LIMIT 1;
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id LIMIT 1;
 
 -- name: OldestApprovedRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
@@ -172,7 +172,7 @@ ORDER BY created_at, id LIMIT 1;
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE status IN ('approved', 'ready')
-ORDER BY (source = 'ai'), created_at, id;
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id;
 
 -- name: RequestsByUser :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
@@ -219,3 +219,25 @@ SELECT yt_id FROM track ORDER BY yt_id;
 -- name: SumLedgerCostSince :one
 SELECT COALESCE(SUM(cost_usd), 0)::double precision AS total
 FROM ledger_line WHERE ts >= $1;
+
+-- name: SetStationAIEnabled :one
+UPDATE station SET ai_enabled = $1, updated_at = now() WHERE id = TRUE
+RETURNING COALESCE(active_playlist_id::text, '')::text AS active_playlist_id, on_air, on_air_since, ai_enabled;
+
+-- name: PendingRequestIDs :many
+SELECT id::text AS id FROM request WHERE status IN ('approved', 'ready')
+ORDER BY position IS NULL, position, (source = 'ai'), created_at, id;
+
+-- name: SetRequestPosition :exec
+UPDATE request SET position = $2 WHERE id = $1;
+
+-- name: RecentTerminalRequests :many
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+FROM request WHERE status IN ('aired', 'failed')
+ORDER BY COALESCE(aired_at, created_at) DESC, id DESC
+LIMIT $1;
+
+-- name: MarkPendingRequestFailed :execrows
+UPDATE request SET status = 'failed', fail_reason = $2
+WHERE id = $1 AND status IN ('approved', 'ready');
