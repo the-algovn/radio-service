@@ -34,6 +34,14 @@ type LedgerLine struct {
 	CostUsd   float64
 }
 
+type NextUp struct {
+	ID        bool
+	YtID      string
+	Title     string
+	Channel   string
+	UpdatedAt time.Time
+}
+
 type RadioListener struct {
 	SessionID string
 	LastSeen  time.Time

@@ -166,3 +166,12 @@ LIMIT $1;
 -- name: MarkPendingRequestFailed :execrows
 UPDATE request SET status = 'failed', fail_reason = $2
 WHERE id = $1 AND status IN ('approved', 'ready');
+
+-- name: GetNextUp :one
+SELECT yt_id, title, channel FROM next_up WHERE id = TRUE;
+
+-- name: SetNextUp :exec
+UPDATE next_up SET yt_id = $1, title = $2, channel = $3, updated_at = now() WHERE id = TRUE;
+
+-- name: ClearNextUp :exec
+UPDATE next_up SET yt_id = '', title = '', channel = '', updated_at = now() WHERE id = TRUE;

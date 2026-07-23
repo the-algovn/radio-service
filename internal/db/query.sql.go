@@ -159,6 +159,15 @@ func (q *Queries) BumpRequestAttempts(ctx context.Context, arg BumpRequestAttemp
 	return attempts, err
 }
 
+const clearNextUp = `-- name: ClearNextUp :exec
+UPDATE next_up SET yt_id = '', title = '', channel = '', updated_at = now() WHERE id = TRUE
+`
+
+func (q *Queries) ClearNextUp(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, clearNextUp)
+	return err
+}
+
 const countListeners = `-- name: CountListeners :one
 SELECT count(*) FROM radio_listener
 WHERE last_seen > now() - interval '75 seconds'
@@ -293,6 +302,23 @@ func (q *Queries) DeleteTrack(ctx context.Context, ytID string) (string, error) 
 	var artifact_id string
 	err := row.Scan(&artifact_id)
 	return artifact_id, err
+}
+
+const getNextUp = `-- name: GetNextUp :one
+SELECT yt_id, title, channel FROM next_up WHERE id = TRUE
+`
+
+type GetNextUpRow struct {
+	YtID    string
+	Title   string
+	Channel string
+}
+
+func (q *Queries) GetNextUp(ctx context.Context) (GetNextUpRow, error) {
+	row := q.db.QueryRow(ctx, getNextUp)
+	var i GetNextUpRow
+	err := row.Scan(&i.YtID, &i.Title, &i.Channel)
+	return i, err
 }
 
 const getStationRow = `-- name: GetStationRow :one
@@ -943,6 +969,21 @@ func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const setNextUp = `-- name: SetNextUp :exec
+UPDATE next_up SET yt_id = $1, title = $2, channel = $3, updated_at = now() WHERE id = TRUE
+`
+
+type SetNextUpParams struct {
+	YtID    string
+	Title   string
+	Channel string
+}
+
+func (q *Queries) SetNextUp(ctx context.Context, arg SetNextUpParams) error {
+	_, err := q.db.Exec(ctx, setNextUp, arg.YtID, arg.Title, arg.Channel)
+	return err
 }
 
 const setRequestPosition = `-- name: SetRequestPosition :exec
