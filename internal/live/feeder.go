@@ -124,6 +124,44 @@ type airItem struct {
 
 const shuffleWindowCap = 50
 
+// pickShuffleFrom chooses a shuffle-bed track from ids: uniform over the
+// library minus the last-N aired. ok=false means the chosen track vanished
+// between AllIDs and Get (caller skips/retries). ids must be non-empty.
+func (f *Feeder) pickShuffleFrom(ctx context.Context, ids []string) (library.Track, bool, error) {
+	window := len(ids) / 2
+	if window > shuffleWindowCap {
+		window = shuffleWindowCap
+	}
+	exclude := map[string]bool{}
+	if window > 0 {
+		recent, err := f.d.Log.RecentYTIDs(ctx, window)
+		if err != nil {
+			return library.Track{}, false, err
+		}
+		for _, id := range recent {
+			exclude[id] = true
+		}
+	}
+	pool := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !exclude[id] {
+			pool = append(pool, id)
+		}
+	}
+	if len(pool) == 0 {
+		pool = ids // tiny library: the window covered everything
+	}
+	pick := pool[f.d.Rand(len(pool))]
+	track, ok, err := f.d.Library.Get(ctx, pick)
+	if err != nil {
+		return library.Track{}, false, err
+	}
+	if !ok {
+		return library.Track{}, false, nil
+	}
+	return track, true, nil
+}
+
 // boundary decides what airs next (spec §4.1): oldest ready listener
 // request → oldest ready AI pick → library no-repeat shuffle. skip=true
 // means the chosen item can't air (vanished track — already marked failed
@@ -170,31 +208,7 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 	if len(ids) == 0 {
 		return airItem{}, false, true, f.autoOffAir(ctx) // nothing to air at all
 	}
-	window := len(ids) / 2
-	if window > shuffleWindowCap {
-		window = shuffleWindowCap
-	}
-	exclude := map[string]bool{}
-	if window > 0 {
-		recent, err := f.d.Log.RecentYTIDs(ctx, window)
-		if err != nil {
-			return airItem{}, false, false, err
-		}
-		for _, id := range recent {
-			exclude[id] = true
-		}
-	}
-	pool := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if !exclude[id] {
-			pool = append(pool, id)
-		}
-	}
-	if len(pool) == 0 {
-		pool = ids // tiny library: the window covered everything
-	}
-	pick := pool[f.d.Rand(len(pool))]
-	track, ok, err := f.d.Library.Get(ctx, pick)
+	track, ok, err := f.pickShuffleFrom(ctx, ids)
 	if err != nil {
 		return airItem{}, false, false, err
 	}
