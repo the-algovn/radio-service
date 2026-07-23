@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 func TestResumeOffset(t *testing.T) {
@@ -27,7 +29,7 @@ func TestEncoderCrashStartsNewSessionAndResumes(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 4}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib,
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
@@ -69,7 +71,7 @@ func TestCrashResumeCapSkipsTrackAfterThreeAttempts(t *testing.T) {
 	enc := &crashingEncoder{aliveFrom: 4}
 	prod, clk := &fakeProducer{}, newFakeClock()
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib,
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2},
@@ -122,7 +124,7 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 2}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(), Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
 	})
@@ -158,7 +160,7 @@ func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	dec := &offsetRecordingDecoder{inner: fakeDecoder{bytesPerTrack: chunkBytes * 4}}
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib, Log: log, Listeners: NewMemListeners(time.Now),
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(), Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
 	})

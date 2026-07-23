@@ -13,6 +13,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -37,7 +38,8 @@ func RealClock() Clock { return realClock{} }
 
 type FeederDeps struct {
 	Store     station.Store
-	Requests  request.Store // the play queue; boundary priority 1–2
+	Requests  request.Store  // the play queue; boundary priority 1–2
+	Sched     schedule.Store // committed next-up (design 2026-07-23)
 	Library   library.Library
 	Log       AirLog
 	Listeners Listeners
@@ -174,6 +176,27 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 	}
 	if !st.OnAir {
 		return airItem{}, false, true, nil // operator stopped us
+	}
+
+	// Committed next-up first (design 2026-07-23): a shuffle track pinned at
+	// the previous track's start airs next, locked ahead of any request that
+	// arrived since. Consumed once — cleared before airing.
+	nu, ok, err := f.d.Sched.GetNextUp(ctx)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	if ok {
+		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
+			return airItem{}, false, false, cerr
+		}
+		track, exists, gerr := f.d.Library.Get(ctx, nu.YTID)
+		if gerr != nil {
+			return airItem{}, false, false, gerr
+		}
+		if !exists {
+			return airItem{}, true, false, nil // vanished → skip, re-run boundary
+		}
+		return airItem{track: track}, false, false, nil
 	}
 
 	req, found, err := f.d.Requests.NextReady(ctx)

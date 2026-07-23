@@ -16,6 +16,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -214,7 +215,7 @@ func newFixture(t *testing.T, ytIDs ...string) (station.Store, library.Library, 
 
 func newTestFeeder(store station.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
 	return NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib,
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2}, // 2 chunks per track
@@ -382,6 +383,53 @@ func TestBoundaryPriorityRequestThenAIThenShuffle(t *testing.T) {
 	require.Equal(t, "[]", qs[len(qs)-1])
 }
 
+// A committed next-up (a shuffle pick pinned earlier) airs before a pending
+// listener request that arrived afterward — the locked contract.
+func TestCommittedNextUpAirsBeforePendingRequest(t *testing.T) {
+	store, lib, reqs := newFixture(t, "committed", "req", "bed")
+	ctx0 := context.Background()
+	_, err := reqs.Create(ctx0, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", DisplayName: "Ngọc", YTID: "req", Title: "t-req", Channel: "c-req",
+		DurationS: 60, Status: request.StatusReady})
+	require.NoError(t, err)
+
+	sched := schedule.NewMemStore()
+	require.NoError(t, sched.SetNextUp(ctx0, schedule.NextUp{YTID: "committed", Title: "t-committed", Channel: "c"}))
+
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := NewFeeder(FeederDeps{
+		Store: store, Requests: reqs, Library: lib, Sched: sched,
+		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
+		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
+		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2},
+		Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+		Rand: func(int) int { return 0 },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	nps := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, nps[0], `"title":"t-committed"`) // committed next-up first
+	require.Contains(t, nps[1], `"title":"t-req"`)       // request waits behind it
+
+	// The committed next-up is consumed once.
+	_, ok, err := sched.GetNextUp(ctx0)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
 // A ready request whose track vanished from the library fails and is
 // skipped without airing or being announced.
 func TestVanishedRequestTrackMarksFailed(t *testing.T) {
@@ -538,7 +586,7 @@ func TestFetchFailureSkipsTrackWithoutPublishOrLog(t *testing.T) {
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	log := NewMemAirLog()
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib,
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: log, Listeners: NewMemListeners(time.Now),
 		Fetch: func(_ context.Context, id, _ string) (string, error) {
 			if id == "art-a" {
@@ -587,7 +635,7 @@ func TestOperatorOffAirStopsMidTrackWithinAChunk(t *testing.T) {
 	store, lib, reqs := newFixture(t, "a")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	f := NewFeeder(FeederDeps{
-		Store: store, Requests: reqs, Library: lib,
+		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 8}, // 8 chunks
