@@ -424,8 +424,39 @@ func TestCommittedNextUpAirsBeforePendingRequest(t *testing.T) {
 	require.Contains(t, nps[0], `"title":"t-committed"`) // committed next-up first
 	require.Contains(t, nps[1], `"title":"t-req"`)       // request waits behind it
 
-	// The committed next-up is consumed once.
-	_, ok, err := sched.GetNextUp(ctx0)
+	// The committed next-up is consumed once — but by the time track 2
+	// (the request) starts, the queue is empty again, so commitNextUp
+	// (Task 6) pins a fresh shuffle pick rather than leaving it cleared.
+	nu, ok, err := sched.GetNextUp(ctx0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, "committed", nu.YTID)
+}
+
+// At track start with an empty request queue, a shuffle next-up is committed;
+// with a pending request, any stale commitment is cleared.
+func TestCommitNextUpTracksPending(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	sched := schedule.NewMemStore()
+	f := NewFeeder(FeederDeps{
+		Store: store, Requests: reqs, Library: lib, Sched: sched,
+		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
+		Rand: func(int) int { return 0 },
+	})
+	ctx := context.Background()
+
+	// Empty queue → commit a shuffle pick.
+	f.commitNextUp(ctx)
+	_, ok, err := sched.GetNextUp(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Pending request present → clear the stale commitment.
+	_, err = reqs.Create(ctx, request.Item{Source: request.SourceListener,
+		YTID: "a", Title: "t-a", Channel: "c", DurationS: 60, Status: request.StatusReady})
+	require.NoError(t, err)
+	f.commitNextUp(ctx)
+	_, ok, err = sched.GetNextUp(ctx)
 	require.NoError(t, err)
 	require.False(t, ok)
 }

@@ -164,6 +164,46 @@ func (f *Feeder) pickShuffleFrom(ctx context.Context, ids []string) (library.Tra
 	return track, true, nil
 }
 
+// commitNextUp keeps the queue non-empty (design 2026-07-23): the instant a
+// track goes active, if the request queue is empty, pin a shuffle track as
+// "next up"; otherwise pending requests already cover the slot, so clear any
+// stale commitment. Every failure is logged and swallowed — a missing
+// next-up only means boundary falls back to its own lazy shuffle.
+func (f *Feeder) commitNextUp(ctx context.Context) {
+	pending, err := f.d.Requests.Pending(ctx)
+	if err != nil {
+		f.d.Logger.Error("commit next-up: pending read failed", "err", err)
+		return
+	}
+	if len(pending) > 0 {
+		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
+			f.d.Logger.Error("commit next-up: clear failed", "err", cerr)
+		}
+		return
+	}
+	ids, err := f.d.Library.AllIDs(ctx)
+	if err != nil {
+		f.d.Logger.Error("commit next-up: library read failed", "err", err)
+		return
+	}
+	if len(ids) == 0 {
+		return // empty library — nothing to commit; boundary handles off-air
+	}
+	track, ok, err := f.pickShuffleFrom(ctx, ids)
+	if err != nil {
+		f.d.Logger.Error("commit next-up: shuffle pick failed", "err", err)
+		return
+	}
+	if !ok {
+		return // vanished; next track start tries again
+	}
+	if serr := f.d.Sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: track.YTID, Title: track.Title, Channel: track.Channel,
+	}); serr != nil {
+		f.d.Logger.Error("commit next-up: set failed", "err", serr)
+	}
+}
+
 // boundary decides what airs next (spec §4.1): oldest ready listener
 // request → oldest ready AI pick → library no-repeat shuffle. skip=true
 // means the chosen item can't air (vanished track — already marked failed
@@ -448,6 +488,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				}
 			}
 		}
+		f.commitNextUp(ctx)
 		n, _ := f.d.Listeners.Count(ctx)
 		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
 		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Logger)
