@@ -1,12 +1,14 @@
 package live
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 func TestNowPlayingPayload(t *testing.T) {
@@ -37,13 +39,25 @@ func TestRequestQueuePayload(t *testing.T) {
 			DisplayName: "Ngọc", ThumbnailURL: "https://img/a"},
 		{Title: "B", Channel: "ch-b", Source: request.SourceAI},
 	}
-	got := string(RequestQueuePayload(items))
+	got := string(RequestQueuePayload(items, nil))
 	require.JSONEq(t, `[
 	  {"title":"A","artist":"ch-a","thumbnailUrl":"https://img/a","hasDedication":false,"source":"listener","requestedByName":"Ngọc"},
 	  {"title":"B","artist":"ch-b","hasDedication":false,"source":"ai"}
 	]`, got)
-	require.Equal(t, "[]", string(RequestQueuePayload(nil))) // empty array, never null
+	require.Equal(t, "[]", string(RequestQueuePayload(nil, nil))) // empty array, never null
 }
+
+func TestRequestQueuePayloadPrependsNextUp(t *testing.T) {
+	items := []request.Item{{Title: "t-req", Channel: "c-req", Source: "listener"}}
+	next := &schedule.NextUp{Title: "t-bed", Channel: "c-bed"}
+	got := string(RequestQueuePayload(items, next))
+	// next-up first, as a source-"" shuffle item, then the request
+	require.Contains(t, got, `"title":"t-bed"`)
+	require.Less(t, indexOf(got, "t-bed"), indexOf(got, "t-req"))
+	require.Contains(t, got, `"source":"listener"`)
+}
+
+func indexOf(s, sub string) int { return strings.Index(s, sub) }
 
 func TestNowPlayingPayloadProvenance(t *testing.T) {
 	e := Entry{Title: "T", Artist: "A", StartedAt: time.Unix(0, 0).UTC(), DurationS: 1,
@@ -68,10 +82,10 @@ func TestNowPlayingPayloadProvenance(t *testing.T) {
 func TestRequestQueuePayloadReason(t *testing.T) {
 	got := string(RequestQueuePayload([]request.Item{
 		{Title: "B", Channel: "ch-b", Source: request.SourceAI, Reason: "đổi gió"},
-	}))
+	}, nil))
 	require.Contains(t, got, `"reason":"đổi gió"`)
 	got = string(RequestQueuePayload([]request.Item{
 		{Title: "A", Channel: "ch-a", Source: request.SourceListener, DisplayName: "Ngọc"},
-	}))
+	}, nil))
 	require.NotContains(t, got, "reason")
 }

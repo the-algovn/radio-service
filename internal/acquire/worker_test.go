@@ -12,6 +12,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 type frame struct{ topic, value string }
@@ -23,7 +24,7 @@ func (p *memProducer) Publish(_ context.Context, topic string, value []byte) err
 }
 
 func newWorker(reqs request.Store, acq func(context.Context, string, string, string) (library.Track, bool, error), prod live.Producer) *Worker {
-	return NewWorker(WorkerDeps{Requests: reqs, Acquire: acq, Producer: prod, Clock: live.RealClock()})
+	return NewWorker(WorkerDeps{Requests: reqs, Sched: schedule.NewMemStore(), Acquire: acq, Producer: prod, Clock: live.RealClock()})
 }
 
 func TestWorkerMarksReadyAndPublishes(t *testing.T) {

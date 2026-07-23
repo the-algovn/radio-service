@@ -9,6 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 // SSE topics — the gateway routes these to channels radio.nowplaying /
@@ -94,11 +95,14 @@ type requestQueueItemJSON struct {
 	Reason          string `json:"reason,omitempty"`
 }
 
-// RequestQueuePayload is the radio.queue SSE frame: the pending request
-// queue in air order (listener FIFO, then AI FIFO), camelCase raw JSON.
-// Empty queue → "[]" — shuffle territory is deliberately not previewed.
-func RequestQueuePayload(items []request.Item) []byte {
-	out := make([]requestQueueItemJSON, 0, len(items))
+// RequestQueuePayload is the radio.queue SSE frame: an optional committed
+// next-up (a source-"" shuffle pick) first, then the pending request queue in
+// air order (listener FIFO, then AI FIFO), camelCase raw JSON.
+func RequestQueuePayload(items []request.Item, next *schedule.NextUp) []byte {
+	out := make([]requestQueueItemJSON, 0, len(items)+1)
+	if next != nil {
+		out = append(out, requestQueueItemJSON{Title: next.Title, Artist: next.Channel})
+	}
 	for _, it := range items {
 		out = append(out, requestQueueItemJSON{
 			Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
@@ -109,10 +113,10 @@ func RequestQueuePayload(items []request.Item) []byte {
 	return b
 }
 
-// PublishQueueSnapshot reads the pending queue and publishes it — the one
-// shared publisher used by the feeder, the ingest worker, the programmer
-// and RequestTrack. nil producer = feeds disabled (dev without Kafka).
-func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, logger *slog.Logger) {
+// PublishQueueSnapshot reads the pending queue plus any committed next-up and
+// publishes them — the one shared publisher used by the feeder, the ingest
+// worker, the programmer and RequestTrack. nil producer = feeds disabled.
+func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, sched schedule.Store, logger *slog.Logger) {
 	if p == nil {
 		return
 	}
@@ -124,7 +128,13 @@ func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, l
 		logger.Error("queue read for snapshot failed", "err", err)
 		return
 	}
-	if err := p.Publish(ctx, TopicQueue, RequestQueuePayload(items)); err != nil {
+	var next *schedule.NextUp
+	if nu, ok, gerr := sched.GetNextUp(ctx); gerr != nil {
+		logger.Error("queue next-up read failed", "err", gerr)
+	} else if ok {
+		next = &nu
+	}
+	if err := p.Publish(ctx, TopicQueue, RequestQueuePayload(items, next)); err != nil {
 		logger.Error("queue snapshot publish failed", "err", err)
 	}
 }

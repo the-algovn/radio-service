@@ -20,6 +20,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -70,6 +71,7 @@ type Deps struct {
 	Search    Searcher         // yt-dlp search (nil only in tests that skip it)
 	Now       func() time.Time // injected clock; nil → time.Now
 	Requests  request.Store
+	Sched     schedule.Store
 	Library   library.Library
 	Producer  live.Producer
 	Location  *time.Location // station-local civil day for daily quotas; nil → UTC
@@ -345,7 +347,7 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 		return nil, status.Errorf(codes.Internal, "create request: %v", err)
 	}
 	s.logger.Info("listener request queued", "yt_id", it.YTID, "sub", sub, "status", it.Status)
-	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.deps.Sched, s.logger)
 	return &radiov1.RequestTrackResponse{Request: requestProto(it)}, nil
 }
 
@@ -398,7 +400,7 @@ func (s *Server) ReorderRequests(ctx context.Context, req *radiov1.ReorderReques
 		}
 		return nil, status.Errorf(codes.Internal, "reorder: %v", err)
 	}
-	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.deps.Sched, s.logger)
 	return s.stationRequests(ctx)
 }
 
@@ -413,7 +415,7 @@ func (s *Server) RemoveRequest(ctx context.Context, req *radiov1.RemoveRequestRe
 		return nil, status.Errorf(codes.Internal, "remove: %v", err)
 	}
 	s.logger.Info("operator removed request", "id", req.GetId())
-	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.logger)
+	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.deps.Sched, s.logger)
 	return s.stationRequests(ctx)
 }
 

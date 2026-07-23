@@ -18,6 +18,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 )
@@ -49,6 +50,7 @@ type Deps struct {
 	PersonaDir string
 	Station    station.Store
 	Requests   request.Store
+	Sched      schedule.Store
 	Library    library.Library
 	Log        live.AirLog
 	Listeners  live.Listeners
@@ -174,7 +176,7 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 		}
 	}
 	if enqueued > 0 {
-		live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Logger)
+		live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
 	}
 }
 
@@ -292,7 +294,7 @@ func (p *Programmer) fakePick(ctx context.Context) {
 	}); err != nil {
 		return
 	}
-	live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Logger)
+	live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
 }
 
 // buildBrief assembles the model's data block: station-local time, recent

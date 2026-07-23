@@ -36,6 +36,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/programmer"
 	"github.com/the-algovn/radio-service/internal/radioserver"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
@@ -138,6 +139,7 @@ func main() {
 	// the feeder share the same store.
 	stationStore := station.NewPGStore(pool)
 	requests := request.NewPGStore(pool)
+	sched := schedule.NewPGStore(pool)
 	loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
 	if err != nil {
 		logger.Error("load station timezone failed", "err", err)
@@ -216,7 +218,7 @@ func main() {
 	}
 
 	feeder := live.NewFeeder(live.FeederDeps{
-		Store: stationStore, Requests: requests, Library: lib,
+		Store: stationStore, Requests: requests, Sched: sched, Library: lib,
 		Log: airLog, Listeners: listeners,
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
@@ -245,7 +247,7 @@ func main() {
 		Store: store, Library: lib, TmpDir: tmpDir, Logger: logger, MaxDurationS: 600,
 	})
 	worker := acquire.NewWorker(acquire.WorkerDeps{
-		Requests: requests, Acquire: acquirer.Acquire, Producer: producer,
+		Requests: requests, Sched: sched, Acquire: acquirer.Acquire, Producer: producer,
 		Clock: live.RealClock(), Logger: logger,
 	})
 	go func() {
@@ -257,7 +259,7 @@ func main() {
 	prog := programmer.New(programmer.Deps{
 		Model: models[defaultModel], Fake: defaultModel == "fake",
 		PersonaDir: config.Get("PERSONA_DIR", "persona"),
-		Station:    stationStore, Requests: requests, Library: lib,
+		Station:    stationStore, Requests: requests, Sched: sched, Library: lib,
 		Log: airLog, Listeners: listeners, Search: runner, Ledger: ledger,
 		BudgetUSD: budget, Producer: producer, Clock: live.RealClock(),
 		Location: loc, Logger: logger,
@@ -283,6 +285,7 @@ func main() {
 		Notifier:  engine,
 		Logger:    logger,
 		Requests:  requests,
+		Sched:     sched,
 		Library:   lib,
 		Producer:  producer,
 		Search:    runner,

@@ -9,6 +9,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 // MaxAttempts is how many downloads a request gets before failed (spec §5).
@@ -23,6 +24,7 @@ const pollEvery = 5 * time.Second
 
 type WorkerDeps struct {
 	Requests request.Store
+	Sched    schedule.Store
 	Acquire  func(ctx context.Context, ytID, title, channel string) (library.Track, bool, error)
 	Producer live.Producer // nil = feeds disabled
 	Clock    live.Clock
@@ -69,7 +71,7 @@ func (w *Worker) RunOnce(ctx context.Context) {
 				w.d.Logger.Error("worker: mark failed failed", "id", it.ID, "err", ferr)
 				return
 			}
-			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Logger)
+			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
 			return
 		}
 		attempts, berr := w.d.Requests.BumpAttempts(ctx, it.ID, err.Error())
@@ -83,7 +85,7 @@ func (w *Worker) RunOnce(ctx context.Context) {
 				w.d.Logger.Error("worker: mark failed failed", "id", it.ID, "err", ferr)
 				return
 			}
-			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Logger)
+			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
 		}
 		return
 	}
@@ -92,5 +94,5 @@ func (w *Worker) RunOnce(ctx context.Context) {
 		return
 	}
 	w.d.Logger.Info("request ready", "yt_id", it.YTID, "source", it.Source)
-	live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Logger)
+	live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
 }

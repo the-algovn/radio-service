@@ -15,6 +15,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 )
@@ -89,7 +90,7 @@ func newFixture(t *testing.T, model *scriptedModel) *fixture {
 	}
 	f.prog = New(Deps{
 		Model: model, Fake: false, PersonaDir: personaDir,
-		Station: st, Requests: f.reqs, Library: lib, Log: f.log, Listeners: lst,
+		Station: st, Requests: f.reqs, Sched: schedule.NewMemStore(), Library: lib, Log: f.log, Listeners: lst,
 		Search: f.search, Ledger: f.ledger, BudgetUSD: 1.0, Producer: f.prod,
 		Clock: live.RealClock(), Rand: func(int) int { return 0 },
 		Location: time.FixedZone("ICT", 7*3600),

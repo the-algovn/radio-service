@@ -491,7 +491,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		f.commitNextUp(ctx)
 		n, _ := f.d.Listeners.Count(ctx)
 		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
-		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Logger)
+		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Sched, f.d.Logger)
 
 		crashRestarts := 0
 		stopSession := false

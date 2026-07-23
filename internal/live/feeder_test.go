@@ -375,12 +375,16 @@ func TestBoundaryPriorityRequestThenAIThenShuffle(t *testing.T) {
 	_ = lIt
 
 	// queue frames: first frame (published at t-req's start) still holds the
-	// AI pick with its source badge; later frames drain to [].
+	// AI pick with its source badge; once pending drains, the committed
+	// shuffle next-up covers the slot instead of an empty array (design
+	// 2026-07-23: queue never empty).
 	qs := prod.byTopic(TopicQueue)
 	require.NotEmpty(t, qs)
 	require.Contains(t, qs[0], `"source":"ai"`)
 	require.Contains(t, qs[0], `"title":"t-pick"`)
-	require.Equal(t, "[]", qs[len(qs)-1])
+	last := qs[len(qs)-1]
+	require.NotEqual(t, "[]", last)
+	require.Contains(t, last, `"source":""`)
 }
 
 // A committed next-up (a shuffle pick pinned earlier) airs before a pending
@@ -657,6 +661,37 @@ func TestFetchFailureSkipsTrackWithoutPublishOrLog(t *testing.T) {
 	require.NoError(t, lerr)
 	require.True(t, ok)
 	require.Equal(t, "b", latest.YTID) // 'a' never air-logged either
+}
+
+// The queue snapshot published at every track start never shows an empty
+// array: with no pending requests, commitNextUp always pins a shuffle track
+// first, so the SSE frame carries it (design 2026-07-23 — queue never empty).
+func TestEmptyQueueCommitsShuffleNextUp(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b", "c")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(prod.byTopic(TopicNowPlaying)) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for 3 now-playing frames")
+		}
+		clk.step(250 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	_, err := store.GoOffAir(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 100))
+
+	qs := prod.byTopic(TopicQueue)
+	require.NotEmpty(t, qs)
+	for _, frame := range qs {
+		require.NotEqual(t, "[]", frame)
+	}
 }
 
 // TestOperatorOffAirStopsMidTrackWithinAChunk covers the IMPORTANT off-air
