@@ -22,8 +22,8 @@ type DJSettings struct {
 	MaxChars     int
 }
 
-// DefaultDJSettings mirrors the 00009 migration column defaults (the old
-// env defaults).
+// DefaultDJSettings mirrors the 00010 migration column defaults (the
+// current prod env values).
 func DefaultDJSettings() DJSettings {
 	return DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.0,
 		BreakEvery: 1, StationIDMin: 60, MaxChars: 1024}
