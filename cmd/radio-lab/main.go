@@ -177,19 +177,6 @@ func main() {
 	var talk live.TalkSource
 	var dj *director.Director
 	if config.GetBool("RADIO_DJ_ENABLED", false) {
-		mustNonNegInt := func(key, def string) int {
-			v, err := strconv.Atoi(config.Get(key, def))
-			if err != nil || v < 0 {
-				logger.Error("config", "err", key+" must be a non-negative integer", "raw", config.Get(key, def))
-				os.Exit(1)
-			}
-			return v
-		}
-		djRate, err := strconv.ParseFloat(config.Get("RADIO_DJ_RATE", "1.0"), 64)
-		if err != nil || djRate < 0 {
-			logger.Error("config", "err", "RADIO_DJ_RATE must be a non-negative number", "raw", config.Get("RADIO_DJ_RATE", "1.0"))
-			os.Exit(1)
-		}
 		djDir := filepath.Join(dataDir, "dj")
 		// Startup sweep: clips are regenerable; orphans from a crash are junk.
 		_ = os.RemoveAll(djDir)
@@ -197,6 +184,8 @@ func main() {
 			logger.Error("mkdir dj failed", "err", err)
 			os.Exit(1)
 		}
+		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
+		// edited from the console, re-read by the director every tick.
 		dj = director.New(director.Deps{
 			Model: models[defaultModel], Voice: voiceProv, VoiceFake: voiceFake,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
@@ -204,17 +193,10 @@ func main() {
 			PersonaDir:     config.Get("PERSONA_DIR", "persona"),
 			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
 			DataDir:        djDir, BudgetUSD: budget,
-			VoiceID:      config.Get("RADIO_DJ_VOICE", "vi-VN-Neural2-A"),
-			Rate:         djRate,
-			BreakEvery:   mustNonNegInt("RADIO_DJ_BREAK_EVERY", "2"),
-			StationIDMin: mustNonNegInt("RADIO_DJ_STATION_ID_MIN", "60"),
-			MaxChars:     mustNonNegInt("RADIO_DJ_MAX_CHARS", "450"),
-			Clock:        live.RealClock(), Location: loc, Logger: logger,
+			Clock: live.RealClock(), Location: loc, Logger: logger,
 		})
 		talk = dj
-		logger.Info("dj talk breaks enabled",
-			"voice", config.Get("RADIO_DJ_VOICE", "vi-VN-Neural2-A"),
-			"voice_fake", voiceFake, "model", defaultModel)
+		logger.Info("dj talk breaks enabled", "voice_fake", voiceFake, "model", defaultModel)
 	}
 
 	feeder := live.NewFeeder(live.FeederDeps{

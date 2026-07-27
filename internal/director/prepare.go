@@ -14,13 +14,28 @@ import (
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
+
+// normalizeDJ is the last line of defense against hand-edited DB rows; the
+// API bounds in radioserver are the authoritative range (spec §4). It only
+// catches values that would break synthesis outright.
+func normalizeDJ(dj station.DJSettings) station.DJSettings {
+	if dj.Rate <= 0 {
+		dj.Rate = 1.0
+	}
+	if dj.MaxChars <= 0 {
+		dj.MaxChars = 1024
+	}
+	return dj
+}
 
 // prepare runs one whole clip-preparation attempt: script → TTS → render.
 // Every failure is a quiet skip (logged, temp files removed, spend already
 // ledgered stays ledgered) — the air never waits on this path.
-func (dr *Director) prepare(ctx context.Context, kind string) (live.Clip, bool) {
+func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSettings) (live.Clip, bool) {
+	dj = normalizeDJ(dj)
 	ctx, cancel := context.WithTimeout(ctx, prepDeadline)
 	defer cancel()
 
@@ -49,27 +64,27 @@ func (dr *Director) prepare(ctx context.Context, kind string) (live.Clip, bool) 
 			dr.d.Logger.Error("director: persona load failed", "err", err)
 			return live.Clip{}, false
 		}
-		briefJSON, err := json.Marshal(dr.buildBrief(ctx, entry))
+		briefJSON, err := json.Marshal(dr.buildBrief(ctx, entry, dj.MaxChars))
 		if err != nil {
 			dr.d.Logger.Error("director: brief marshal failed", "err", err)
 			return live.Clip{}, false
 		}
 		system, user := brain.BuildPrompts(pers+talkRules, string(briefJSON))
 		var ok bool
-		out, ok = dr.generateValid(ctx, system, user)
+		out, ok = dr.generateValid(ctx, system, user, dj.MaxChars)
 		if !ok {
 			return live.Clip{}, false
 		}
 		script = out.Script
 	}
 
-	data, ext, err := dr.d.Voice.Synthesize(ctx, script, dr.d.VoiceID, dr.d.Rate)
+	data, ext, err := dr.d.Voice.Synthesize(ctx, script, dj.VoiceID, dj.Rate)
 	if err != nil {
 		dr.d.Logger.Error("director: tts failed", "kind", kind, "err", err)
 		return live.Clip{}, false
 	}
 	chars := utf8.RuneCountInString(script)
-	cost := voice.CostUSD(dr.d.VoiceID, chars)
+	cost := voice.CostUSD(dj.VoiceID, chars)
 	provider := "google"
 	if dr.d.VoiceFake {
 		cost, provider = 0, "fake"
@@ -109,7 +124,7 @@ func (dr *Director) prepare(ctx context.Context, kind string) (live.Clip, bool) 
 // failure aborts; validation violations get ONE retry with the violations
 // appended; every attempt is priced before parsing ("tokens were spent
 // either way").
-func (dr *Director) generateValid(ctx context.Context, system, user string) (brain.Output, bool) {
+func (dr *Director) generateValid(ctx context.Context, system, user string, maxChars int) (brain.Output, bool) {
 	for attempt := 0; ; attempt++ {
 		raw, usage, err := dr.d.Model.Generate(ctx, system, user)
 		if err != nil {
@@ -128,7 +143,7 @@ func (dr *Director) generateValid(ctx context.Context, system, user string) (bra
 			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", raw[:min(len(raw), 200)])
 			return brain.Output{}, false
 		}
-		v := brain.Validate(out.Script, dr.d.MaxChars)
+		v := brain.Validate(out.Script, maxChars)
 		if len(v) == 0 {
 			return out, true
 		}
@@ -142,13 +157,13 @@ func (dr *Director) generateValid(ctx context.Context, system, user string) (bra
 
 // buildBrief assembles the backsell data block from the currently-airing
 // entry (the freshness anchor), queue teasers, and the show-memory ring.
-func (dr *Director) buildBrief(ctx context.Context, just live.Entry) Brief {
+func (dr *Director) buildBrief(ctx context.Context, just live.Entry, maxChars int) Brief {
 	now := dr.d.Clock.Now().In(dr.d.Location)
 	b := Brief{
 		Type: "backsell", LocalTime: now.Format("Monday 15:04"), Daypart: daypart(now.Hour()),
 		JustPlayed: BriefTrack{Title: just.Title, Artist: just.Artist, Source: just.Source,
 			RequestedByName: just.RequestedByName, Reason: just.Reason},
-		MaxChars: dr.d.MaxChars,
+		MaxChars: maxChars,
 	}
 	if pending, err := dr.d.Requests.Pending(ctx); err == nil {
 		for _, it := range pending {

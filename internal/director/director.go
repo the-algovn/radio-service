@@ -25,6 +25,10 @@ const (
 	prepDeadline = 60 * time.Second
 	ringCap      = 5
 	teaserCap    = 3
+	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
+	// lines. The live max_chars setting governs LLM backsell scripts only
+	// (spec §4) — station-ID lines are pre-written and validated once at load.
+	stationIDMaxChars = 450
 )
 
 // Ledger is the director's consumer-side ledger contract (the exported
@@ -49,12 +53,7 @@ type Deps struct {
 	StationIDsPath string
 	DataDir        string // clip scratch dir (LAB_DATA_DIR/dj), swept at boot by main
 
-	BudgetUSD    float64
-	VoiceID      string
-	Rate         float64
-	BreakEvery   int // backsell due after N tracks; 0 disables backsells
-	StationIDMin int // minutes between station IDs; 0 disables
-	MaxChars     int
+	BudgetUSD float64
 
 	Render   RenderFunc // nil → FFRender
 	Clock    live.Clock
@@ -93,13 +92,7 @@ func New(d Deps) *Director {
 	if d.Render == nil {
 		d.Render = FFRender
 	}
-	if d.Rate <= 0 {
-		d.Rate = 1.0
-	}
-	if d.MaxChars <= 0 {
-		d.MaxChars = 450
-	}
-	return &Director{d: d, ids: loadStationIDs(d.StationIDsPath, d.MaxChars, d.Logger)}
+	return &Director{d: d, ids: loadStationIDs(d.StationIDsPath, stationIDMaxChars, d.Logger)}
 }
 
 // TrackFinished advances the format clock: called by the feeder once per
@@ -162,12 +155,12 @@ func anchorFresh(anchorYTID string, anchorStartedAt time.Time, justFinished live
 // station_id wins when both are due; the backsell counter carries over and
 // stays due. The +1 counts the currently-airing track — the one the break
 // will describe — so the default cadence is truly every BreakEvery tracks.
-func (dr *Director) dueKindLocked(now time.Time) string {
-	if dr.d.StationIDMin > 0 && dr.ids.available() &&
-		now.Sub(dr.lastStationID) >= time.Duration(dr.d.StationIDMin)*time.Minute {
+func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
+	if dj.StationIDMin > 0 && dr.ids.available() &&
+		now.Sub(dr.lastStationID) >= time.Duration(dj.StationIDMin)*time.Minute {
 		return live.ClipStationID
 	}
-	if dr.d.BreakEvery > 0 && dr.finishedSinceBacksell+1 >= dr.d.BreakEvery {
+	if dj.BreakEvery > 0 && dr.finishedSinceBacksell+1 >= dj.BreakEvery {
 		return live.ClipBacksell
 	}
 	return ""
@@ -249,14 +242,14 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	dr.mu.Lock()
 	kind := ""
 	if dr.slot == nil {
-		kind = dr.dueKindLocked(now)
+		kind = dr.dueKindLocked(now, st.DJ)
 	}
 	dr.mu.Unlock()
 	if kind == "" {
 		return
 	}
 
-	clip, ok := dr.prepare(ctx, kind)
+	clip, ok := dr.prepare(ctx, kind, st.DJ)
 	if !ok {
 		return
 	}

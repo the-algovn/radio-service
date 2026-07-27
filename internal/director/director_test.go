@@ -12,6 +12,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 // dirClock is a settable clock for director tests (Tick unused here).
@@ -36,11 +37,10 @@ func (c *dirClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-func newCoreDirector(t *testing.T, breakEvery, stationIDMin int) (*Director, *dirClock) {
+func newCoreDirector(t *testing.T) (*Director, *dirClock) {
 	t.Helper()
 	clk := newDirClock()
 	dr := New(Deps{
-		BreakEvery: breakEvery, StationIDMin: stationIDMin, MaxChars: 450,
 		StationIDsPath: writeIDs(t, "đài thân mến\n"),
 		DataDir:        t.TempDir(), Clock: clk,
 	})
@@ -61,13 +61,13 @@ func slotClip(t *testing.T, dr *Director, c live.Clip) string {
 var _ live.TalkSource = (*Director)(nil)
 
 func TestTakeEmptySlot(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	_, ok := dr.Take(live.Entry{YTID: "a"})
 	require.False(t, ok)
 }
 
 func TestTakeFreshBacksellResetsCounter(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
 	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
@@ -86,7 +86,7 @@ func TestTakeFreshBacksellResetsCounter(t *testing.T) {
 // the microsecond-truncated timestamp must still match the nanosecond-precise
 // justFinished entry within the 1s tolerance.
 func TestTakeFreshAcrossPrecisionLoss(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	ts := time.Date(2026, 7, 22, 21, 0, 0, 123456789, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
 	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: ts.Truncate(time.Microsecond)})
@@ -104,7 +104,7 @@ func TestTakeFreshAcrossPrecisionLoss(t *testing.T) {
 // of the same track, well outside the 1s tolerance — must still be discarded
 // as stale.
 func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
 	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
@@ -119,7 +119,7 @@ func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
 }
 
 func TestTakeStaleBacksellDeletesAndClears(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
 	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
@@ -134,7 +134,7 @@ func TestTakeStaleBacksellDeletesAndClears(t *testing.T) {
 }
 
 func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
-	dr, clk := newCoreDirector(t, 0, 60)
+	dr, clk := newCoreDirector(t)
 	slotClip(t, dr, live.Clip{Kind: live.ClipStationID})
 	_, ok := dr.Take(live.Entry{YTID: "whatever", StartedAt: clk.Now()})
 	require.True(t, ok)
@@ -144,36 +144,38 @@ func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
 }
 
 func TestDueKindArithmetic(t *testing.T) {
-	dr, clk := newCoreDirector(t, 2, 0)
+	dr, clk := newCoreDirector(t)
+	dj := station.DJSettings{BreakEvery: 2}
 	dr.mu.Lock()
-	require.Equal(t, "", dr.dueKindLocked(clk.Now()), "0 finished + current = 1 < 2")
+	require.Equal(t, "", dr.dueKindLocked(clk.Now(), dj), "0 finished + current = 1 < 2")
 	dr.mu.Unlock()
 	dr.TrackFinished(live.Entry{YTID: "a"})
 	dr.mu.Lock()
-	require.Equal(t, live.ClipBacksell, dr.dueKindLocked(clk.Now()), "1 finished + current = 2 >= 2")
+	require.Equal(t, live.ClipBacksell, dr.dueKindLocked(clk.Now(), dj), "1 finished + current = 2 >= 2")
 	dr.mu.Unlock()
 }
 
 func TestDueKindStationIDWinsAndBreakEveryZeroDisables(t *testing.T) {
-	dr, clk := newCoreDirector(t, 2, 60)
+	dr, clk := newCoreDirector(t)
+	dj := station.DJSettings{BreakEvery: 2, StationIDMin: 60}
 	dr.mu.Lock()
 	dr.lastStationID = clk.Now()
 	dr.mu.Unlock()
 	dr.TrackFinished(live.Entry{YTID: "a"}) // backsell due
 	clk.advance(61 * time.Minute)           // station id also due
 	dr.mu.Lock()
-	require.Equal(t, live.ClipStationID, dr.dueKindLocked(clk.Now()), "station_id wins; backsell carries over")
+	require.Equal(t, live.ClipStationID, dr.dueKindLocked(clk.Now(), dj), "station_id wins; backsell carries over")
 	dr.mu.Unlock()
 
-	off, _ := newCoreDirector(t, 0, 0)
+	off, _ := newCoreDirector(t)
 	off.TrackFinished(live.Entry{YTID: "a"})
 	off.mu.Lock()
-	require.Equal(t, "", off.dueKindLocked(clk.Now()), "both knobs 0 = nothing ever due")
+	require.Equal(t, "", off.dueKindLocked(clk.Now(), station.DJSettings{}), "both knobs 0 = nothing ever due")
 	off.mu.Unlock()
 }
 
 func TestCancelPendingDeletesClip(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a"})
 	dr.mu.Lock()
 	dr.cancelPendingLocked("test")
@@ -186,7 +188,7 @@ func TestCancelPendingDeletesClip(t *testing.T) {
 }
 
 func TestRingCapsAtFive(t *testing.T) {
-	dr, _ := newCoreDirector(t, 2, 0)
+	dr, _ := newCoreDirector(t)
 	for i := 0; i < 7; i++ {
 		dr.pushRing("tóm tắt", []string{"câu"})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,9 @@ func (errVoice) Synthesize(context.Context, string, string, float64) ([]byte, st
 const goodRaw = `{"script":"Vừa rồi là một bản nhạc đêm dịu dàng, cảm ơn bạn đã cùng nghe.","summary":"backsell đêm","used_phrases":["cùng nghe"]}`
 const digitRaw = `{"script":"Bài này ra năm 2020 đó nha.","summary":"x","used_phrases":[]}`
 
+// testDJ mirrors the old fixture Deps knobs for direct prepare() calls.
+var testDJ = station.DJSettings{VoiceID: "fake", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 450}
+
 // fakeRender writes 96000 bytes (0.5s) to outPath.
 func fakeRender(_ context.Context, _, outPath string) (float64, error) {
 	if err := os.WriteFile(outPath, make([]byte, 96000), 0o644); err != nil {
@@ -65,13 +69,16 @@ func newPrepFixture(t *testing.T, model *seqModel) *prepFixture {
 	reqs := request.NewMemStore()
 	personaDir := t.TempDir()
 	require.NoError(t, persona.Save(personaDir, "# Tiểu Dương Dương\nGiọng ấm."))
+	store := station.NewMemStore()
+	_, err := store.UpdateDJSettings(context.Background(), station.DJSettings{
+		VoiceID: "fake", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 450})
+	require.NoError(t, err)
 	dr := New(Deps{
 		Model: model, Voice: voice.Fake{}, VoiceFake: true, Ledger: ledger,
-		Station: station.NewMemStore(), Listeners: live.NewMemListeners(time.Now),
+		Station: store, Listeners: live.NewMemListeners(time.Now),
 		AirLog: airLog, Requests: reqs,
 		PersonaDir: personaDir, StationIDsPath: writeIDs(t, "đài thân mến\n"),
-		DataDir: t.TempDir(), BudgetUSD: 1.0, VoiceID: "fake", Rate: 1.0,
-		BreakEvery: 2, StationIDMin: 60, MaxChars: 450,
+		DataDir: t.TempDir(), BudgetUSD: 1.0,
 		Render: fakeRender, Clock: clk, Location: time.UTC,
 	})
 	return &prepFixture{dr: dr, clk: clk, ledger: ledger, log: airLog, reqs: reqs, model: model}
@@ -94,7 +101,7 @@ func TestPrepareBacksellHappyPath(t *testing.T) {
 		StartedAt: time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC), Source: "ai", Reason: "hợp đêm"}
 	require.NoError(t, f.log.Append(context.Background(), anchor))
 
-	clip, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	clip, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.True(t, ok)
 	require.Equal(t, live.ClipBacksell, clip.Kind)
 	require.Equal(t, "a", clip.AnchorYTID)
@@ -113,7 +120,7 @@ func TestPrepareBacksellHappyPath(t *testing.T) {
 func TestPrepareBacksellRetriesOnceOnViolations(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, goodRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.True(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	labels := ledgerLabels(t, f.ledger)
@@ -124,7 +131,7 @@ func TestPrepareBacksellRetriesOnceOnViolations(t *testing.T) {
 func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, digitRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	require.Len(t, ledgerLabels(t, f.ledger), 2, "spend recorded even on failure")
@@ -135,14 +142,14 @@ func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
 
 func TestPrepareBacksellNoAirLogEntryQuietSkip(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok, "nothing airing → nothing to talk about")
 	require.Zero(t, f.model.calls)
 }
 
 func TestPrepareStationIDSkipsLLM(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID)
+	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID, testDJ)
 	require.True(t, ok)
 	require.Equal(t, live.ClipStationID, clip.Kind)
 	require.Equal(t, "", clip.AnchorYTID, "station_id has a zero anchor")
@@ -155,7 +162,7 @@ func TestPrepareTTSFailure(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Voice = errVoice{}
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok)
 	require.Equal(t, []string{"llm:director:backsell"}, ledgerLabels(t, f.ledger), "llm spend still recorded")
 }
@@ -164,7 +171,7 @@ func TestPrepareRenderFailureCleansUp(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Render = func(_ context.Context, _, _ string) (float64, error) { return 0, errors.New("boom") }
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell)
+	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok)
 	entries, err := os.ReadDir(f.dr.d.DataDir)
 	require.NoError(t, err)
@@ -180,7 +187,7 @@ func TestBuildBriefContents(t *testing.T) {
 	}
 	f.dr.pushRing("chuyện mưa", []string{"bạn nghe đài"})
 	just := live.Entry{Title: "Bài A", Artist: "Ca sĩ", Source: "listener", RequestedByName: "Minh"}
-	b := f.dr.buildBrief(context.Background(), just)
+	b := f.dr.buildBrief(context.Background(), just, 450)
 	require.Equal(t, "backsell", b.Type)
 	require.Equal(t, "Bài A", b.JustPlayed.Title)
 	require.Equal(t, "Minh", b.JustPlayed.RequestedByName)
@@ -189,4 +196,58 @@ func TestBuildBriefContents(t *testing.T) {
 	require.Equal(t, []string{"bạn nghe đài"}, b.RecentPhrases)
 	require.Equal(t, 450, b.MaxChars)
 	require.NotEmpty(t, b.Daypart)
+}
+
+// recVoice records the last Synthesize arguments.
+type recVoice struct {
+	mu      sync.Mutex
+	voiceID string
+	rate    float64
+}
+
+func (r *recVoice) Synthesize(_ context.Context, _ string, voiceID string, rate float64) ([]byte, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.voiceID, r.rate = voiceID, rate
+	return []byte("mp3"), "mp3", nil
+}
+
+// The whole point of the DB move: a settings change applies to the NEXT
+// prepared clip without a restart (spec §4). Initial settings are set
+// explicitly via the store so the test is independent of the migration
+// default cadence (which is break_every 1).
+func TestRunOnceSettingsChangeAffectsNextPrepare(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw, goodRaw}})
+	rec := &recVoice{}
+	f.dr.d.Voice = rec
+	onAir(t, f)
+	withListener(t, f)
+
+	_, err := f.dr.d.Station.UpdateDJSettings(ctx, station.DJSettings{
+		VoiceID: "vi-VN-Neural2-A", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
+	require.NoError(t, err)
+
+	start := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
+	require.NoError(t, f.log.Append(ctx, live.Entry{YTID: "a", Title: "A", StartedAt: start}))
+	f.dr.RunOnce(ctx) // observes the on-air transition; 0 + current = 1 < 2 → nothing due
+	require.False(t, slotFilled(f.dr))
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	f.dr.RunOnce(ctx) // 1 finished + current = 2 >= 2 → prepares
+	require.True(t, slotFilled(f.dr))
+	require.Equal(t, "vi-VN-Neural2-A", rec.voiceID, "first prepare uses the current settings")
+
+	_, ok := f.dr.Take(live.Entry{YTID: "a", StartedAt: start}) // air it; counter resets
+	require.True(t, ok)
+
+	_, err = f.dr.d.Station.UpdateDJSettings(ctx, station.DJSettings{
+		VoiceID: "vi-VN-Chirp3-HD-Aoede", Rate: 1.2, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
+	require.NoError(t, err)
+
+	require.NoError(t, f.log.Append(ctx, live.Entry{YTID: "b", Title: "B", StartedAt: start.Add(3 * time.Minute)}))
+	f.dr.TrackFinished(live.Entry{YTID: "b"})
+	f.dr.RunOnce(ctx)
+	require.True(t, slotFilled(f.dr))
+	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", rec.voiceID, "next prepare uses the updated settings")
+	require.Equal(t, 1.2, rec.rate)
 }
