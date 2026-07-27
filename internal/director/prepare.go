@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
@@ -125,6 +126,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 // appended; every attempt is priced before parsing ("tokens were spent
 // either way").
 func (dr *Director) generateValid(ctx context.Context, system, user string, maxChars int) (brain.Output, bool) {
+	ctx = audit.WithLabel(ctx, "director:backsell")
 	for attempt := 0; ; attempt++ {
 		raw, usage, err := dr.d.Model.Generate(ctx, system, user)
 		if err != nil {

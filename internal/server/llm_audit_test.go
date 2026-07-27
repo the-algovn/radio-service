@@ -12,6 +12,9 @@ import (
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/audit"
+	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/live"
+	"github.com/the-algovn/radio-service/internal/spend"
 )
 
 // recAuditStore wraps a MemStore to record the paging/window arguments the
@@ -143,4 +146,27 @@ func TestLLMAuditStoreErrors(t *testing.T) {
 	_, err = s.GetLLMStats(ctx, &radiolabv1.GetLLMStatsRequest{})
 	require.Error(t, err)
 	require.Equal(t, codes.Internal, status.Code(err))
+}
+
+func TestGenerateScriptAuditsWithLabel(t *testing.T) {
+	ctx := context.Background()
+	store := audit.NewMemStore()
+	wrapped := audit.Wrap(brain.Fake{}, store, "fake", live.RealClock(), nil)
+	s := New(Deps{
+		Audit:        store,
+		Ledger:       spend.NewMemLedger(), // GenerateScript always calls s.ledger(); a nil Ledger panics
+		Models:       map[string]brain.Model{"fake": wrapped},
+		DefaultModel: "fake",
+	})
+
+	_, err := s.GenerateScript(ctx, &radiolabv1.GenerateScriptRequest{
+		Brief:           &radiolabv1.Brief{Type: "backsell"},
+		PersonaOverride: "# test persona",
+	})
+	require.NoError(t, err)
+	recs, err := store.List(ctx, audit.Filter{}, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.Equal(t, "script:backsell", recs[0].Label)
+	require.True(t, recs[0].Fake)
 }

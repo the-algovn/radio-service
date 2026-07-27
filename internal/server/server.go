@@ -257,6 +257,7 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 		return nil, status.Errorf(codes.Internal, "marshal brief: %v", err)
 	}
 	system, user := brain.BuildPrompts(pers, string(briefJSON))
+	ctx = audit.WithLabel(ctx, "script:"+req.GetBrief().GetType())
 	raw, usage, err := m.Generate(ctx, system, user)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "model: %v", err)
@@ -319,6 +320,7 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 			CostUsd: 0, Fake: true,
 		}, nil
 	}
+	ctx = audit.WithLabel(ctx, "callin")
 	r, usage, err := callin.Parse(ctx, m, req.GetText())
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "parse: %v", err)

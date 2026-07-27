@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
@@ -151,6 +152,7 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 		return
 	}
 	system, user := BuildPrompts(pers, string(briefJSON))
+	ctx = audit.WithLabel(ctx, "programmer:pick")
 	raw, usage, err := p.d.Model.Generate(ctx, system, user)
 	if err != nil {
 		p.d.Logger.Error("programmer: model call failed", "err", err)

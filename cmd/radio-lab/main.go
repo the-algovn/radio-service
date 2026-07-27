@@ -27,6 +27,7 @@ import (
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/director"
@@ -79,6 +80,12 @@ func main() {
 	ledger := spend.NewPGLedger(pool)
 	lib := library.NewPGLibrary(pool)
 
+	retDays, err := strconv.Atoi(config.Get("LLM_AUDIT_RETENTION_DAYS", "30"))
+	if err != nil || retDays <= 0 {
+		retDays = 30
+	}
+	auditStore := audit.NewPGStore(pool, time.Duration(retDays)*24*time.Hour)
+
 	// MinIO artifact store
 	store, err := artifact.NewS3Store(artifact.S3Config{
 		Endpoint:       config.Get("MINIO_ENDPOINT", "localhost:9000"),
@@ -110,21 +117,22 @@ func main() {
 	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
 		voiceProv, voiceFake = voice.NewGoogle(k), false
 	}
-	models := map[string]brain.Model{"fake": brain.Fake{}}
+	clk := live.RealClock()
+	models := map[string]brain.Model{"fake": audit.Wrap(brain.Fake{}, auditStore, "fake", clk, logger)}
 	defaultModel := "fake"
 	if k := config.Get("GEMINI_API_KEY", ""); k != "" {
-		models["gemini"] = brain.NewGemini(k, config.Get("GEMINI_MODEL", "gemini-2.5-flash"))
+		models["gemini"] = audit.Wrap(brain.NewGemini(k, config.Get("GEMINI_MODEL", "gemini-2.5-flash")), auditStore, "gemini", clk, logger)
 		defaultModel = "gemini"
 	}
 	if k := config.Get("ANTHROPIC_API_KEY", ""); k != "" {
-		models["anthropic"] = brain.NewAnthropic(k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"))
+		models["anthropic"] = audit.Wrap(brain.NewAnthropic(k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")), auditStore, "anthropic", clk, logger)
 		if defaultModel == "fake" {
 			defaultModel = "anthropic"
 		}
 	}
 	runner := &ingest.Runner{}
 	srv := server.New(server.Deps{
-		Ledger: ledger, Library: lib,
+		Ledger: ledger, Audit: auditStore, Library: lib,
 		Store: store, Voice: voiceProv, VoiceFake: voiceFake,
 		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
