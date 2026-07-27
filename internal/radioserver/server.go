@@ -22,6 +22,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/voice"
 )
 
 const (
@@ -42,6 +43,14 @@ const (
 
 	msgOperatorRemoved = "đài đã gỡ yêu cầu này"
 	recentTerminalCap  = 20
+
+	// DJ settings bounds (spec §6). Rate matches the audition slider range;
+	// the max_chars floor prevents an unsatisfiable script cap (which would
+	// burn one LLM retry loop per due tick), the ceiling bounds per-break cost.
+	djMinRate     = 0.7
+	djMaxRate     = 1.3
+	djMinMaxChars = 50
+	djMaxMaxChars = 2000
 )
 
 // Notifier lets the server nudge the broadcast engine (same process) when
@@ -109,6 +118,24 @@ func stationProto(st station.Station) *radiov1.Station {
 	return out
 }
 
+func djSettingsProto(dj station.DJSettings) *radiov1.DJSettings {
+	return &radiov1.DJSettings{VoiceId: dj.VoiceID, SpeakingRate: dj.Rate,
+		BreakEvery: int32(dj.BreakEvery), StationIdMin: int32(dj.StationIDMin),
+		MaxChars: int32(dj.MaxChars)}
+}
+
+// voiceKnown reports catalog membership. "fake" is deliberately NOT accepted:
+// it is preview-only — persisting it would poison the row for the day the
+// real TTS key lands (spec §6).
+func voiceKnown(id string) bool {
+	for _, v := range voice.Voices() {
+		if v.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) GetStation(ctx context.Context, _ *radiov1.GetStationRequest) (*radiov1.GetStationResponse, error) {
 	st, err := s.deps.Store.GetStation(ctx)
 	if err != nil {
@@ -129,7 +156,7 @@ func (s *Server) GetStation(ctx context.Context, _ *radiov1.GetStationRequest) (
 	return &radiov1.GetStationResponse{Station: stationProto(st), Stats: &radiov1.StationStats{
 		Listeners: int32(listeners), LibraryCount: int32(libCount),
 		SpendTodayUsd: spent, BudgetUsd: s.deps.BudgetUSD,
-	}}, nil
+	}, Dj: djSettingsProto(st.DJ)}, nil
 }
 
 func (s *Server) GoOnAir(ctx context.Context, _ *radiov1.GoOnAirRequest) (*radiov1.GoOnAirResponse, error) {
@@ -439,4 +466,37 @@ func (s *Server) SetAIEnabled(ctx context.Context, req *radiov1.SetAIEnabledRequ
 	}
 	s.logger.Info("ai pause toggled", "enabled", req.GetEnabled())
 	return &radiov1.SetAIEnabledResponse{Station: stationProto(st)}, nil
+}
+
+func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSettingsRequest) (*radiov1.UpdateDJSettingsResponse, error) {
+	in := req.GetSettings()
+	if in == nil {
+		return nil, status.Error(codes.InvalidArgument, "settings are required")
+	}
+	if !voiceKnown(in.GetVoiceId()) {
+		return nil, status.Error(codes.InvalidArgument, "unknown voice_id")
+	}
+	if r := in.GetSpeakingRate(); r < djMinRate || r > djMaxRate {
+		return nil, status.Errorf(codes.InvalidArgument, "speaking_rate must be between %.1f and %.1f", djMinRate, djMaxRate)
+	}
+	if in.GetBreakEvery() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "break_every must be >= 0 (0 disables)")
+	}
+	if in.GetStationIdMin() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "station_id_min must be >= 0 (0 disables)")
+	}
+	if n := in.GetMaxChars(); n < djMinMaxChars || n > djMaxMaxChars {
+		return nil, status.Errorf(codes.InvalidArgument, "max_chars must be between %d and %d", djMinMaxChars, djMaxMaxChars)
+	}
+	st, err := s.deps.Store.UpdateDJSettings(ctx, station.DJSettings{
+		VoiceID: in.GetVoiceId(), Rate: in.GetSpeakingRate(),
+		BreakEvery: int(in.GetBreakEvery()), StationIDMin: int(in.GetStationIdMin()),
+		MaxChars: int(in.GetMaxChars()),
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update dj settings: %v", err)
+	}
+	s.logger.Info("dj settings updated", "voice", st.DJ.VoiceID, "rate", st.DJ.Rate,
+		"break_every", st.DJ.BreakEvery, "station_id_min", st.DJ.StationIDMin, "max_chars", st.DJ.MaxChars)
+	return &radiov1.UpdateDJSettingsResponse{Settings: djSettingsProto(st.DJ)}, nil
 }
