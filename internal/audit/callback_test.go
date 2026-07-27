@@ -15,9 +15,16 @@ import (
 	"github.com/the-algovn/radio-service/internal/spend"
 )
 
-type stubClock struct{ t time.Time }
+type stubClock struct {
+	t    time.Time
+	seen []time.Time
+}
 
-func (c *stubClock) Now() time.Time { c.t = c.t.Add(150 * time.Millisecond); return c.t }
+func (c *stubClock) Now() time.Time {
+	c.t = c.t.Add(150 * time.Millisecond)
+	c.seen = append(c.seen, c.t)
+	return c.t
+}
 
 func runInfo() *callbacks.RunInfo {
 	return &callbacks.RunInfo{Name: "claude-haiku-4-5-20251001", Type: "Claude", Component: components.ComponentOfChatModel}
@@ -27,7 +34,8 @@ func runInfo() *callbacks.RunInfo {
 // must match what audit.Wrap produced, or the shipped console inspector breaks.
 func TestCallbackRecordsAuditAndSpend(t *testing.T) {
 	store, ledger := audit.NewMemStore(), spend.NewMemLedger()
-	h := audit.NewCallback(store, ledger, &stubClock{}, slog.Default())
+	clk := &stubClock{}
+	h := audit.NewCallback(store, ledger, clk, slog.Default())
 
 	ctx := audit.WithLabel(context.Background(), "programmer:choose")
 	ctx = h.OnStart(ctx, runInfo(), &einomodel.CallbackInput{
@@ -54,6 +62,7 @@ func TestCallbackRecordsAuditAndSpend(t *testing.T) {
 	require.Greater(t, r.LatencyMS, 0, "latency must be measured across OnStart→OnEnd")
 	require.Empty(t, r.Error)
 	require.False(t, r.Fake)
+	require.Equal(t, clk.seen[0], r.TS, "Rec.TS must be the OnStart instant, not the OnEnd one")
 
 	lines, err := ledger.All(context.Background())
 	require.NoError(t, err)
@@ -64,13 +73,15 @@ func TestCallbackRecordsAuditAndSpend(t *testing.T) {
 	require.Equal(t, 1200, lines[0].InTokens)
 	require.Equal(t, 200, lines[0].OutTokens)
 	require.InDelta(t, r.CostUSD, lines[0].CostUSD, 1e-12)
+	require.Equal(t, r.TS, lines[0].TS, "spend.Line.TS must match the Rec it was derived from")
 }
 
 // On error the Rec records the message and blanks Output, and no spend line is
 // written when no tokens are reported.
 func TestCallbackRecordsError(t *testing.T) {
 	store, ledger := audit.NewMemStore(), spend.NewMemLedger()
-	h := audit.NewCallback(store, ledger, &stubClock{}, slog.Default())
+	clk := &stubClock{}
+	h := audit.NewCallback(store, ledger, clk, slog.Default())
 
 	ctx := audit.WithLabel(context.Background(), "programmer:intent")
 	ctx = h.OnStart(ctx, runInfo(), &einomodel.CallbackInput{
@@ -83,6 +94,7 @@ func TestCallbackRecordsError(t *testing.T) {
 	require.Len(t, recs, 1)
 	require.Equal(t, context.DeadlineExceeded.Error(), recs[0].Error)
 	require.Empty(t, recs[0].Output)
+	require.Equal(t, clk.seen[0], recs[0].TS, "Rec.TS must be the OnStart instant even on the error path")
 
 	lines, err := ledger.All(context.Background())
 	require.NoError(t, err)
