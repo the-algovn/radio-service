@@ -153,18 +153,10 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 	}
 	system, user := BuildPrompts(pers, string(briefJSON))
 	ctx = audit.WithLabel(ctx, "programmer:pick")
-	raw, usage, err := p.d.Model.Generate(ctx, system, user)
+	raw, err := p.d.Model.Generate(ctx, system, user, nil)
 	if err != nil {
 		p.d.Logger.Error("programmer: model call failed", "err", err)
 		return
-	}
-	// Price the call BEFORE parsing — tokens were spent either way.
-	cost := brain.CostUSD(p.d.Model.Name(), usage)
-	if lerr := p.d.Ledger.Append(ctx, spend.Line{
-		TS: time.Now(), Kind: "llm", Provider: p.d.Model.Name(), Label: "programmer:pick",
-		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost,
-	}); lerr != nil {
-		p.d.Logger.Error("programmer: ledger append failed", "err", lerr)
 	}
 	picks, err := ParsePicks(raw)
 	if err != nil {

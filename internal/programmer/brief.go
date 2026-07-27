@@ -3,8 +3,6 @@ package programmer
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/the-algovn/radio-service/internal/brain"
 )
 
 // The picks output contract — same discipline as brain's script contract:
@@ -39,7 +37,7 @@ func ParsePicks(raw string) ([]Pick, error) {
 	var doc struct {
 		Picks []Pick `json:"picks"`
 	}
-	if err := json.Unmarshal([]byte(brain.ExtractJSON(raw)), &doc); err != nil {
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return nil, fmt.Errorf("model output is not the expected JSON: %w", err)
 	}
 	var out []Pick

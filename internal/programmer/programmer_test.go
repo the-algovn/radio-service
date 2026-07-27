@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 
-	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
@@ -26,10 +26,11 @@ type scriptedModel struct {
 	calls int
 }
 
-func (m *scriptedModel) Name() string { return "gemini-test" }
-func (m *scriptedModel) Generate(context.Context, string, string) (string, brain.Usage, error) {
+func (m *scriptedModel) Name() string     { return "gemini-test" }
+func (m *scriptedModel) Provider() string { return "gemini" }
+func (m *scriptedModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
 	m.calls++
-	return m.raw, brain.Usage{In: 1000, Out: 100}, m.err
+	return m.raw, m.err
 }
 
 type scriptedSearch struct {
