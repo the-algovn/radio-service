@@ -2,3 +2,4 @@ lab-data/
 .env
 .env.*
 /radio-lab
+.superpowers/
