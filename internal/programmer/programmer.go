@@ -129,8 +129,21 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 	if err != nil || n == 0 {
 		return
 	}
+	// Wake only when the queue can absorb a FULL batch (maxPicks), not merely
+	// when it has any room at all. wantPicks fills toward queueDepthTarget in
+	// one decision, and it's that fill-to-target behaviour that halves how
+	// often the programmer wakes — which is what keeps two LLM calls per
+	// decision at roughly the old one-call daily cost. Gating on
+	// `pending >= queueDepthTarget` instead would pass at pending==2 in
+	// steady state (one track airs, one leaves the queue), where wantPicks
+	// only asks for 1: two calls spent to enqueue one track, silently
+	// doubling spend against the shared daily budget. Gating on
+	// queueDepthTarget-maxPicks means the queue is allowed to drain to 1
+	// before refilling; tracks are at least minTrackSeconds (60s) and the
+	// tick is also 60s, so there's time to refill, and if it ever underruns,
+	// shuffle covers the air by design.
 	pending, err := p.d.Requests.Pending(ctx)
-	if err != nil || len(pending) >= queueDepthTarget {
+	if err != nil || len(pending) > queueDepthTarget-maxPicks {
 		return
 	}
 	if p.d.Fake {
@@ -199,7 +212,21 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 		return
 	}
 
-	choices := p.chooseFrom(ctx, pers, string(briefJSON), pool, wantPicks(pending))
+	// Phase 2 gets a trimmed brief: Library.Sample is redundant once the pool
+	// exists (the candidates themselves are the concrete choices), so leaving
+	// it in would ride ~25 library rows into phase 2 on top of the pool,
+	// inflating input well past the design's sizing. Library.Total stays —
+	// the shelf size is still useful context for the model.
+	choiceBrief := brief
+	choiceBrief.Library.Sample = nil
+	choiceBriefJSON, err := json.Marshal(choiceBrief)
+	if err != nil {
+		p.d.Logger.Error("programmer: phase-2 brief marshal failed", "err", err)
+		respinOnly()
+		return
+	}
+
+	choices := p.chooseFrom(ctx, pers, string(choiceBriefJSON), pool, wantPicks(pending))
 	if len(choices) == 0 {
 		respinOnly()
 		return

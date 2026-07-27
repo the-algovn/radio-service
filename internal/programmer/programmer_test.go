@@ -90,6 +90,27 @@ func TestGatesProduceNoModelCalls(t *testing.T) {
 		require.Zero(t, h.model.calls)
 	})
 
+	// Finding 1: pending==2 must ALSO gate, not just pending==queueDepthTarget
+	// (3). At pending==2 wantPicks would only ask for 1 track, so spending two
+	// LLM calls there doubles cost per track enqueued — the gate must hold
+	// until a full batch (maxPicks) fits.
+	t.Run("queue depth leaves room for less than a full batch", func(t *testing.T) {
+		h := newHarness(t)
+		require.NoError(t, h.listeners.Beat(h.ctx, "tab-1"))
+		for _, id := range []string{"q1", "q2"} {
+			_, err := h.requests.Create(h.ctx, request.Item{
+				Source: request.SourceListener, RequestedBy: "u", YTID: id, Title: id, Channel: "c",
+				DurationS: 100, Status: request.StatusApproved,
+			})
+			require.NoError(t, err)
+		}
+		h.prog.RunOnce(h.ctx)
+		require.Zero(t, h.model.calls, "pending==2 must gate: wantPicks(2)==1 would spend two calls per one track")
+		pending, err := h.requests.Pending(h.ctx)
+		require.NoError(t, err)
+		require.Len(t, pending, 2, "no new picks were enqueued")
+	})
+
 	t.Run("budget cap hit", func(t *testing.T) {
 		h := newHarness(t)
 		require.NoError(t, h.listeners.Beat(h.ctx, "tab-1"))
@@ -117,6 +138,34 @@ func TestFakeModeReSpinsLibraryWithoutModel(t *testing.T) {
 	require.Equal(t, request.SourceAI, pending[0].Source)
 	require.Equal(t, request.StatusReady, pending[0].Status)
 	require.Empty(t, pending[0].Reason, "a re-spin must not fabricate a reason the DJ would speak")
+}
+
+// Finding 1: pending==queueDepthTarget-maxPicks (1) is the one non-cold-start
+// state where the gate must pass, and it must pass through RunOnce itself
+// (not decide() called directly, which is a cold start and never exercised
+// this gate). This is the assertion the pre-fix gate could never reach: it
+// unblocked at pending==2, where wantPicks only asked for one track.
+func TestGateAllowsFullBatchAtQueueDepthMinusMaxPicks(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.listeners.Beat(h.ctx, "tab-1"))
+	_, err := h.requests.Create(h.ctx, request.Item{
+		Source: request.SourceListener, RequestedBy: "u", YTID: "q1", Title: "q1", Channel: "c",
+		DurationS: 100, Status: request.StatusApproved,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l2", Title: "Two", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1","l2"]}`,
+		`{"picks":[{"yt_id":"l1","reason":"a"},{"yt_id":"l2","reason":"b"}]}`,
+	}
+
+	h.prog.RunOnce(h.ctx)
+
+	require.Len(t, h.model.calls, 2, "intent + choose, no repair")
+	pending, err := h.requests.Pending(h.ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 3, "the pre-existing item plus a full two-pick batch")
 }
 
 // --- decide(): the whole two-phase decision, wired end to end. ---
@@ -174,6 +223,27 @@ func TestDecideEnqueuesUpToWant(t *testing.T) {
 
 	pending, _ := h.requests.Pending(h.ctx)
 	require.Len(t, pending, 2)
+}
+
+// Sub-item of Finding 1: phase 2 must not carry the library sample — it's
+// redundant once the pool exists (the candidates are the concrete choices),
+// and leaving it in inflates phase 2's input by ~25 rows past what the design
+// sized. Library.Total must still be there; Library.Sample must not.
+func TestChoosePromptOmitsLibrarySample(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "shelf1", Title: "Shelf One Unique Marker", DurationS: 200}))
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1"]}`,
+		`{"picks":[{"yt_id":"l1","reason":"x"}]}`,
+	}
+
+	h.prog.decide(h.ctx, 0)
+
+	require.Len(t, h.model.calls, 2)
+	require.Contains(t, h.model.calls[0], "Shelf One Unique Marker", "phase 1 still sees the library sample")
+	require.NotContains(t, h.model.calls[1], "Shelf One Unique Marker", "phase 2 must not carry the redundant library sample")
+	require.Contains(t, h.model.calls[1], `"total":2`, "the shelf size stays useful context")
 }
 
 // An empty pool must still program something — never a silent skip.
