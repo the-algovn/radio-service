@@ -3,8 +3,10 @@ package programmer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
@@ -50,6 +52,18 @@ type memProducer struct{ frames []frame }
 func (p *memProducer) Publish(_ context.Context, topic string, value []byte) error {
 	p.frames = append(p.frames, frame{topic, string(value)})
 	return nil
+}
+
+// clip must be rune-safe: byte-slicing a Vietnamese reply (multi-byte UTF-8)
+// at a fixed byte offset can cut a rune in half and log invalid UTF-8.
+func TestClipIsRuneSafe(t *testing.T) {
+	long := strings.Repeat("ă", 250) // 2 bytes/rune in UTF-8: byte 200 lands mid-rune
+	got := clip(long)
+	require.Len(t, []rune(got), 200)
+	require.True(t, utf8.ValidString(got), "clip must never cut a rune in half")
+
+	short := "ổn"
+	require.Equal(t, short, clip(short), "under the cap, clip is a no-op")
 }
 
 // --- RunOnce gates: every gate must stay a quiet skip, never reaching the model. ---

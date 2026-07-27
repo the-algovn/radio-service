@@ -396,9 +396,13 @@ func (p *Programmer) respin(ctx context.Context) bool {
 	return true
 }
 
+// clip bounds a raw model reply for logging. Rune-safe like capReason above —
+// byte-slicing (s[:200]) can cut a multi-byte UTF-8 rune in half and log
+// invalid UTF-8 at the boundary (the model replies in Vietnamese).
 func clip(s string) string {
-	if len(s) <= 200 {
+	r := []rune(s)
+	if len(r) <= 200 {
 		return s
 	}
-	return s[:200]
+	return string(r[:200])
 }

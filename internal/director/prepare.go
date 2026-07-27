@@ -135,7 +135,7 @@ func (dr *Director) generateValid(ctx context.Context, system, user string, maxC
 		}
 		out, perr := brain.ParseOutput(raw)
 		if perr != nil {
-			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", raw[:min(len(raw), 200)])
+			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", string([]rune(raw)[:min(utf8.RuneCountInString(raw), 200)]))
 			return brain.Output{}, false
 		}
 		v := brain.Validate(out.Script, maxChars)
