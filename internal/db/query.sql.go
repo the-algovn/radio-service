@@ -172,7 +172,8 @@ const countLLMCalls = `-- name: CountLLMCalls :one
 SELECT count(*) FROM llm_call
 WHERE ($1::text = ''
        OR label = $1
-       OR ($1::text = 'script:' AND label LIKE 'script:%'))
+       OR ($1::text = 'script:' AND label LIKE 'script:%')
+       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%'))
   AND ($2::bool = false OR error <> '')
 `
 
@@ -539,7 +540,8 @@ SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
 FROM llm_call
 WHERE ($1::text = ''
        OR label = $1
-       OR ($1::text = 'script:' AND label LIKE 'script:%'))
+       OR ($1::text = 'script:' AND label LIKE 'script:%')
+       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%'))
   AND ($2::bool = false OR error <> '')
 ORDER BY ts DESC
 LIMIT $4 OFFSET $3
@@ -552,7 +554,7 @@ type ListLLMCallsParams struct {
 	Lim         int32
 }
 
-// label_filter: "" = all; "script:" = all script:* call-sites (prefix); else exact match.
+// label_filter: "" = all; "script:" = all script:* call-sites (prefix); "programmer:" = all programmer:* call-sites (prefix); else exact match.
 func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]LlmCall, error) {
 	rows, err := q.db.Query(ctx, listLLMCalls,
 		arg.LabelFilter,
