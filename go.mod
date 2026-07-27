@@ -3,6 +3,9 @@ module github.com/the-algovn/radio-service
 go 1.26.4
 
 require (
+	github.com/cloudwego/eino v0.9.13
+	github.com/cloudwego/eino-ext/components/model/claude v0.1.24
+	github.com/cloudwego/eino-ext/components/model/gemini v0.1.33
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/minio/minio-go/v7 v7.2.1
@@ -13,6 +16,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	github.com/the-algovn/protos/gen/go v0.16.0
 	github.com/twmb/franz-go v1.21.5
+	google.golang.org/genai v1.36.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -48,9 +52,6 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
-	github.com/cloudwego/eino v0.9.13 // indirect
-	github.com/cloudwego/eino-ext/components/model/claude v0.1.24 // indirect
-	github.com/cloudwego/eino-ext/components/model/gemini v0.1.33 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
@@ -147,7 +148,6 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/api v0.197.0 // indirect
-	google.golang.org/genai v1.36.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260420184626-e10c466a9529 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
