@@ -7,7 +7,7 @@ import (
 )
 
 func TestParsePicks(t *testing.T) {
-	picks, err := ParsePicks("```json\n{\"picks\":[{\"query\":\"nhạc Trịnh đêm khuya\",\"reason\":\"khuya rồi\"},{\"yt_id\":\"abc123\",\"reason\":\"đổi không khí\"}]}\n```")
+	picks, err := ParsePicks(`{"picks":[{"query":"nhạc Trịnh đêm khuya","reason":"khuya rồi"},{"yt_id":"abc123","reason":"đổi không khí"}]}`)
 	require.NoError(t, err)
 	require.Len(t, picks, 2)
 	require.Equal(t, "nhạc Trịnh đêm khuya", picks[0].Query)

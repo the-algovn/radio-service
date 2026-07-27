@@ -183,12 +183,11 @@ func TestQueryPickSearchesFiltersEnqueues(t *testing.T) {
 	require.Equal(t, request.StatusApproved, pending[0].Status) // not cached → needs ingest
 	require.Equal(t, "https://img/new1", pending[0].ThumbnailURL)
 
-	// spend recorded, queue snapshot published
+	// The programmer no longer appends its own llm ledger line — the Eino audit
+	// callback does, and this plain unit test doesn't register it.
 	lines, err := f.ledger.All(ctx)
 	require.NoError(t, err)
-	require.Len(t, lines, 1)
-	require.Equal(t, "programmer:pick", lines[0].Label)
-	require.Positive(t, lines[0].CostUSD)
+	require.Empty(t, lines)
 	require.NotEmpty(t, f.prod.frames)
 }
 
@@ -236,8 +235,12 @@ func TestModelErrorAndParseFailureSkipCleanly(t *testing.T) {
 	f2.prog.RunOnce(ctx)
 	pending, _ = f2.reqs.Pending(ctx)
 	require.Empty(t, pending)
+	// Tokens were spent, so they're still recorded even on parse failure — but
+	// by the Eino audit callback now, on OnEnd, before RunOnce ever sees the raw
+	// output to parse. This plain unit test doesn't register that callback, so
+	// it observes no line; the guarantee itself moved, it wasn't dropped.
 	lines, _ = f2.ledger.All(ctx)
-	require.Len(t, lines, 1) // tokens were spent — the ledger records them even on parse failure
+	require.Empty(t, lines)
 }
 
 func TestFakeModeReSpinsLibraryWithoutModel(t *testing.T) {
