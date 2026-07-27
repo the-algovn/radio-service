@@ -2,14 +2,49 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/audit"
 )
+
+// recAuditStore wraps a MemStore to record the paging/window arguments the
+// handlers pass through, and to optionally inject a store failure.
+type recAuditStore struct {
+	*audit.MemStore
+	lastLimit, lastOffset int
+	lastSince             time.Time
+	failErr               error
+}
+
+func (r *recAuditStore) List(ctx context.Context, f audit.Filter, limit, offset int) ([]audit.Rec, error) {
+	r.lastLimit, r.lastOffset = limit, offset
+	if r.failErr != nil {
+		return nil, r.failErr
+	}
+	return r.MemStore.List(ctx, f, limit, offset)
+}
+
+func (r *recAuditStore) Count(ctx context.Context, f audit.Filter) (int64, error) {
+	if r.failErr != nil {
+		return 0, r.failErr
+	}
+	return r.MemStore.Count(ctx, f)
+}
+
+func (r *recAuditStore) Stats(ctx context.Context, since time.Time) ([]audit.Stat, error) {
+	r.lastSince = since
+	if r.failErr != nil {
+		return nil, r.failErr
+	}
+	return r.MemStore.Stats(ctx, since)
+}
 
 func seedAudit(t *testing.T) *audit.MemStore {
 	t.Helper()
@@ -54,4 +89,58 @@ func TestGetLLMStats(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.GetStats(), 3) // (director,gemini),(programmer,gemini),(director,claude-x)
 	require.InDelta(t, 0.007, resp.GetTotalUsd(), 1e-9)
+}
+
+func TestListLLMCallsClampsPaging(t *testing.T) {
+	rec := &recAuditStore{MemStore: seedAudit(t)}
+	s := New(Deps{Audit: rec})
+	ctx := context.Background()
+
+	_, err := s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{Limit: 0})
+	require.NoError(t, err)
+	require.Equal(t, 20, rec.lastLimit)
+
+	_, err = s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{Limit: 500})
+	require.NoError(t, err)
+	require.Equal(t, 100, rec.lastLimit)
+
+	_, err = s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{Offset: -5})
+	require.NoError(t, err)
+	require.Equal(t, 0, rec.lastOffset)
+}
+
+func TestListLLMCallsLabelFilterReturnsMatchingCalls(t *testing.T) {
+	s := New(Deps{Audit: seedAudit(t)})
+	ctx := context.Background()
+
+	resp, err := s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{Label: "director:backsell"})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), resp.GetTotal())
+	require.Len(t, resp.GetCalls(), 2)
+	for _, c := range resp.GetCalls() {
+		require.Equal(t, "director:backsell", c.GetLabel())
+	}
+}
+
+func TestGetLLMStatsDefaultWindow(t *testing.T) {
+	rec := &recAuditStore{MemStore: seedAudit(t)}
+	s := New(Deps{Audit: rec})
+
+	_, err := s.GetLLMStats(context.Background(), &radiolabv1.GetLLMStatsRequest{WindowDays: 0})
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(-30*24*time.Hour), rec.lastSince, time.Minute)
+}
+
+func TestLLMAuditStoreErrors(t *testing.T) {
+	rec := &recAuditStore{MemStore: audit.NewMemStore(), failErr: errors.New("db down")}
+	s := New(Deps{Audit: rec})
+	ctx := context.Background()
+
+	_, err := s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Internal, status.Code(err))
+
+	_, err = s.GetLLMStats(ctx, &radiolabv1.GetLLMStatsRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Internal, status.Code(err))
 }
