@@ -17,6 +17,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -118,14 +119,29 @@ func main() {
 		voiceProv, voiceFake = voice.NewGoogle(k), false
 	}
 	clk := live.RealClock()
-	models := map[string]brain.Model{"fake": audit.Wrap(brain.Fake{}, auditStore, "fake", clk, logger)}
+
+	// One Eino callback records every LLM call to the audit store and appends
+	// its cost to the ledger — for every provider and every call site.
+	callbacks.AppendGlobalHandlers(audit.NewCallback(auditStore, ledger, clk, logger))
+
+	models := map[string]brain.Model{"fake": brain.NewFake(brain.FakeScript)}
 	defaultModel := "fake"
 	if k := config.Get("GEMINI_API_KEY", ""); k != "" {
-		models["gemini"] = audit.Wrap(brain.NewGemini(k, config.Get("GEMINI_MODEL", "gemini-2.5-flash")), auditStore, "gemini", clk, logger)
+		m, err := brain.NewGemini(ctx, k, config.Get("GEMINI_MODEL", "gemini-2.5-flash"))
+		if err != nil {
+			logger.Error("config", "err", "gemini model init failed", "detail", err)
+			os.Exit(1)
+		}
+		models["gemini"] = m
 		defaultModel = "gemini"
 	}
 	if k := config.Get("ANTHROPIC_API_KEY", ""); k != "" {
-		models["anthropic"] = audit.Wrap(brain.NewAnthropic(k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")), auditStore, "anthropic", clk, logger)
+		m, err := brain.NewClaude(ctx, k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"))
+		if err != nil {
+			logger.Error("config", "err", "anthropic model init failed", "detail", err)
+			os.Exit(1)
+		}
+		models["anthropic"] = m
 		if defaultModel == "fake" {
 			defaultModel = "anthropic"
 		}

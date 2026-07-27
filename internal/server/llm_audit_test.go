@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -149,22 +151,29 @@ func TestLLMAuditStoreErrors(t *testing.T) {
 }
 
 func TestGenerateScriptAuditsWithLabel(t *testing.T) {
-	ctx := context.Background()
 	store := audit.NewMemStore()
-	wrapped := audit.Wrap(brain.Fake{}, store, "fake", live.RealClock(), nil)
+	ledger := spend.NewMemLedger()
 	s := New(Deps{
 		Audit:        store,
-		Ledger:       spend.NewMemLedger(), // GenerateScript always calls s.ledger(); a nil Ledger panics
-		Models:       map[string]brain.Model{"fake": wrapped},
+		Ledger:       ledger,
+		Models:       map[string]brain.Model{"fake": brain.NewFake(brain.FakeScript)},
 		DefaultModel: "fake",
 	})
+
+	// Scope the audit handler to this ctx — never AppendGlobalHandlers in a test.
+	ctx := callbacks.InitCallbacks(
+		context.Background(),
+		&callbacks.RunInfo{Name: "fake", Type: "fake", Component: components.ComponentOfChatModel},
+		audit.NewCallback(store, ledger, live.RealClock(), nil),
+	)
 
 	_, err := s.GenerateScript(ctx, &radiolabv1.GenerateScriptRequest{
 		Brief:           &radiolabv1.Brief{Type: "backsell"},
 		PersonaOverride: "# test persona",
 	})
 	require.NoError(t, err)
-	recs, err := store.List(ctx, audit.Filter{}, 10, 0)
+
+	recs, err := store.List(context.Background(), audit.Filter{}, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, recs, 1)
 	require.Equal(t, "script:backsell", recs[0].Label)

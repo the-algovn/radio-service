@@ -52,7 +52,7 @@ func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
 	led := spend.NewMemLedger()
 	s := New(Deps{
 		Ledger: led, PersonaDir: dir,
-		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
+		Models: map[string]brain.Model{"fake": brain.NewFake(brain.FakeScript)}, DefaultModel: "fake",
 	})
 	require.NoError(t, persona.Save(dir, "# test persona"))
 	resp, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
@@ -63,15 +63,15 @@ func TestGenerateScriptFakeValidatesAndLedgers(t *testing.T) {
 	require.Empty(t, resp.GetViolations())
 	require.True(t, resp.GetFake())
 	lines, _ := led.All(context.Background())
-	require.Len(t, lines, 1)
-	require.Equal(t, "llm", lines[0].Kind)
+	require.Empty(t, lines, "no llm line: GenerateScript no longer prices its own calls, "+
+		"the Eino audit callback does (and it isn't registered in this plain unit test)")
 }
 
 func TestParseCallInFakeModelShortCircuits(t *testing.T) {
 	led := spend.NewMemLedger()
 	s := New(Deps{
 		Ledger: led,
-		Models: map[string]brain.Model{"fake": brain.Fake{}}, DefaultModel: "fake",
+		Models: map[string]brain.Model{"fake": brain.NewFake(brain.FakeScript)}, DefaultModel: "fake",
 	})
 	resp, err := s.ParseCallIn(context.Background(), &radiolabv1.ParseCallInRequest{
 		Text: "cho mình xin bài Em Của Ngày Hôm Qua, tặng Ngọc",

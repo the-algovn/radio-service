@@ -258,7 +258,7 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 	}
 	system, user := brain.BuildPrompts(pers, string(briefJSON))
 	ctx = audit.WithLabel(ctx, "script:"+req.GetBrief().GetType())
-	raw, usage, err := m.Generate(ctx, system, user)
+	raw, err := m.Generate(ctx, system, user, brain.ScriptSchema)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "model: %v", err)
 	}
@@ -270,14 +270,10 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 	if maxChars == 0 {
 		maxChars = 800
 	}
-	cost := brain.CostUSD(m.Name(), usage)
-	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "script:" + req.GetBrief().GetType(),
-		InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.GenerateScriptResponse{
 		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
 		Violations: brain.Validate(out.Script, maxChars),
-		InTokens:   int32(usage.In), OutTokens: int32(usage.Out),
-		CostUsd: cost, Fake: m.Name() == "fake", Model: m.Name(),
+		Fake:       m.Name() == "fake", Model: m.Name(),
 	}, nil
 }
 
@@ -321,16 +317,14 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 		}, nil
 	}
 	ctx = audit.WithLabel(ctx, "callin")
-	r, usage, err := callin.Parse(ctx, m, req.GetText())
+	r, err := callin.Parse(ctx, m, req.GetText())
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "parse: %v", err)
 	}
-	cost := brain.CostUSD(m.Name(), usage)
-	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: m.Name(), Label: "callin", InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost})
 	return &radiolabv1.ParseCallInResponse{
 		SongQuery: r.SongQuery, Recipient: r.Recipient, Message: r.Message,
 		Verdict: r.Verdict, RejectReason: r.RejectReason, Digest: r.Digest, Weight: r.Weight,
-		CostUsd: cost, Fake: m.Name() == "fake",
+		Fake: m.Name() == "fake",
 	}, nil
 }
 
