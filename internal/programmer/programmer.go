@@ -164,36 +164,44 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 			live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
 		}
 	}()
+	// respinOnly is every exit path's landing spot below: whatever went
+	// wrong, the ladder still ends in a deterministic re-spin rather than a
+	// silent skip. respin needs neither the persona nor the brief, so it is
+	// reachable from every failure, not just the LLM-facing ones.
+	respinOnly := func() {
+		if p.respin(ctx) {
+			enqueued++
+		}
+	}
 
 	pers, err := persona.Load(p.d.PersonaDir)
 	if err != nil {
 		p.d.Logger.Error("programmer: persona load failed", "err", err)
+		respinOnly()
 		return
 	}
 	brief, err := p.buildBrief(ctx)
 	if err != nil {
 		p.d.Logger.Error("programmer: brief failed", "err", err)
+		respinOnly()
 		return
 	}
 	briefJSON, err := json.Marshal(brief)
 	if err != nil {
 		p.d.Logger.Error("programmer: brief marshal failed", "err", err)
+		respinOnly()
 		return
 	}
 
 	pool, ok := p.proposeAndResolve(ctx, pers, string(briefJSON))
 	if !ok || len(pool) == 0 {
-		if p.respin(ctx) {
-			enqueued++
-		}
+		respinOnly()
 		return
 	}
 
 	choices := p.chooseFrom(ctx, pers, string(briefJSON), pool, wantPicks(pending))
 	if len(choices) == 0 {
-		if p.respin(ctx) {
-			enqueued++
-		}
+		respinOnly()
 		return
 	}
 	for _, c := range choices {
@@ -201,8 +209,8 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 			enqueued++
 		}
 	}
-	if enqueued == 0 && p.respin(ctx) {
-		enqueued++
+	if enqueued == 0 {
+		respinOnly()
 	}
 }
 

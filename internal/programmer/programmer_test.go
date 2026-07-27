@@ -271,6 +271,47 @@ func TestDecideLabelsEachPhase(t *testing.T) {
 	require.Equal(t, []string{"programmer:intent", "programmer:choose"}, h.model.labels)
 }
 
+// A missing/misconfigured persona file must not go silent on every tick —
+// decide() falls through to respin() same as any other failure.
+func TestDecideFallsBackWhenPersonaLoadFails(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.prog.d.PersonaDir = t.TempDir() // fresh dir, no persona file written → persona.Load errors
+
+	h.prog.decide(h.ctx, 0)
+
+	require.Zero(t, h.model.calls, "persona failed before any model call")
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, "l1", pending[0].YTID)
+	require.Empty(t, pending[0].Reason, "a fallback re-spin must not fabricate a reason")
+}
+
+// errCountLibrary wraps a real library.Library and fails only Count, the
+// cheapest way to make buildBrief's own error path fire without touching the
+// harness. respin still works through it since it only calls AllIDs and Get.
+type errCountLibrary struct{ library.Library }
+
+func (errCountLibrary) Count(context.Context, string) (int64, error) {
+	return 0, errors.New("count boom")
+}
+
+// A transient DB read failure inside buildBrief must not silently skip the
+// decision — decide() falls through to respin() same as an LLM failure.
+func TestDecideFallsBackWhenBuildBriefFails(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.prog.d.Library = errCountLibrary{h.lib}
+
+	h.prog.decide(h.ctx, 0)
+
+	require.Zero(t, h.model.calls, "brief failed before any model call")
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, "l1", pending[0].YTID)
+	require.Empty(t, pending[0].Reason, "a fallback re-spin must not fabricate a reason")
+}
+
 // --- shared filtering behavior, exercised through decide()'s respin fallback. ---
 
 // filtered must still catch recently-aired and already-queued tracks when
