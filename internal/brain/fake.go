@@ -3,6 +3,10 @@ package brain
 import (
 	"context"
 
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
+	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 )
 
@@ -21,6 +25,23 @@ func NewFake(canned string) Model { return fake{canned: canned} }
 func (fake) Name() string     { return "fake" }
 func (fake) Provider() string { return "fake" }
 
-func (f fake) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
+// Generate emits the same OnStart/OnEnd callback sequence a real Eino
+// component would, so audit.NewCallback records fake calls exactly like the
+// old audit.Wrap(brain.Fake{}, …) did (Fake: true, cost 0) instead of silently
+// losing the audit trail in keyless mode. Real components emit these from
+// inside their own Generate; fake has no framework to do it for it, so it
+// does so itself.
+func (f fake) Generate(ctx context.Context, system, user string, _ *jsonschema.Schema) (string, error) {
+	ctx = callbacks.EnsureRunInfo(ctx, "fake", components.ComponentOfChatModel)
+	cfg := &einomodel.Config{Model: "fake"}
+	ctx = callbacks.OnStart(ctx, &einomodel.CallbackInput{
+		Messages: []*schema.Message{schema.SystemMessage(system), schema.UserMessage(user)},
+		Config:   cfg,
+	})
+	callbacks.OnEnd(ctx, &einomodel.CallbackOutput{
+		Message:    schema.AssistantMessage(f.canned, nil),
+		Config:     cfg,
+		TokenUsage: &einomodel.TokenUsage{},
+	})
 	return f.canned, nil
 }
