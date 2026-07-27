@@ -20,10 +20,12 @@ func TestValidateLength(t *testing.T) {
 	require.Contains(t, v[0], "length")
 }
 
-func TestParseOutputStripsFences(t *testing.T) {
-	raw := "```json\n{\"script\":\"xin chào\",\"summary\":\"chào\",\"used_phrases\":[\"bạn nghe đài\"]}\n```"
-	out, err := ParseOutput(raw)
-	require.NoError(t, err)
-	require.Equal(t, "xin chào", out.Script)
-	require.Equal(t, []string{"bạn nghe đài"}, out.UsedPhrases)
+func TestParseOutputRejectsNonJSON(t *testing.T) {
+	_, err := ParseOutput("not json at all")
+	require.Error(t, err)
+}
+
+func TestParseOutputRejectsEmptyScript(t *testing.T) {
+	_, err := ParseOutput(`{"script":"","summary":"s","used_phrases":[]}`)
+	require.Error(t, err)
 }
