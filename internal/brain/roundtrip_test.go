@@ -93,4 +93,5 @@ func TestGeminiGenerateRoundTrip(t *testing.T) {
 	body, _ := json.Marshal(gotBody)
 	require.Contains(t, string(body), "SYSPROMPT")
 	require.Contains(t, string(body), "USERPROMPT")
+	require.Contains(t, string(body), "used_phrases", "the response schema must be sent")
 }
