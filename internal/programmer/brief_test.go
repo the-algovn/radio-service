@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
@@ -32,6 +33,7 @@ type harness struct {
 	listeners *live.MemListeners
 	sched     *schedule.MemStore
 	clock     *fakeClock
+	search    *fakeSearcher
 }
 
 func newHarness(t *testing.T) *harness {
@@ -42,13 +44,14 @@ func newHarness(t *testing.T) *harness {
 	listeners := live.NewMemListeners(time.Now)
 	sched := schedule.NewMemStore()
 	clock := &fakeClock{now: time.Now()}
+	search := &fakeSearcher{byQuery: map[string][]ingest.Candidate{}}
 	prog := New(Deps{
 		Requests: requests, Sched: sched, Library: lib, Log: airlog, Listeners: listeners,
-		Clock: clock, Location: time.UTC,
+		Clock: clock, Location: time.UTC, Search: search,
 	})
 	return &harness{
 		ctx: context.Background(), prog: prog, lib: lib, requests: requests,
-		airlog: airlog, listeners: listeners, sched: sched, clock: clock,
+		airlog: airlog, listeners: listeners, sched: sched, clock: clock, search: search,
 	}
 }
 
