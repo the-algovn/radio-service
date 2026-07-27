@@ -2,45 +2,46 @@ package programmer
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
-	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
-	"github.com/the-algovn/radio-service/internal/station"
 )
 
+// scriptedModel scripts a Generate call sequence: each call in order consumes
+// the next reply/err pair, and records the label and user prompt it was
+// called with, so tests can assert both the shape of the conversation and
+// which phase each call belonged to.
 type scriptedModel struct {
-	raw   string
-	err   error
-	calls int
+	replies []string
+	errs    []error
+	calls   []string // user prompts, in order
+	labels  []string // audit label per call
 }
 
-func (m *scriptedModel) Name() string     { return "gemini-test" }
-func (m *scriptedModel) Provider() string { return "gemini" }
-func (m *scriptedModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
-	m.calls++
-	return m.raw, m.err
-}
+func (m *scriptedModel) Name() string     { return "fake-scripted" }
+func (m *scriptedModel) Provider() string { return "fake" }
 
-type scriptedSearch struct {
-	byQuery map[string][]ingest.Candidate
-	calls   int
-}
-
-func (s *scriptedSearch) Search(_ context.Context, q string, _ int) ([]ingest.Candidate, error) {
-	s.calls++
-	return s.byQuery[q], nil
+func (m *scriptedModel) Generate(ctx context.Context, _, user string, _ *jsonschema.Schema) (string, error) {
+	i := len(m.calls)
+	m.calls = append(m.calls, user)
+	m.labels = append(m.labels, audit.LabelFrom(ctx))
+	if i < len(m.errs) && m.errs[i] != nil {
+		return "", m.errs[i]
+	}
+	if i >= len(m.replies) {
+		return "", errors.New("no reply scripted")
+	}
+	return m.replies[i], nil
 }
 
 type frame struct{ topic, value string }
@@ -51,293 +52,238 @@ func (p *memProducer) Publish(_ context.Context, topic string, value []byte) err
 	return nil
 }
 
-type fixture struct {
-	prog    *Programmer
-	model   *scriptedModel
-	search  *scriptedSearch
-	station station.Store
-	reqs    *request.MemStore
-	lib     *library.MemLibrary
-	log     *live.MemAirLog
-	lst     *live.MemListeners
-	ledger  *spend.MemLedger
-	prod    *memProducer
-}
-
-// newFixture: on-air station, 3 library tracks, one live listener, empty
-// queue, zero spend — every gate OPEN unless a test closes one.
-func newFixture(t *testing.T, model *scriptedModel) *fixture {
-	t.Helper()
-	ctx := context.Background()
-	lib := library.NewMemLibrary()
-	for _, id := range []string{"lib1", "lib2", "lib3"} {
-		require.NoError(t, lib.Add(ctx, library.Track{
-			YTID: id, Title: "t-" + id, Channel: "c-" + id, DurationS: 240, ArtifactID: "a-" + id,
-		}))
-	}
-	st := station.NewMemStore()
-	_, err := st.GoOnAir(ctx)
-	require.NoError(t, err)
-	lst := live.NewMemListeners(time.Now)
-	require.NoError(t, lst.Beat(ctx, "tab-1"))
-
-	personaDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(personaDir, "tieu-duong-duong.md"), []byte("PERSONA"), 0o644))
-
-	f := &fixture{
-		model: model, search: &scriptedSearch{byQuery: map[string][]ingest.Candidate{}},
-		station: st, reqs: request.NewMemStore(), lib: lib,
-		log: live.NewMemAirLog(), lst: lst, ledger: spend.NewMemLedger(), prod: &memProducer{},
-	}
-	f.prog = New(Deps{
-		Model: model, Fake: false, PersonaDir: personaDir,
-		Station: st, Requests: f.reqs, Sched: schedule.NewMemStore(), Library: lib, Log: f.log, Listeners: lst,
-		Search: f.search, Ledger: f.ledger, BudgetUSD: 1.0, Producer: f.prod,
-		Clock: live.RealClock(), Rand: func(int) int { return 0 },
-		Location: time.FixedZone("ICT", 7*3600),
-	})
-	return f
-}
+// --- RunOnce gates: every gate must stay a quiet skip, never reaching the model. ---
 
 func TestGatesProduceNoModelCalls(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("off-air", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
-		_, err := f.station.GoOffAir(ctx)
+		h := newHarness(t)
+		_, err := h.station.GoOffAir(h.ctx)
 		require.NoError(t, err)
-		f.prog.RunOnce(ctx)
-		require.Zero(t, f.model.calls)
+		h.prog.RunOnce(h.ctx)
+		require.Zero(t, h.model.calls)
+	})
+
+	t.Run("ai disabled", func(t *testing.T) {
+		h := newHarness(t)
+		_, err := h.station.SetAIEnabled(h.ctx, false)
+		require.NoError(t, err)
+		h.prog.RunOnce(h.ctx)
+		require.Zero(t, h.model.calls)
 	})
 
 	t.Run("zero listeners", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
-		f.lst = live.NewMemListeners(time.Now) // fresh, nobody beat
-		f.prog.d.Listeners = f.lst
-		f.prog.RunOnce(ctx)
-		require.Zero(t, f.model.calls)
+		h := newHarness(t)
+		h.prog.RunOnce(h.ctx) // nobody has beat: listener count is 0
+		require.Zero(t, h.model.calls)
 	})
 
 	t.Run("queue depth at target", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
+		h := newHarness(t)
 		for _, id := range []string{"q1", "q2", "q3"} {
-			_, err := f.reqs.Create(ctx, request.Item{Source: request.SourceListener,
-				RequestedBy: "u", YTID: id, Title: id, Channel: "c", DurationS: 100,
-				Status: request.StatusApproved})
+			_, err := h.requests.Create(h.ctx, request.Item{
+				Source: request.SourceListener, RequestedBy: "u", YTID: id, Title: id, Channel: "c",
+				DurationS: 100, Status: request.StatusApproved,
+			})
 			require.NoError(t, err)
 		}
-		f.prog.RunOnce(ctx)
-		require.Zero(t, f.model.calls)
+		h.prog.RunOnce(h.ctx)
+		require.Zero(t, h.model.calls)
 	})
 
 	t.Run("budget cap hit", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
-		require.NoError(t, f.ledger.Append(ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: "gemini", CostUSD: 1.0}))
-		f.prog.RunOnce(ctx)
-		require.Zero(t, f.model.calls)
+		h := newHarness(t)
+		require.NoError(t, h.listeners.Beat(h.ctx, "tab-1"))
+		require.NoError(t, h.ledger.Append(h.ctx, spend.Line{TS: time.Now(), Kind: "llm", Provider: "fake", CostUSD: 1.0}))
+		h.prog.RunOnce(h.ctx)
+		require.Zero(t, h.model.calls)
 	})
 }
 
-func TestPausedAIProducesNothing(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("real mode: zero model calls", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2"}]}`})
-		_, err := f.station.SetAIEnabled(ctx, false)
-		require.NoError(t, err)
-		f.prog.RunOnce(ctx)
-		require.Zero(t, f.model.calls)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Empty(t, pending)
-	})
-
-	t.Run("fake mode: zero enqueues", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
-		f.prog.d.Fake = true
-		_, err := f.station.SetAIEnabled(ctx, false)
-		require.NoError(t, err)
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Empty(t, pending)
-	})
-}
-
-func TestQueryPickSearchesFiltersEnqueues(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{raw: `{"picks":[{"query":"nhạc đêm","reason":"khuya"}]}`})
-	f.search.byQuery["nhạc đêm"] = []ingest.Candidate{
-		{YTID: "long1", Title: "10h mix", Channel: "Mix - Topic", DurationS: 36000, ViewCount: 5000}, // > 600s → filtered
-		{YTID: "new1", Title: "Bài Mới", Channel: "Ca Sĩ - Topic", DurationS: 250, ViewCount: 90000, ThumbnailURL: "https://img/new1"},
-	}
-	f.prog.RunOnce(ctx)
-	require.Equal(t, 1, f.model.calls)
-	require.Equal(t, 1, f.search.calls)
-
-	pending, err := f.reqs.Pending(ctx)
-	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	require.Equal(t, request.SourceAI, pending[0].Source)
-	require.Equal(t, "new1", pending[0].YTID)
-	require.Equal(t, request.StatusApproved, pending[0].Status) // not cached → needs ingest
-	require.Equal(t, "https://img/new1", pending[0].ThumbnailURL)
-
-	// The programmer no longer appends its own llm ledger line — the Eino audit
-	// callback does, and this plain unit test doesn't register it.
-	lines, err := f.ledger.All(ctx)
-	require.NoError(t, err)
-	require.Empty(t, lines)
-	require.NotEmpty(t, f.prod.frames)
-}
-
-func TestLibraryPickIsReadyImmediately(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"đổi gió"}]}`})
-	f.prog.RunOnce(ctx)
-	pending, err := f.reqs.Pending(ctx)
-	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	require.Equal(t, "lib2", pending[0].YTID)
-	require.Equal(t, request.StatusReady, pending[0].Status)
-	require.Equal(t, "t-lib2", pending[0].Title)
-}
-
-func TestPickFiltersRecentAndQueuedAndUnknown(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib1"},{"yt_id":"lib2"}]}`})
-	// lib1 recently aired; lib2 already queued → both filtered, nothing enqueued
-	require.NoError(t, f.log.Append(ctx, live.Entry{YTID: "lib1", Title: "t", Artist: "a",
-		StartedAt: time.Now().Add(-10 * time.Minute), DurationS: 240}))
-	_, err := f.reqs.Create(ctx, request.Item{Source: request.SourceListener, RequestedBy: "u",
-		YTID: "lib2", Title: "t", Channel: "c", DurationS: 100, Status: request.StatusReady})
-	require.NoError(t, err)
-
-	before, err := f.reqs.Pending(ctx)
-	require.NoError(t, err)
-	f.prog.RunOnce(ctx)
-	after, err := f.reqs.Pending(ctx)
-	require.NoError(t, err)
-	require.Equal(t, len(before), len(after)) // ledger charged, nothing enqueued
-	require.Equal(t, 1, f.model.calls)
-}
-
-func TestModelErrorAndParseFailureSkipCleanly(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{raw: "", err: context.DeadlineExceeded})
-	f.prog.RunOnce(ctx)
-	pending, _ := f.reqs.Pending(ctx)
-	require.Empty(t, pending)
-	lines, _ := f.ledger.All(ctx)
-	require.Empty(t, lines) // failed call: no usage returned worth pricing
-
-	f2 := newFixture(t, &scriptedModel{raw: "definitely not json"})
-	f2.prog.RunOnce(ctx)
-	pending, _ = f2.reqs.Pending(ctx)
-	require.Empty(t, pending)
-	// Tokens were spent, so they're still recorded even on parse failure — but
-	// by the Eino audit callback now, on OnEnd, before RunOnce ever sees the raw
-	// output to parse. This plain unit test doesn't register that callback, so
-	// it observes no line; the guarantee itself moved, it wasn't dropped.
-	lines, _ = f2.ledger.All(ctx)
-	require.Empty(t, lines)
-}
-
+// FakeModeReSpinsLibraryWithoutModel: keyless mode never calls the model —
+// it goes straight to the tier-3 deterministic re-spin.
 func TestFakeModeReSpinsLibraryWithoutModel(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{})
-	f.prog.d.Fake = true
-	f.prog.RunOnce(ctx)
-	require.Zero(t, f.model.calls)
-	pending, err := f.reqs.Pending(ctx)
+	h := newHarness(t)
+	require.NoError(t, h.listeners.Beat(h.ctx, "tab-1"))
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "libX", Title: "Lib X", DurationS: 200}))
+	h.prog.d.Fake = true
+
+	h.prog.RunOnce(h.ctx)
+
+	require.Zero(t, h.model.calls)
+	pending, err := h.requests.Pending(h.ctx)
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
+	require.Equal(t, "libX", pending[0].YTID)
 	require.Equal(t, request.SourceAI, pending[0].Source)
 	require.Equal(t, request.StatusReady, pending[0].Status)
-	require.True(t, strings.HasPrefix(pending[0].YTID, "lib"))
-	lines, _ := f.ledger.All(ctx)
-	require.Empty(t, lines) // fake mode spends nothing
+	require.Empty(t, pending[0].Reason, "a re-spin must not fabricate a reason the DJ would speak")
 }
 
-func TestBriefContainsPlaysRequestsAndSample(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib3"}]}`})
-	require.NoError(t, f.log.Append(ctx, live.Entry{YTID: "lib1", Title: "Đã Phát", Artist: "Ca Sĩ",
-		StartedAt: time.Now().Add(-30 * time.Minute), DurationS: 240}))
-	_, err := f.reqs.Create(ctx, request.Item{Source: request.SourceListener, RequestedBy: "u",
-		DisplayName: "Ngọc", YTID: "reqx", Title: "Bài Yêu Cầu", Channel: "c", DurationS: 100,
-		Status: request.StatusApproved})
-	require.NoError(t, err)
+// --- decide(): the whole two-phase decision, wired end to end. ---
 
-	brief, err := f.prog.buildBrief(ctx)
-	require.NoError(t, err)
-	require.NotEmpty(t, brief.LocalTime)
-	require.Equal(t, "Đã Phát", brief.RecentPlays[0].Title)
-	require.Equal(t, "Ca Sĩ", brief.RecentPlays[0].Artist)
-	require.Contains(t, pendTitles(brief.Pending), "Bài Yêu Cầu")
-	require.NotEmpty(t, brief.Library.Sample)
-	require.LessOrEqual(t, len(brief.Library.Sample), librarySample)
-}
-
-func pendTitles(ps []BriefPend) []string {
-	out := make([]string, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, p.Title)
+// The happy path: intent → resolve → choose → enqueue, with the reason attached
+// to the track the model actually saw.
+func TestDecideEnqueuesWithMatchingReason(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "lib1", Title: "Lib One", DurationS: 200}))
+	h.model.replies = []string{
+		`{"searches":[],"library_query":"","respins":["lib1"],"note":"đêm dịu"}`,
+		`{"picks":[{"yt_id":"lib1","reason":"bài này hợp đêm mưa"}]}`,
 	}
-	return out
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, err := h.requests.Pending(h.ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "lib1", pending[0].YTID)
+	require.Equal(t, "bài này hợp đêm mưa", pending[0].Reason)
+	require.Equal(t, request.SourceAI, pending[0].Source)
+	require.Equal(t, request.StatusReady, pending[0].Status, "a cached library track is ready, not approved")
+	require.Len(t, h.model.calls, 2, "exactly two LLM calls per decision")
 }
 
-func TestPicksStoreCappedReason(t *testing.T) {
-	ctx := context.Background()
+// A YouTube pick that is not cached must be enqueued as approved so ingest
+// fetches it.
+func TestDecideEnqueuesUncachedAsApproved(t *testing.T) {
+	h := newHarness(t)
+	h.search.byQuery["q"] = []ingest.Candidate{{YTID: "yt1", Title: "YT One", DurationS: 200}}
+	h.model.replies = []string{
+		`{"searches":["q"],"respins":[]}`,
+		`{"picks":[{"yt_id":"yt1","reason":"mới lạ"}]}`,
+	}
 
-	t.Run("library pick keeps its reason", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"  đổi gió một chút  "}]}`})
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Len(t, pending, 1)
-		require.Equal(t, "đổi gió một chút", pending[0].Reason) // trimmed
-	})
+	h.prog.decide(h.ctx, 0)
 
-	t.Run("query pick keeps its reason", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"query":"nhạc đêm","reason":"khuya rồi"}]}`})
-		f.search.byQuery["nhạc đêm"] = []ingest.Candidate{
-			{YTID: "new1", Title: "Bài Mới", Channel: "Ca Sĩ - Topic", DurationS: 250, ViewCount: 90000},
-		}
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Len(t, pending, 1)
-		require.Equal(t, "khuya rồi", pending[0].Reason)
-	})
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, request.StatusApproved, pending[0].Status)
+}
 
-	t.Run("over-long reason is capped at 200 runes", func(t *testing.T) {
-		long := strings.Repeat("đ", 250)
-		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"` + long + `"}]}`})
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Len(t, pending, 1)
-		require.Equal(t, strings.Repeat("đ", 200), pending[0].Reason)
-	})
+// Two picks per decision is what keeps the doubled call count cost-neutral.
+func TestDecideEnqueuesUpToWant(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l2", Title: "Two", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1","l2"]}`,
+		`{"picks":[{"yt_id":"l1","reason":"a"},{"yt_id":"l2","reason":"b"}]}`,
+	}
 
-	t.Run("trim then cap: untrimmed length exceeds 200 but trimmed is exactly 200", func(t *testing.T) {
-		reason := "  " + strings.Repeat("đ", 200) + "  "
-		f := newFixture(t, &scriptedModel{raw: `{"picks":[{"yt_id":"lib2","reason":"` + reason + `"}]}`})
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Len(t, pending, 1)
-		require.Equal(t, strings.Repeat("đ", 200), pending[0].Reason)
-	})
+	h.prog.decide(h.ctx, 0)
 
-	t.Run("fake mode stores no reason", func(t *testing.T) {
-		f := newFixture(t, &scriptedModel{})
-		f.prog.d.Fake = true
-		f.prog.RunOnce(ctx)
-		pending, err := f.reqs.Pending(ctx)
-		require.NoError(t, err)
-		require.Len(t, pending, 1)
-		require.Empty(t, pending[0].Reason)
-	})
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 2)
+}
+
+// An empty pool must still program something — never a silent skip.
+func TestDecideFallsBackToRespinOnEmptyPool(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "shelf", Title: "Shelf", DurationS: 200}))
+	h.model.replies = []string{`{"searches":[],"respins":[],"library_query":""}`}
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, "shelf", pending[0].YTID)
+	require.Empty(t, pending[0].Reason, "a fallback re-spin must not fabricate a reason the DJ would speak")
+	require.Len(t, h.model.calls, 1, "no phase-2 call when the pool is empty")
+}
+
+// One repair turn, then the deterministic fallback.
+func TestDecideRepairsThenFallsBack(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1"]}`,
+		`{"picks":[{"yt_id":"ghost","reason":"invented"}]}`,       // invalid
+		`{"picks":[{"yt_id":"ghost","reason":"still invented"}]}`, // repair also invalid
+	}
+
+	h.prog.decide(h.ctx, 0)
+
+	require.Len(t, h.model.calls, 3, "intent + choose + one repair")
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Empty(t, pending[0].Reason, "fell through to respin")
+}
+
+func TestDecideRepairSucceeds(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1"]}`,
+		`{"picks":[{"yt_id":"ghost","reason":"invented"}]}`,
+		`{"picks":[{"yt_id":"l1","reason":"đã sửa"}]}`,
+	}
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, "đã sửa", pending[0].Reason)
+}
+
+// Tier 1: a transient error gets one retry.
+func TestDecideRetriesTransientError(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.errs = []error{context.DeadlineExceeded, nil, nil}
+	h.model.replies = []string{
+		"",
+		`{"respins":["l1"]}`,
+		`{"picks":[{"yt_id":"l1","reason":"ổn"}]}`,
+	}
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Equal(t, "ổn", pending[0].Reason)
+}
+
+// Both attempts failing falls through to the deterministic fallback.
+func TestDecideFallsBackWhenIntentAlwaysFails(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.errs = []error{context.DeadlineExceeded, context.DeadlineExceeded}
+	h.model.replies = []string{"", ""}
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Len(t, pending, 1)
+	require.Empty(t, pending[0].Reason)
+}
+
+// Each phase must be labelled so the console inspector can tell them apart.
+func TestDecideLabelsEachPhase(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "l1", Title: "One", DurationS: 200}))
+	h.model.replies = []string{
+		`{"respins":["l1"]}`,
+		`{"picks":[{"yt_id":"l1","reason":"x"}]}`,
+	}
+
+	h.prog.decide(h.ctx, 0)
+
+	require.Equal(t, []string{"programmer:intent", "programmer:choose"}, h.model.labels)
+}
+
+// --- shared filtering behavior, exercised through decide()'s respin fallback. ---
+
+// filtered must still catch recently-aired and already-queued tracks when
+// decide() falls all the way through to respin().
+func TestDecideRespinFiltersRecentAndQueued(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "only", Title: "Only", DurationS: 200}))
+	require.NoError(t, h.airlog.Append(h.ctx, live.Entry{YTID: "only", Title: "t", Artist: "a",
+		StartedAt: time.Now().Add(-10 * time.Minute), DurationS: 200}))
+	h.model.replies = []string{`{"respins":[]}`}
+
+	h.prog.decide(h.ctx, 0)
+
+	pending, _ := h.requests.Pending(h.ctx)
+	require.Empty(t, pending, "the only library track was filtered as recently aired")
 }

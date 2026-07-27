@@ -3,6 +3,8 @@ package programmer
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/spend"
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 // fakeClock is a settable live.Clock for deterministic MinutesAgo assertions.
@@ -21,9 +25,11 @@ type fakeClock struct{ now time.Time }
 func (c *fakeClock) Now() time.Time                      { return c.now }
 func (c *fakeClock) Tick(time.Duration) <-chan time.Time { return make(chan time.Time) }
 
-// harness is the minimal Programmer setup buildBrief needs: no model, no
-// search, no persona — those belong to the single-phase decision path, not
-// the brief itself.
+// harness is the shared Programmer setup for the whole package: a scripted
+// model, persona dir, an on-air station with room in the budget, and every
+// store buildBrief and decide need. RunOnce-level tests close one gate at a
+// time from this all-open baseline; decide()-level tests call decide
+// directly and never touch the gates at all.
 type harness struct {
 	ctx       context.Context
 	prog      *Programmer
@@ -34,6 +40,10 @@ type harness struct {
 	sched     *schedule.MemStore
 	clock     *fakeClock
 	search    *fakeSearcher
+	model     *scriptedModel
+	station   station.Store
+	ledger    *spend.MemLedger
+	prod      *memProducer
 }
 
 func newHarness(t *testing.T) *harness {
@@ -45,46 +55,31 @@ func newHarness(t *testing.T) *harness {
 	sched := schedule.NewMemStore()
 	clock := &fakeClock{now: time.Now()}
 	search := &fakeSearcher{byQuery: map[string][]ingest.Candidate{}}
+	model := &scriptedModel{}
+	personaDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(personaDir, "tieu-duong-duong.md"), []byte("PERSONA"), 0o644))
+	st := station.NewMemStore()
+	ctx := context.Background()
+	_, err := st.GoOnAir(ctx)
+	require.NoError(t, err)
+	ledger := spend.NewMemLedger()
+	prod := &memProducer{}
 	prog := New(Deps{
 		Requests: requests, Sched: sched, Library: lib, Log: airlog, Listeners: listeners,
 		Clock: clock, Location: time.UTC, Search: search,
+		Model: model, Fake: false, PersonaDir: personaDir,
+		Station: st, Ledger: ledger, BudgetUSD: 1.0, Producer: prod,
+		Rand: func(int) int { return 0 },
 	})
+	// New() defaults a zero Backoff to retryBackoff, so a zero-value Deps
+	// field can't request "no backoff" — set it directly on the constructed
+	// Programmer instead, to keep the retry tests from sleeping.
+	prog.d.Backoff = 0
 	return &harness{
-		ctx: context.Background(), prog: prog, lib: lib, requests: requests,
-		airlog: airlog, listeners: listeners, sched: sched, clock: clock, search: search,
+		ctx: ctx, prog: prog, lib: lib, requests: requests,
+		airlog: airlog, listeners: listeners, sched: sched, clock: clock, search: search, model: model,
+		station: st, ledger: ledger, prod: prod,
 	}
-}
-
-func TestParsePicks(t *testing.T) {
-	picks, err := ParsePicks(`{"picks":[{"query":"nhạc Trịnh đêm khuya","reason":"khuya rồi"},{"yt_id":"abc123","reason":"đổi không khí"}]}`)
-	require.NoError(t, err)
-	require.Len(t, picks, 2)
-	require.Equal(t, "nhạc Trịnh đêm khuya", picks[0].Query)
-	require.Empty(t, picks[0].YTID)
-	require.Equal(t, "abc123", picks[1].YTID)
-
-	// invalid picks are dropped; >2 truncates to 2
-	picks, err = ParsePicks(`{"picks":[{"reason":"no target"},{"query":"a"},{"query":"b"},{"query":"c"}]}`)
-	require.NoError(t, err)
-	require.Len(t, picks, 2)
-	require.Equal(t, "a", picks[0].Query)
-
-	// both query and yt_id set → invalid pick
-	_, err = ParsePicks(`{"picks":[{"query":"x","yt_id":"y"}]}`)
-	require.Error(t, err)
-	_, err = ParsePicks(`{"picks":[]}`)
-	require.Error(t, err)
-	_, err = ParsePicks("not json")
-	require.Error(t, err)
-}
-
-func TestBuildPromptsDelimitsBrief(t *testing.T) {
-	system, user := BuildPrompts("PERSONA BIBLE", `{"local_time":"23:15"}`)
-	require.Contains(t, system, "PERSONA BIBLE")
-	require.Contains(t, system, `"picks"`)
-	require.Contains(t, user, "<brief>")
-	require.Contains(t, user, `{"local_time":"23:15"}`)
-	require.Contains(t, user, "</brief>")
 }
 
 // Pending must include the programmer's OWN queued AI picks. Without this the

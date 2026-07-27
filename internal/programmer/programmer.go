@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
+
 	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/ingest"
@@ -31,9 +33,9 @@ const (
 	maxTrackSeconds  = 600 // spec §5: AI picks ≤ 10 min
 	minTrackSeconds  = 60
 	briefPlays       = 10
-	briefSample      = 10
 	searchN          = 10
 	maxReasonRunes   = 200
+	retryBackoff     = 2 * time.Second
 )
 
 type Searcher interface {
@@ -63,6 +65,7 @@ type Deps struct {
 	Rand       func(n int) int // nil → math/rand.Intn
 	Location   *time.Location  // station civil clock; required
 	Logger     *slog.Logger
+	Backoff    time.Duration // model retry backoff; zero → retryBackoff
 }
 
 // cursor is the rotating library-window offset (see librarySample). It is only
@@ -81,6 +84,9 @@ func New(d Deps) *Programmer {
 	}
 	if d.Location == nil {
 		d.Location = time.UTC
+	}
+	if d.Backoff == 0 {
+		d.Backoff = retryBackoff
 	}
 	return &Programmer{d: d}
 }
@@ -128,7 +134,11 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 		return
 	}
 	if p.d.Fake {
-		p.fakePick(ctx)
+		// Keyless mode: no LLM, no spend — the same deterministic re-spin the
+		// failure ladder ends in.
+		if p.respin(ctx) {
+			live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
+		}
 		return
 	}
 	spent, err := p.d.Ledger.SpentSince(ctx, request.DayStart(p.d.Clock.Now(), p.d.Location))
@@ -140,15 +150,29 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 		p.d.Logger.Warn("programmer: daily budget reached; idling", "spent_usd", spent)
 		return
 	}
+	p.decide(ctx, len(pending))
+}
 
-	brief, err := p.buildBrief(ctx)
-	if err != nil {
-		p.d.Logger.Error("programmer: brief failed", "err", err)
-		return
-	}
+// decide makes one whole programming decision: phase 1 proposes intent, resolve
+// turns it into real candidates, phase 2 chooses from them and writes the
+// reason for the track it actually saw. Every exit path programs something —
+// the ladder ends in respin(), never in a silent skip.
+func (p *Programmer) decide(ctx context.Context, pending int) {
+	enqueued := 0
+	defer func() {
+		if enqueued > 0 {
+			live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
+		}
+	}()
+
 	pers, err := persona.Load(p.d.PersonaDir)
 	if err != nil {
 		p.d.Logger.Error("programmer: persona load failed", "err", err)
+		return
+	}
+	brief, err := p.buildBrief(ctx)
+	if err != nil {
+		p.d.Logger.Error("programmer: brief failed", "err", err)
 		return
 	}
 	briefJSON, err := json.Marshal(brief)
@@ -156,91 +180,131 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 		p.d.Logger.Error("programmer: brief marshal failed", "err", err)
 		return
 	}
-	system, user := BuildPrompts(pers, string(briefJSON))
-	ctx = audit.WithLabel(ctx, "programmer:pick")
-	raw, err := p.d.Model.Generate(ctx, system, user, nil)
-	if err != nil {
-		p.d.Logger.Error("programmer: model call failed", "err", err)
+
+	pool, ok := p.proposeAndResolve(ctx, pers, string(briefJSON))
+	if !ok || len(pool) == 0 {
+		if p.respin(ctx) {
+			enqueued++
+		}
 		return
 	}
-	picks, err := ParsePicks(raw)
-	if err != nil {
-		p.d.Logger.Error("programmer: parse failed", "err", err, "raw", raw[:min(len(raw), 200)])
+
+	choices := p.chooseFrom(ctx, pers, string(briefJSON), pool, wantPicks(pending))
+	if len(choices) == 0 {
+		if p.respin(ctx) {
+			enqueued++
+		}
 		return
 	}
-	enqueued := 0
-	for _, pk := range picks {
-		if p.enqueue(ctx, pk) {
+	for _, c := range choices {
+		if p.enqueueChoice(ctx, c) {
 			enqueued++
 		}
 	}
-	if enqueued > 0 {
-		live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
+	if enqueued == 0 && p.respin(ctx) {
+		enqueued++
 	}
 }
 
-// enqueue turns one pick into an AI request row. Returns false when the
-// pick is filtered out (recently aired, already queued, no usable
-// candidate) — a quiet skip, never an error.
-func (p *Programmer) enqueue(ctx context.Context, pk Pick) bool {
-	recent, err := p.d.Log.RecentYTIDs(ctx, recentWindow)
+// proposeAndResolve runs phase 1 and resolve. ok is false only when the
+// decision cannot continue at all.
+func (p *Programmer) proposeAndResolve(ctx context.Context, pers, briefJSON string) ([]Candidate, bool) {
+	system, user := BuildIntentPrompts(pers, briefJSON)
+	raw, err := p.generate(ctx, "programmer:intent", system, user, brain.IntentSchema)
 	if err != nil {
-		p.d.Logger.Error("programmer: recent read failed", "err", err)
-		return false
+		p.d.Logger.Error("programmer: intent call failed", "err", err)
+		return nil, false
 	}
-	recentSet := map[string]bool{}
-	for _, id := range recent {
-		recentSet[id] = true
+	in, err := ParseIntent(raw)
+	if err != nil {
+		p.d.Logger.Error("programmer: intent parse failed", "err", err, "raw", clip(raw))
+		return nil, false
+	}
+	if in.empty() {
+		p.d.Logger.Info("programmer: no intent this decision", "note", in.Note)
+		return nil, true
+	}
+	pool, err := p.resolve(ctx, in)
+	if err != nil {
+		p.d.Logger.Error("programmer: resolve failed", "err", err)
+		return nil, false
+	}
+	p.d.Logger.Info("programmer: pool resolved", "note", in.Note, "candidates", len(pool))
+	return pool, true
+}
+
+// chooseFrom runs phase 2 with one repair turn. An empty result means the
+// caller should fall through to respin().
+func (p *Programmer) chooseFrom(ctx context.Context, pers, briefJSON string, pool []Candidate, want int) []Choice {
+	poolJSON, err := json.Marshal(pool)
+	if err != nil {
+		p.d.Logger.Error("programmer: pool marshal failed", "err", err)
+		return nil
+	}
+	system, user := BuildChoosePrompts(pers, briefJSON, string(poolJSON), want)
+
+	raw, err := p.generate(ctx, "programmer:choose", system, user, brain.ChoiceSchema)
+	if err != nil {
+		p.d.Logger.Error("programmer: choose call failed", "err", err)
+		return nil
+	}
+	choices, perr := ParseChoice(raw, pool, want)
+	if perr == nil {
+		return choices
 	}
 
-	if pk.YTID != "" { // library re-spin
-		tr, ok, err := p.d.Library.Get(ctx, pk.YTID)
-		if err != nil || !ok {
-			return false
-		}
-		if skip, _ := p.filtered(ctx, tr.YTID, int64(tr.DurationS), recentSet); skip {
-			return false
-		}
-		_, err = p.d.Requests.Create(ctx, request.Item{
-			Source: request.SourceAI, YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
-			DurationS: int64(tr.DurationS), Status: request.StatusReady, Reason: capReason(pk.Reason),
-		})
-		if err != nil {
-			p.d.Logger.Error("programmer: enqueue failed", "err", err)
-			return false
-		}
-		p.d.Logger.Info("ai pick queued", "yt_id", tr.YTID, "reason", pk.Reason, "from", "library")
-		return true
-	}
-
-	cs, err := p.d.Search.Search(ctx, pk.Query, searchN)
+	// One repair turn, naming the violation.
+	p.d.Logger.Warn("programmer: choice invalid; repairing", "err", perr)
+	raw2, err := p.generate(ctx, "programmer:repair", system, RepairUser(user, raw, perr.Error()), brain.ChoiceSchema)
 	if err != nil {
-		p.d.Logger.Error("programmer: search failed", "query", pk.Query, "err", err)
+		p.d.Logger.Error("programmer: repair call failed", "err", err)
+		return nil
+	}
+	choices, perr = ParseChoice(raw2, pool, want)
+	if perr != nil {
+		p.d.Logger.Warn("programmer: choice still invalid after repair; falling back", "err", perr)
+		return nil
+	}
+	return choices
+}
+
+// generate is tier 1 of the failure ladder: one retry after a fixed backoff.
+// Errors are not classified — the call is idempotent and cheap, so retrying any
+// failure once is simpler and no less correct than picking apart provider SDK
+// error types.
+func (p *Programmer) generate(ctx context.Context, label, system, user string, s *jsonschema.Schema) (string, error) {
+	ctx = audit.WithLabel(ctx, label)
+	raw, err := p.d.Model.Generate(ctx, system, user, s)
+	if err == nil {
+		return raw, nil
+	}
+	p.d.Logger.Warn("programmer: model call failed; retrying once", "label", label, "err", err)
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(p.d.Backoff):
+	}
+	return p.d.Model.Generate(ctx, system, user, s)
+}
+
+// enqueueChoice writes one validated choice to the request queue. The choice
+// already carries its resolved Candidate, so there is nothing to look up and
+// nothing to fail.
+func (p *Programmer) enqueueChoice(ctx context.Context, c Choice) bool {
+	cand := c.Candidate
+	status := request.StatusApproved
+	if cand.Cached {
+		status = request.StatusReady
+	}
+	if _, err := p.d.Requests.Create(ctx, request.Item{
+		Source: request.SourceAI, YTID: cand.YTID, Title: cand.Title, Channel: cand.Channel,
+		DurationS: cand.DurationS, Status: status, Reason: c.Reason,
+	}); err != nil {
+		p.d.Logger.Error("programmer: enqueue failed", "err", err)
 		return false
 	}
-	for _, sc := range ingest.Rank(pk.Query, cs) {
-		if sc.DurationS < minTrackSeconds || sc.DurationS > maxTrackSeconds {
-			continue
-		}
-		if skip, err := p.filtered(ctx, sc.YTID, sc.DurationS, recentSet); skip || err != nil {
-			continue
-		}
-		status := request.StatusApproved
-		if _, cached, _ := p.d.Library.Get(ctx, sc.YTID); cached {
-			status = request.StatusReady
-		}
-		_, err := p.d.Requests.Create(ctx, request.Item{
-			Source: request.SourceAI, YTID: sc.YTID, Title: sc.Title, Channel: sc.Channel,
-			DurationS: sc.DurationS, ThumbnailURL: sc.ThumbnailURL, Status: status, Reason: capReason(pk.Reason),
-		})
-		if err != nil {
-			p.d.Logger.Error("programmer: enqueue failed", "err", err)
-			return false
-		}
-		p.d.Logger.Info("ai pick queued", "yt_id", sc.YTID, "reason", pk.Reason, "query", pk.Query)
-		return true
-	}
-	return false
+	p.d.Logger.Info("ai pick queued", "yt_id", cand.YTID, "reason", c.Reason, "from", cand.Source)
+	return true
 }
 
 // filtered reports whether ytID must be skipped: recently aired, already
@@ -259,13 +323,16 @@ func (p *Programmer) filtered(ctx context.Context, ytID string, durationS int64,
 	return queued, nil
 }
 
-// fakePick is keyless-mode programming (dev parity, prod degradation): no
-// LLM, no spend — re-spin one random library track through the same
-// filters, so the Tilt e2e can watch the AI DJ work for $0.
-func (p *Programmer) fakePick(ctx context.Context) {
+// respin is tier 3: a deterministic library re-spin through the same filters.
+// It is used by keyless mode, an empty candidate pool, and an exhausted repair.
+//
+// It sets NO reason on purpose. Since v2 the DJ speaks pick reasons on air, so
+// fabricating one here would put a lie in the DJ's mouth; an empty reason is
+// already the convention for shuffle plays.
+func (p *Programmer) respin(ctx context.Context) bool {
 	recent, err := p.d.Log.RecentYTIDs(ctx, recentWindow)
 	if err != nil {
-		return
+		return false
 	}
 	recentSet := map[string]bool{}
 	for _, id := range recent {
@@ -273,25 +340,30 @@ func (p *Programmer) fakePick(ctx context.Context) {
 	}
 	ids, err := p.d.Library.AllIDs(ctx)
 	if err != nil || len(ids) == 0 {
-		return
+		return false
 	}
-	// one random probe per wake — enough for a demo, no retry loops
+	// one random probe per decision — enough, and no retry loops
 	id := ids[p.d.Rand(len(ids))]
-	if skip, _ := p.filtered(ctx, id, minTrackSeconds, recentSet); skip {
-		return
-	}
 	tr, ok, err := p.d.Library.Get(ctx, id)
 	if err != nil || !ok {
-		return
+		return false
 	}
-	if int64(tr.DurationS) > maxTrackSeconds {
-		return
+	if skip, _ := p.filtered(ctx, tr.YTID, int64(tr.DurationS), recentSet); skip {
+		return false
 	}
 	if _, err := p.d.Requests.Create(ctx, request.Item{
 		Source: request.SourceAI, YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
 		DurationS: int64(tr.DurationS), Status: request.StatusReady,
 	}); err != nil {
-		return
+		return false
 	}
-	live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
+	p.d.Logger.Info("ai respin queued", "yt_id", tr.YTID)
+	return true
+}
+
+func clip(s string) string {
+	if len(s) <= 200 {
+		return s
+	}
+	return s[:200]
 }
