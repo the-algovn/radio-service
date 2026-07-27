@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 
-	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/request"
@@ -25,11 +25,12 @@ type seqModel struct {
 	calls int
 }
 
-func (m *seqModel) Name() string { return "claude-test" }
-func (m *seqModel) Generate(context.Context, string, string) (string, brain.Usage, error) {
+func (m *seqModel) Name() string     { return "claude-test" }
+func (m *seqModel) Provider() string { return "fake" }
+func (m *seqModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
 	raw := m.raws[min(m.calls, len(m.raws)-1)]
 	m.calls++
-	return raw, brain.Usage{In: 1000, Out: 100}, nil
+	return raw, nil
 }
 
 type errVoice struct{}
@@ -109,9 +110,9 @@ func TestPrepareBacksellHappyPath(t *testing.T) {
 	require.InDelta(t, 0.5, clip.DurationS, 0.001)
 	_, err := os.Stat(clip.Path)
 	require.NoError(t, err, "rendered clip file exists")
-	require.Equal(t, []string{"llm:director:backsell", "tts:director:backsell"}, ledgerLabels(t, f.ledger))
+	require.Equal(t, []string{"tts:director:backsell"}, ledgerLabels(t, f.ledger), "LLM spend is now priced by the Eino callback, not the director")
 	lines, _ := f.ledger.All(context.Background())
-	require.Zero(t, lines[1].CostUSD, "VoiceFake zeroes tts cost")
+	require.Zero(t, lines[0].CostUSD, "VoiceFake zeroes tts cost")
 	f.dr.mu.Lock()
 	require.Len(t, f.dr.ring, 1, "backsell summary recorded")
 	f.dr.mu.Unlock()
@@ -123,9 +124,8 @@ func TestPrepareBacksellRetriesOnceOnViolations(t *testing.T) {
 	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.True(t, ok)
 	require.Equal(t, 2, f.model.calls)
-	labels := ledgerLabels(t, f.ledger)
-	require.Equal(t, "llm:director:backsell", labels[0])
-	require.Equal(t, "llm:director:backsell", labels[1], "both attempts are priced")
+	require.Equal(t, []string{"tts:director:backsell"}, ledgerLabels(t, f.ledger),
+		"no llm line: the director no longer prices either attempt itself")
 }
 
 func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
@@ -134,7 +134,7 @@ func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
 	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok)
 	require.Equal(t, 2, f.model.calls)
-	require.Len(t, ledgerLabels(t, f.ledger), 2, "spend recorded even on failure")
+	require.Empty(t, ledgerLabels(t, f.ledger), "no llm spend recorded; the director no longer prices its own calls")
 	f.dr.mu.Lock()
 	require.Empty(t, f.dr.ring)
 	f.dr.mu.Unlock()
@@ -164,7 +164,7 @@ func TestPrepareTTSFailure(t *testing.T) {
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
 	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
 	require.False(t, ok)
-	require.Equal(t, []string{"llm:director:backsell"}, ledgerLabels(t, f.ledger), "llm spend still recorded")
+	require.Empty(t, ledgerLabels(t, f.ledger), "no llm line: the director no longer prices the call; tts never ran")
 }
 
 func TestPrepareRenderFailureCleansUp(t *testing.T) {
