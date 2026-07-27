@@ -2,6 +2,7 @@ package programmer
 
 import (
 	"context"
+	"strings"
 
 	"github.com/the-algovn/radio-service/internal/ingest"
 )
@@ -57,6 +58,14 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 			return false
 		}
 		seen[c.YTID] = true
+		// Title/Channel are attacker-influenceable: anyone can title a YouTube
+		// video, and this text rides straight into the phase-2 prompt inside
+		// the <candidates> block. Stripping '<'/'>' here is what actually
+		// protects that delimiter — it must not depend on json.Marshal's
+		// default HTML-escaping of '<'/'>', which a switch to
+		// json.Encoder.SetEscapeHTML(false) would silently turn off.
+		c.Title = strings.NewReplacer("<", "", ">", "").Replace(c.Title)
+		c.Channel = strings.NewReplacer("<", "", ">", "").Replace(c.Channel)
 		pool = append(pool, c)
 		return true
 	}
