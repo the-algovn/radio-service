@@ -131,13 +131,11 @@ func (h *callbackHandler) rec(ctx context.Context, info *callbacks.RunInfo) Rec 
 		start = h.clock.Now()
 	}
 	provider := providerOf(info.Type, h.logger)
-	// Prefer the model id stashed from OnStart's input Config; info.Name is
-	// only a fallback (see the comment in OnStart — it's always "" in real
-	// traffic, since nothing here calls compose.WithNodeName()).
-	modelID := info.Name
-	if m, ok := ctx.Value(modelKey{}).(string); ok && m != "" {
-		modelID = m
-	}
+	// The model id comes from what OnStart stashed off the input Config.
+	// RunInfo.Name is never used here: it's the graph node name from
+	// compose.WithNodeName(), which this plan's plain-Go orchestration never
+	// calls, so it is always "" in real traffic (see the comment in OnStart).
+	modelID, _ := ctx.Value(modelKey{}).(string)
 	return Rec{
 		TS: start, Label: LabelFrom(ctx), Model: modelID, Provider: provider,
 		System: p.system, User: p.user,

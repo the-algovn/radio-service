@@ -41,6 +41,9 @@ func TestCallbackRecordsAuditAndSpend(t *testing.T) {
 	ctx := audit.WithLabel(context.Background(), "programmer:choose")
 	ctx = h.OnStart(ctx, runInfo(), &einomodel.CallbackInput{
 		Messages: []*schema.Message{schema.SystemMessage("sys"), schema.UserMessage("usr")},
+		// Config.Model, not RunInfo.Name, is what real traffic carries the
+		// model id on (RunInfo.Name is always "" — see the OnStart comment).
+		Config: &einomodel.Config{Model: "claude-haiku-4-5-20251001"},
 	})
 	h.OnEnd(ctx, runInfo(), &einomodel.CallbackOutput{
 		Message:    schema.AssistantMessage(`{"picks":[]}`, nil),
