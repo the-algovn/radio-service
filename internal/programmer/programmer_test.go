@@ -223,6 +223,10 @@ func TestDecideRepairSucceeds(t *testing.T) {
 	pending, _ := h.requests.Pending(h.ctx)
 	require.Len(t, pending, 1)
 	require.Equal(t, "đã sửa", pending[0].Reason)
+	// The repair call must carry its own label — the console inspector groups
+	// LLM calls by exact label match, so a mislabelled repair call would
+	// silently vanish from the inspector.
+	require.Equal(t, []string{"programmer:intent", "programmer:choose", "programmer:repair"}, h.model.labels)
 }
 
 // Tier 1: a transient error gets one retry.
