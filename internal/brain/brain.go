@@ -1,6 +1,8 @@
-// Package brain writes Tiểu Dương Dương's scripts: one structured LLM call
-// per segment. Untrusted content (brief fields) enters prompts only inside
-// a delimited JSON block; models have no tools; output is schema-parsed.
+// Package brain is the station's LLM layer: one structured call per segment,
+// on top of Eino's provider bindings. Untrusted content (brief fields, call-in
+// text) enters prompts only inside a delimited data block, models have no
+// tools, and output shape is guaranteed by the providers' native
+// structured-output modes rather than scraped from prose.
 package brain
 
 import (
@@ -8,13 +10,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/eino-contrib/jsonschema"
 )
 
 type Usage struct{ In, Out int }
 
+// Model is one provider bound to a model id. The schema argument is per call
+// because Eino's structured-output options are provider-specific types
+// (claude.WithResponseFormat vs gemini.WithResponseJSONSchema), so the concrete
+// implementation is the only place that can select the right one.
+//
+// Generate does NOT return Usage: the Eino callback handler in internal/audit
+// owns cost accounting and the spend ledger for every call.
 type Model interface {
-	Name() string
-	Generate(ctx context.Context, system, user string) (raw string, u Usage, err error)
+	Name() string     // full model id, e.g. "claude-haiku-4-5-20251001"
+	Provider() string // anthropic | gemini | fake
+	Generate(ctx context.Context, system, user string, schema *jsonschema.Schema) (string, error)
 }
 
 type Output struct {
@@ -36,23 +48,9 @@ func BuildPrompts(persona, briefJSON string) (system, user string) {
 	return system, user
 }
 
-// ExtractJSON returns the outermost {…} object embedded in a model reply,
-// tolerating code fences or stray prose around it — Anthropic, unlike
-// Gemini's JSON mode, is not constrained to bare JSON. When no object is
-// present it returns the trimmed input so the caller's json error stays
-// meaningful ("beginning of value") rather than silently blank.
-func ExtractJSON(raw string) string {
-	i := strings.IndexByte(raw, '{')
-	j := strings.LastIndexByte(raw, '}')
-	if i < 0 || j < i {
-		return strings.TrimSpace(raw)
-	}
-	return raw[i : j+1]
-}
-
 func ParseOutput(raw string) (Output, error) {
 	var out Output
-	if err := json.Unmarshal([]byte(ExtractJSON(raw)), &out); err != nil {
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return Output{}, fmt.Errorf("model output is not the expected JSON: %w", err)
 	}
 	if out.Script == "" {
