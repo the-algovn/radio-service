@@ -168,6 +168,26 @@ func (q *Queries) ClearNextUp(ctx context.Context) error {
 	return err
 }
 
+const countLLMCalls = `-- name: CountLLMCalls :one
+SELECT count(*) FROM llm_call
+WHERE ($1::text = ''
+       OR label = $1
+       OR ($1::text = 'script:' AND label LIKE 'script:%'))
+  AND ($2::bool = false OR error <> '')
+`
+
+type CountLLMCallsParams struct {
+	LabelFilter string
+	ErrorsOnly  bool
+}
+
+func (q *Queries) CountLLMCalls(ctx context.Context, arg CountLLMCallsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countLLMCalls, arg.LabelFilter, arg.ErrorsOnly)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countListeners = `-- name: CountListeners :one
 SELECT count(*) FROM radio_listener
 WHERE last_seen > now() - interval '75 seconds'
@@ -389,6 +409,47 @@ func (q *Queries) HasPendingYTID(ctx context.Context, ytID string) (bool, error)
 	return exists, err
 }
 
+const insertLLMCall = `-- name: InsertLLMCall :exec
+INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+                      in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+`
+
+type InsertLLMCallParams struct {
+	Ts           time.Time
+	Label        string
+	Model        string
+	Provider     string
+	SystemPrompt string
+	UserPrompt   string
+	Output       string
+	InTokens     int32
+	OutTokens    int32
+	CostUsd      float64
+	LatencyMs    int32
+	Error        string
+	Fake         bool
+}
+
+func (q *Queries) InsertLLMCall(ctx context.Context, arg InsertLLMCallParams) error {
+	_, err := q.db.Exec(ctx, insertLLMCall,
+		arg.Ts,
+		arg.Label,
+		arg.Model,
+		arg.Provider,
+		arg.SystemPrompt,
+		arg.UserPrompt,
+		arg.Output,
+		arg.InTokens,
+		arg.OutTokens,
+		arg.CostUsd,
+		arg.LatencyMs,
+		arg.Error,
+		arg.Fake,
+	)
+	return err
+}
+
 const insertLedgerLine = `-- name: InsertLedgerLine :exec
 INSERT INTO ledger_line (ts, kind, provider, label, chars, in_tokens, out_tokens, cost_usd)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -470,6 +531,66 @@ func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
 		&i.Reason,
 	)
 	return i, err
+}
+
+const listLLMCalls = `-- name: ListLLMCalls :many
+SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+       in_tokens, out_tokens, cost_usd, latency_ms, error, fake
+FROM llm_call
+WHERE ($1::text = ''
+       OR label = $1
+       OR ($1::text = 'script:' AND label LIKE 'script:%'))
+  AND ($2::bool = false OR error <> '')
+ORDER BY ts DESC
+LIMIT $4 OFFSET $3
+`
+
+type ListLLMCallsParams struct {
+	LabelFilter string
+	ErrorsOnly  bool
+	Off         int32
+	Lim         int32
+}
+
+// label_filter: "" = all; "script:" = all script:* call-sites (prefix); else exact match.
+func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]LlmCall, error) {
+	rows, err := q.db.Query(ctx, listLLMCalls,
+		arg.LabelFilter,
+		arg.ErrorsOnly,
+		arg.Off,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LlmCall{}
+	for rows.Next() {
+		var i LlmCall
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ts,
+			&i.Label,
+			&i.Model,
+			&i.Provider,
+			&i.SystemPrompt,
+			&i.UserPrompt,
+			&i.Output,
+			&i.InTokens,
+			&i.OutTokens,
+			&i.CostUsd,
+			&i.LatencyMs,
+			&i.Error,
+			&i.Fake,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listLedgerLines = `-- name: ListLedgerLines :many
@@ -842,6 +963,15 @@ func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, er
 	return items, nil
 }
 
+const pruneLLMCalls = `-- name: PruneLLMCalls :exec
+DELETE FROM llm_call WHERE ts < $1
+`
+
+func (q *Queries) PruneLLMCalls(ctx context.Context, before time.Time) error {
+	_, err := q.db.Exec(ctx, pruneLLMCalls, before)
+	return err
+}
+
 const pruneListeners = `-- name: PruneListeners :exec
 DELETE FROM radio_listener WHERE last_seen < now() - interval '10 minutes'
 `
@@ -1129,6 +1259,54 @@ func (q *Queries) StationGoOnAir(ctx context.Context) (StationGoOnAirRow, error)
 		&i.DjMaxChars,
 	)
 	return i, err
+}
+
+const statsLLMCalls = `-- name: StatsLLMCalls :many
+SELECT label, model,
+       count(*)::bigint AS n,
+       COALESCE(SUM(in_tokens), 0)::bigint AS in_tokens,
+       COALESCE(SUM(out_tokens), 0)::bigint AS out_tokens,
+       COALESCE(SUM(cost_usd), 0)::double precision AS cost_usd
+FROM llm_call
+WHERE ts >= $1
+GROUP BY label, model
+ORDER BY cost_usd DESC
+`
+
+type StatsLLMCallsRow struct {
+	Label     string
+	Model     string
+	N         int64
+	InTokens  int64
+	OutTokens int64
+	CostUsd   float64
+}
+
+func (q *Queries) StatsLLMCalls(ctx context.Context, since time.Time) ([]StatsLLMCallsRow, error) {
+	rows, err := q.db.Query(ctx, statsLLMCalls, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []StatsLLMCallsRow{}
+	for rows.Next() {
+		var i StatsLLMCallsRow
+		if err := rows.Scan(
+			&i.Label,
+			&i.Model,
+			&i.N,
+			&i.InTokens,
+			&i.OutTokens,
+			&i.CostUsd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const sumLedgerCost = `-- name: SumLedgerCost :one

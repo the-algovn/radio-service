@@ -189,3 +189,41 @@ UPDATE next_up SET yt_id = $1, title = $2, channel = $3, updated_at = now() WHER
 
 -- name: ClearNextUp :exec
 UPDATE next_up SET yt_id = '', title = '', channel = '', updated_at = now() WHERE id = TRUE;
+
+-- name: InsertLLMCall :exec
+INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+                      in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+
+-- name: ListLLMCalls :many
+-- label_filter: "" = all; "script:" = all script:* call-sites (prefix); else exact match.
+SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+       in_tokens, out_tokens, cost_usd, latency_ms, error, fake
+FROM llm_call
+WHERE (sqlc.arg(label_filter)::text = ''
+       OR label = sqlc.arg(label_filter)
+       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%'))
+  AND (sqlc.arg(errors_only)::bool = false OR error <> '')
+ORDER BY ts DESC
+LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
+
+-- name: CountLLMCalls :one
+SELECT count(*) FROM llm_call
+WHERE (sqlc.arg(label_filter)::text = ''
+       OR label = sqlc.arg(label_filter)
+       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%'))
+  AND (sqlc.arg(errors_only)::bool = false OR error <> '');
+
+-- name: StatsLLMCalls :many
+SELECT label, model,
+       count(*)::bigint AS n,
+       COALESCE(SUM(in_tokens), 0)::bigint AS in_tokens,
+       COALESCE(SUM(out_tokens), 0)::bigint AS out_tokens,
+       COALESCE(SUM(cost_usd), 0)::double precision AS cost_usd
+FROM llm_call
+WHERE ts >= sqlc.arg(since)
+GROUP BY label, model
+ORDER BY cost_usd DESC;
+
+-- name: PruneLLMCalls :exec
+DELETE FROM llm_call WHERE ts < sqlc.arg(before);

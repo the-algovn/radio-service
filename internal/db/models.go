@@ -34,6 +34,23 @@ type LedgerLine struct {
 	CostUsd   float64
 }
 
+type LlmCall struct {
+	ID           int64
+	Ts           time.Time
+	Label        string
+	Model        string
+	Provider     string
+	SystemPrompt string
+	UserPrompt   string
+	Output       string
+	InTokens     int32
+	OutTokens    int32
+	CostUsd      float64
+	LatencyMs    int32
+	Error        string
+	Fake         bool
+}
+
 type NextUp struct {
 	ID        bool
 	YtID      string
