@@ -34,18 +34,24 @@ WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%'
 DELETE FROM track WHERE yt_id = $1 RETURNING artifact_id;
 
 -- name: GetStationRow :one
-SELECT on_air, on_air_since, ai_enabled FROM station WHERE id = TRUE;
+SELECT on_air, on_air_since, ai_enabled,
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+FROM station WHERE id = TRUE;
 
 -- name: LockStationRow :one
-SELECT on_air, on_air_since, ai_enabled FROM station WHERE id = TRUE FOR UPDATE;
+SELECT on_air, on_air_since, ai_enabled,
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+FROM station WHERE id = TRUE FOR UPDATE;
 
 -- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled;
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars;
 
 -- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled;
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars;
 
 -- name: AppendAirLog :exec
 INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason)
@@ -147,7 +153,15 @@ FROM ledger_line WHERE ts >= $1;
 
 -- name: SetStationAIEnabled :one
 UPDATE station SET ai_enabled = $1, updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled;
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars;
+
+-- name: UpdateStationDJSettings :one
+UPDATE station SET dj_voice_id = $1, dj_rate = $2, dj_break_every = $3,
+       dj_station_id_min = $4, dj_max_chars = $5, updated_at = now()
+WHERE id = TRUE
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars;
 
 -- name: PendingRequestIDs :many
 SELECT id::text AS id FROM request WHERE status IN ('approved', 'ready')

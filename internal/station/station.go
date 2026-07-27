@@ -10,10 +10,30 @@ import (
 	"time"
 )
 
+// DJSettings are the DJ delivery knobs (spec 2026-07-23-dj-voice-settings).
+// StationIDMin is MINUTES between station IDs; 0 disables. BreakEvery 0
+// disables backsells. Persisted on the station row; the director re-reads
+// them every tick.
+type DJSettings struct {
+	VoiceID      string
+	Rate         float64
+	BreakEvery   int
+	StationIDMin int // minutes
+	MaxChars     int
+}
+
+// DefaultDJSettings mirrors the 00009 migration column defaults (the old
+// env defaults).
+func DefaultDJSettings() DJSettings {
+	return DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.0,
+		BreakEvery: 1, StationIDMin: 60, MaxChars: 1024}
+}
+
 type Station struct {
 	OnAir      bool
 	OnAirSince *time.Time
 	AIEnabled  bool
+	DJ         DJSettings
 }
 
 type Store interface {
@@ -25,4 +45,7 @@ type Store interface {
 	GoOffAir(ctx context.Context) (Station, error)
 	// SetAIEnabled flips the programmer's pause switch (persisted).
 	SetAIEnabled(ctx context.Context, enabled bool) (Station, error)
+	// UpdateDJSettings persists the full DJ knob set (no partial updates —
+	// the API layer always sends every field) and returns the fresh Station.
+	UpdateDJSettings(ctx context.Context, s DJSettings) (Station, error)
 }

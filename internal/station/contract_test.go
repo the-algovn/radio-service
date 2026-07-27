@@ -59,4 +59,24 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.True(t, st.AIEnabled)
 		require.True(t, st.OnAir) // air state untouched by the toggle
 	})
+
+	t.Run("dj settings: defaults match the migration, round-trip", func(t *testing.T) {
+		s := newStore(t)
+		st, err := s.GetStation(ctx)
+		require.NoError(t, err)
+		require.Equal(t, station.DefaultDJSettings(), st.DJ)
+		require.Equal(t, "vi-VN-Neural2-A", st.DJ.VoiceID)
+
+		want := station.DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.15,
+			BreakEvery: 3, StationIDMin: 0, MaxChars: 300}
+		st, err = s.UpdateDJSettings(ctx, want)
+		require.NoError(t, err)
+		require.Equal(t, want, st.DJ)
+
+		st, err = s.GetStation(ctx)
+		require.NoError(t, err)
+		require.Equal(t, want, st.DJ, "persisted, not just echoed")
+		require.True(t, st.AIEnabled, "unrelated fields untouched")
+		require.False(t, st.OnAir)
+	})
 }

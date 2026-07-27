@@ -322,19 +322,35 @@ func (q *Queries) GetNextUp(ctx context.Context) (GetNextUpRow, error) {
 }
 
 const getStationRow = `-- name: GetStationRow :one
-SELECT on_air, on_air_since, ai_enabled FROM station WHERE id = TRUE
+SELECT on_air, on_air_since, ai_enabled,
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+FROM station WHERE id = TRUE
 `
 
 type GetStationRowRow struct {
-	OnAir      bool
-	OnAirSince *time.Time
-	AiEnabled  bool
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
 }
 
 func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 	row := q.db.QueryRow(ctx, getStationRow)
 	var i GetStationRowRow
-	err := row.Scan(&i.OnAir, &i.OnAirSince, &i.AiEnabled)
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
 	return i, err
 }
 
@@ -546,19 +562,35 @@ func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track
 }
 
 const lockStationRow = `-- name: LockStationRow :one
-SELECT on_air, on_air_since, ai_enabled FROM station WHERE id = TRUE FOR UPDATE
+SELECT on_air, on_air_since, ai_enabled,
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+FROM station WHERE id = TRUE FOR UPDATE
 `
 
 type LockStationRowRow struct {
-	OnAir      bool
-	OnAirSince *time.Time
-	AiEnabled  bool
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
 }
 
 func (q *Queries) LockStationRow(ctx context.Context) (LockStationRowRow, error) {
 	row := q.db.QueryRow(ctx, lockStationRow)
 	var i LockStationRowRow
-	err := row.Scan(&i.OnAir, &i.OnAirSince, &i.AiEnabled)
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
 	return i, err
 }
 
@@ -1002,55 +1034,100 @@ func (q *Queries) SetRequestPosition(ctx context.Context, arg SetRequestPosition
 
 const setStationAIEnabled = `-- name: SetStationAIEnabled :one
 UPDATE station SET ai_enabled = $1, updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
 `
 
 type SetStationAIEnabledRow struct {
-	OnAir      bool
-	OnAirSince *time.Time
-	AiEnabled  bool
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
 }
 
 func (q *Queries) SetStationAIEnabled(ctx context.Context, aiEnabled bool) (SetStationAIEnabledRow, error) {
 	row := q.db.QueryRow(ctx, setStationAIEnabled, aiEnabled)
 	var i SetStationAIEnabledRow
-	err := row.Scan(&i.OnAir, &i.OnAirSince, &i.AiEnabled)
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
 	return i, err
 }
 
 const stationGoOffAir = `-- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
 `
 
 type StationGoOffAirRow struct {
-	OnAir      bool
-	OnAirSince *time.Time
-	AiEnabled  bool
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
 }
 
 func (q *Queries) StationGoOffAir(ctx context.Context) (StationGoOffAirRow, error) {
 	row := q.db.QueryRow(ctx, stationGoOffAir)
 	var i StationGoOffAirRow
-	err := row.Scan(&i.OnAir, &i.OnAirSince, &i.AiEnabled)
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
 	return i, err
 }
 
 const stationGoOnAir = `-- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
-RETURNING on_air, on_air_since, ai_enabled
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
 `
 
 type StationGoOnAirRow struct {
-	OnAir      bool
-	OnAirSince *time.Time
-	AiEnabled  bool
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
 }
 
 func (q *Queries) StationGoOnAir(ctx context.Context) (StationGoOnAirRow, error) {
 	row := q.db.QueryRow(ctx, stationGoOnAir)
 	var i StationGoOnAirRow
-	err := row.Scan(&i.OnAir, &i.OnAirSince, &i.AiEnabled)
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
 	return i, err
 }
 
@@ -1075,4 +1152,53 @@ func (q *Queries) SumLedgerCostSince(ctx context.Context, ts time.Time) (float64
 	var total float64
 	err := row.Scan(&total)
 	return total, err
+}
+
+const updateStationDJSettings = `-- name: UpdateStationDJSettings :one
+UPDATE station SET dj_voice_id = $1, dj_rate = $2, dj_break_every = $3,
+       dj_station_id_min = $4, dj_max_chars = $5, updated_at = now()
+WHERE id = TRUE
+RETURNING on_air, on_air_since, ai_enabled,
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+`
+
+type UpdateStationDJSettingsParams struct {
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
+}
+
+type UpdateStationDJSettingsRow struct {
+	OnAir          bool
+	OnAirSince     *time.Time
+	AiEnabled      bool
+	DjVoiceID      string
+	DjRate         float64
+	DjBreakEvery   int32
+	DjStationIDMin int32
+	DjMaxChars     int32
+}
+
+func (q *Queries) UpdateStationDJSettings(ctx context.Context, arg UpdateStationDJSettingsParams) (UpdateStationDJSettingsRow, error) {
+	row := q.db.QueryRow(ctx, updateStationDJSettings,
+		arg.DjVoiceID,
+		arg.DjRate,
+		arg.DjBreakEvery,
+		arg.DjStationIDMin,
+		arg.DjMaxChars,
+	)
+	var i UpdateStationDJSettingsRow
+	err := row.Scan(
+		&i.OnAir,
+		&i.OnAirSince,
+		&i.AiEnabled,
+		&i.DjVoiceID,
+		&i.DjRate,
+		&i.DjBreakEvery,
+		&i.DjStationIDMin,
+		&i.DjMaxChars,
+	)
+	return i, err
 }
