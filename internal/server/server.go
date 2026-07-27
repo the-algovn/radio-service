@@ -17,6 +17,7 @@ import (
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/callin"
 	"github.com/the-algovn/radio-service/internal/ingest"
@@ -32,6 +33,7 @@ import (
 
 type Deps struct {
 	Ledger          spend.Ledger
+	Audit           audit.Store
 	Store           artifact.Store
 	Voice           voice.Provider
 	VoiceFake       bool
@@ -88,6 +90,60 @@ func (s *Server) GetLedger(ctx context.Context, _ *radiolabv1.GetLedgerRequest) 
 			Ts: ln.TS.Format(time.RFC3339), Kind: ln.Kind, Provider: ln.Provider, Label: ln.Label,
 			Chars: int32(ln.Chars), InTokens: int32(ln.InTokens), OutTokens: int32(ln.OutTokens), CostUsd: ln.CostUSD,
 		})
+	}
+	return resp, nil
+}
+
+func (s *Server) ListLLMCalls(ctx context.Context, req *radiolabv1.ListLLMCallsRequest) (*radiolabv1.ListLLMCallsResponse, error) {
+	limit := int(req.GetLimit())
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	offset := int(req.GetOffset())
+	if offset < 0 {
+		offset = 0
+	}
+	f := audit.Filter{Label: req.GetLabel(), ErrorsOnly: req.GetErrorsOnly()}
+	recs, err := s.deps.Audit.List(ctx, f, limit, offset)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list llm calls: %v", err)
+	}
+	total, err := s.deps.Audit.Count(ctx, f)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count llm calls: %v", err)
+	}
+	resp := &radiolabv1.ListLLMCallsResponse{Total: total}
+	for _, r := range recs {
+		resp.Calls = append(resp.Calls, &radiolabv1.LLMCall{
+			Id: r.ID, Ts: r.TS.Format(time.RFC3339), Label: r.Label, Model: r.Model, Provider: r.Provider,
+			SystemPrompt: r.System, UserPrompt: r.User, Output: r.Output,
+			InTokens: int32(r.InTokens), OutTokens: int32(r.OutTokens), CostUsd: r.CostUSD,
+			LatencyMs: int32(r.LatencyMS), Error: r.Error, Fake: r.Fake,
+		})
+	}
+	return resp, nil
+}
+
+func (s *Server) GetLLMStats(ctx context.Context, req *radiolabv1.GetLLMStatsRequest) (*radiolabv1.GetLLMStatsResponse, error) {
+	days := int(req.GetWindowDays())
+	if days <= 0 {
+		days = 30
+	}
+	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	stats, err := s.deps.Audit.Stats(ctx, since)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "llm stats: %v", err)
+	}
+	resp := &radiolabv1.GetLLMStatsResponse{}
+	for _, st := range stats {
+		resp.Stats = append(resp.Stats, &radiolabv1.LLMStat{
+			Label: st.Label, Model: st.Model, Count: int32(st.Count),
+			InTokens: int32(st.InTokens), OutTokens: int32(st.OutTokens), CostUsd: st.CostUSD,
+		})
+		resp.TotalUsd += st.CostUSD
 	}
 	return resp, nil
 }
