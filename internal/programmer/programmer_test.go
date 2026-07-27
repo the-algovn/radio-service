@@ -272,10 +272,19 @@ func TestBriefContainsPlaysRequestsAndSample(t *testing.T) {
 	brief, err := f.prog.buildBrief(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, brief.LocalTime)
-	require.Contains(t, brief.RecentPlays, "Đã Phát — Ca Sĩ")
-	require.Contains(t, brief.RecentRequests, "Bài Yêu Cầu")
-	require.NotEmpty(t, brief.LibrarySample)
-	require.LessOrEqual(t, len(brief.LibrarySample), briefSample)
+	require.Equal(t, "Đã Phát", brief.RecentPlays[0].Title)
+	require.Equal(t, "Ca Sĩ", brief.RecentPlays[0].Artist)
+	require.Contains(t, pendTitles(brief.Pending), "Bài Yêu Cầu")
+	require.NotEmpty(t, brief.Library.Sample)
+	require.LessOrEqual(t, len(brief.Library.Sample), librarySample)
+}
+
+func pendTitles(ps []BriefPend) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.Title)
+	}
+	return out
 }
 
 func TestPicksStoreCappedReason(t *testing.T) {

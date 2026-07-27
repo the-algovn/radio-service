@@ -65,7 +65,12 @@ type Deps struct {
 	Logger     *slog.Logger
 }
 
-type Programmer struct{ d Deps }
+// cursor is the rotating library-window offset (see librarySample). It is only
+// touched from buildBrief, which runs on the single programmer goroutine.
+type Programmer struct {
+	d      Deps
+	cursor int
+}
 
 func New(d Deps) *Programmer {
 	if d.Logger == nil {
@@ -289,47 +294,4 @@ func (p *Programmer) fakePick(ctx context.Context) {
 		return
 	}
 	live.PublishQueueSnapshot(ctx, p.d.Producer, p.d.Requests, p.d.Sched, p.d.Logger)
-}
-
-// buildBrief assembles the model's data block: station-local time, recent
-// plays, pending listener requests, and a random library sample.
-func (p *Programmer) buildBrief(ctx context.Context) (Brief, error) {
-	now := p.d.Clock.Now().In(p.d.Location)
-	b := Brief{LocalTime: now.Format("Monday 15:04")}
-
-	plays, err := p.d.Log.History(ctx, briefPlays)
-	if err != nil {
-		return Brief{}, err
-	}
-	for _, e := range plays {
-		b.RecentPlays = append(b.RecentPlays, e.Title+" — "+e.Artist)
-	}
-
-	pending, err := p.d.Requests.Pending(ctx)
-	if err != nil {
-		return Brief{}, err
-	}
-	for _, it := range pending {
-		if it.Source == request.SourceListener {
-			b.RecentRequests = append(b.RecentRequests, it.Title)
-		}
-	}
-
-	ids, err := p.d.Library.AllIDs(ctx)
-	if err != nil {
-		return Brief{}, err
-	}
-	for len(b.LibrarySample) < briefSample && len(ids) > 0 {
-		i := p.d.Rand(len(ids))
-		id := ids[i]
-		ids = append(ids[:i], ids[i+1:]...)
-		tr, ok, err := p.d.Library.Get(ctx, id)
-		if err != nil {
-			return Brief{}, err
-		}
-		if ok {
-			b.LibrarySample = append(b.LibrarySample, BriefTrack{YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel})
-		}
-	}
-	return b, nil
 }
