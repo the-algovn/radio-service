@@ -97,13 +97,15 @@ type Station struct {
 }
 
 type Track struct {
-	YtID       string
-	Title      string
-	Channel    string
-	DurationS  float64
-	ArtifactID string
-	InputI     float64
-	InputTp    float64
-	InputLra   float64
-	AddedAt    time.Time
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    float64
+	ArtifactID   string
+	InputI       float64
+	InputTp      float64
+	InputLra     float64
+	AddedAt      time.Time
+	TailSilenceS float64
+	TailDecayS   float64
 }

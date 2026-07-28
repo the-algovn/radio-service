@@ -376,7 +376,8 @@ func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 }
 
 const getTrack = `-- name: GetTrack :one
-SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at
+SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
+       tail_silence_s, tail_decay_s
 FROM track WHERE yt_id = $1
 `
 
@@ -393,6 +394,8 @@ func (q *Queries) GetTrack(ctx context.Context, ytID string) (Track, error) {
 		&i.InputTp,
 		&i.InputLra,
 		&i.AddedAt,
+		&i.TailSilenceS,
+		&i.TailDecayS,
 	)
 	return i, err
 }
@@ -482,20 +485,22 @@ func (q *Queries) InsertLedgerLine(ctx context.Context, arg InsertLedgerLinePara
 }
 
 const insertTrack = `-- name: InsertTrack :exec
-INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (yt_id) DO NOTHING
 `
 
 type InsertTrackParams struct {
-	YtID       string
-	Title      string
-	Channel    string
-	DurationS  float64
-	ArtifactID string
-	InputI     float64
-	InputTp    float64
-	InputLra   float64
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    float64
+	ArtifactID   string
+	InputI       float64
+	InputTp      float64
+	InputLra     float64
+	TailSilenceS float64
+	TailDecayS   float64
 }
 
 func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error {
@@ -508,6 +513,8 @@ func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error 
 		arg.InputI,
 		arg.InputTp,
 		arg.InputLra,
+		arg.TailSilenceS,
+		arg.TailDecayS,
 	)
 	return err
 }
@@ -641,7 +648,8 @@ func (q *Queries) ListLedgerLines(ctx context.Context) ([]ListLedgerLinesRow, er
 }
 
 const listTracks = `-- name: ListTracks :many
-SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at
+SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
+       tail_silence_s, tail_decay_s
 FROM track
 WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
 ORDER BY added_at DESC
@@ -673,6 +681,49 @@ func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track
 			&i.InputTp,
 			&i.InputLra,
 			&i.AddedAt,
+			&i.TailSilenceS,
+			&i.TailDecayS,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTracksMissingCues = `-- name: ListTracksMissingCues :many
+SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
+       tail_silence_s, tail_decay_s
+FROM track
+WHERE tail_silence_s < 0
+ORDER BY added_at DESC
+LIMIT $1
+`
+
+func (q *Queries) ListTracksMissingCues(ctx context.Context, limit int32) ([]Track, error) {
+	rows, err := q.db.Query(ctx, listTracksMissingCues, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Track{}
+	for rows.Next() {
+		var i Track
+		if err := rows.Scan(
+			&i.YtID,
+			&i.Title,
+			&i.Channel,
+			&i.DurationS,
+			&i.ArtifactID,
+			&i.InputI,
+			&i.InputTp,
+			&i.InputLra,
+			&i.AddedAt,
+			&i.TailSilenceS,
+			&i.TailDecayS,
 		); err != nil {
 			return nil, err
 		}
@@ -1381,4 +1432,19 @@ func (q *Queries) UpdateStationDJSettings(ctx context.Context, arg UpdateStation
 		&i.DjMaxChars,
 	)
 	return i, err
+}
+
+const updateTrackCues = `-- name: UpdateTrackCues :exec
+UPDATE track SET tail_silence_s = $2, tail_decay_s = $3 WHERE yt_id = $1
+`
+
+type UpdateTrackCuesParams struct {
+	YtID         string
+	TailSilenceS float64
+	TailDecayS   float64
+}
+
+func (q *Queries) UpdateTrackCues(ctx context.Context, arg UpdateTrackCuesParams) error {
+	_, err := q.db.Exec(ctx, updateTrackCues, arg.YtID, arg.TailSilenceS, arg.TailDecayS)
+	return err
 }
