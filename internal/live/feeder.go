@@ -247,7 +247,17 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 	if ok {
 		track, exists, gerr := f.d.Library.Get(ctx, nu.YTID)
 		if gerr != nil {
-			return plan{}, gerr
+			// The next-up is already being consumed at this point: the
+			// pre-split code cleared it unconditionally BEFORE this Get ever
+			// ran, so a persistent Get failure still let the next restart
+			// find GetNextUp empty and fall through to requests/shuffle
+			// instead of wedging on the same broken commitment forever.
+			// planNext cannot clear it itself — the lookahead path must
+			// never commit a consumption it might still abandon — so it
+			// reports the pending consumption via consumedNextUp alongside
+			// the error; boundary() commits it before propagating, while the
+			// lookahead path discards the whole plan on any error.
+			return plan{consumedNextUp: true}, gerr
 		}
 		if !exists {
 			return plan{skip: true, consumedNextUp: true}, nil
@@ -315,6 +325,21 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
 	p, err := f.planNext(ctx)
 	if err != nil {
+		// planNext can fail with consumedNextUp set (a Library.Get error on
+		// the next-up's own track). The pre-split code cleared the next-up
+		// unconditionally before attempting that Get, so replicate the
+		// clear here before surfacing the error — otherwise the commitment
+		// outlives the failed plan and every restart re-picks the same
+		// broken next-up forever instead of self-healing.
+		if p.consumedNextUp {
+			if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
+				// Matches the original's precedence: ClearNextUp ran first
+				// there, so its own failure was the only error a caller
+				// ever saw — the Get failure it would have masked never
+				// surfaced.
+				return airItem{}, false, false, cerr
+			}
+		}
 		return airItem{}, false, false, err
 	}
 	return f.commitNext(ctx, p)

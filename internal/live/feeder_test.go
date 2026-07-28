@@ -739,6 +739,42 @@ func TestBoundaryStillConsumesTheNextUp(t *testing.T) {
 	require.False(t, ok, "boundary must still consume the next-up exactly as before")
 }
 
+var errLibraryGetBroken = errors.New("library: get failed")
+
+// failingGetLibrary wraps a library.Library so Get always errors (e.g. a
+// row-specific scan/malformed-row failure), reads otherwise unaffected. Used
+// to prove boundary() still clears a committed next-up before surfacing this
+// error — exactly as the pre-split code did by clearing unconditionally
+// before this Get ever ran — so the station self-heals on the next restart
+// instead of wedging on the same broken commitment forever.
+type failingGetLibrary struct {
+	library.Library
+}
+
+func (failingGetLibrary) Get(context.Context, string) (library.Track, bool, error) {
+	return library.Track{}, false, errLibraryGetBroken
+}
+
+// A Library.Get error on the committed next-up's own track must still clear
+// that commitment before the error propagates, matching the pre-split
+// behaviour: ClearNextUp ran unconditionally before this Get, so a
+// persistent Get failure never left the next-up stuck — the next restart's
+// GetNextUp found nothing and fell through to requests/shuffle.
+func TestBoundaryConsumesNextUpEvenWhenLibraryGetErrors(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, failingGetLibrary{lib}, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	_, _, _, err := f.boundary(ctx)
+	require.ErrorIs(t, err, errLibraryGetBroken)
+
+	_, ok, gerr := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, gerr)
+	require.False(t, ok, "boundary must still clear a consumed next-up even when the Get reading it errors")
+}
+
 // Empty library (the only remaining engine-side closure): auto off-air.
 func TestEmptyLibraryAutoOffAir(t *testing.T) {
 	store, lib, reqs := newFixture(t) // no tracks at all
