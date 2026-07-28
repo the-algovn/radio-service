@@ -679,6 +679,66 @@ func TestBoundaryMarkFailedErrorIsFatal(t *testing.T) {
 	}
 }
 
+func TestPlanNextDoesNotConsumeTheCommittedNextUp(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "t1", p.item.track.YTID)
+	require.True(t, p.consumedNextUp)
+
+	got, ok, err := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, err)
+	require.True(t, ok, "planNext must not clear the next-up — only commitNext may")
+	require.Equal(t, "t1", got.YTID)
+}
+
+func TestPlanNextDoesNotMarkAVanishedRequestFailed(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+
+	created, err := reqs.Create(ctx, request.Item{
+		Source: request.SourceListener, RequestedBy: "sub-1", DisplayName: "Ngoc",
+		YTID: "gone", Title: "Gone", Status: request.StatusReady,
+	})
+	require.NoError(t, err)
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.True(t, p.skip, "a request whose track is absent from the library is a skip")
+	require.Equal(t, created.ID, p.failRequestID)
+
+	items, err := reqs.Pending(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, request.StatusReady, items[0].Status,
+		"planNext must not mark the request failed — only commitNext may")
+}
+
+func TestBoundaryStillConsumesTheNextUp(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	item, skip, stop, err := f.boundary(ctx)
+	require.NoError(t, err)
+	require.False(t, skip)
+	require.False(t, stop)
+	require.Equal(t, "t1", item.track.YTID)
+
+	_, ok, err := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, err)
+	require.False(t, ok, "boundary must still consume the next-up exactly as before")
+}
+
 // Empty library (the only remaining engine-side closure): auto off-air.
 func TestEmptyLibraryAutoOffAir(t *testing.T) {
 	store, lib, reqs := newFixture(t) // no tracks at all

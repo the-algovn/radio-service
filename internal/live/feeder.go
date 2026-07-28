@@ -206,81 +206,118 @@ func (f *Feeder) commitNextUp(ctx context.Context) {
 	}
 }
 
-// boundary decides what airs next (spec §4.1): oldest ready listener
-// request → oldest ready AI pick → library no-repeat shuffle. skip=true
-// means the chosen item can't air (vanished track — already marked failed
-// when it was a request); the caller re-runs the boundary. stop=true ends
-// the session (operator off-air, or empty library → auto off-air).
-func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
+// plan is what planNext decided, with none of it committed. Every field that
+// implies a write is a flag for commitNext to act on, never an action taken.
+type plan struct {
+	item     airItem
+	skip     bool // chosen item can't air; caller re-plans
+	stop     bool // operator off-air observed, or nothing to air at all
+	emptyLib bool // library empty — commitNext turns this into auto off-air
+	// consumedNextUp records that item came from the committed next-up, so
+	// commitNext knows to clear it. planNext must not clear it itself: a
+	// transition that aborts after planning would otherwise lose the
+	// commitment with no way to recover it.
+	consumedNextUp bool
+	// failRequestID is a ready request whose track vanished. commitNext marks
+	// it failed; planNext only reports it.
+	failRequestID string
+}
+
+// planNext chooses what airs next using reads only, so it is safe to call
+// ahead of the boundary from the prefetch goroutine. Priority is unchanged:
+// committed next-up, then oldest ready request, then library no-repeat
+// shuffle. Callers on the lookahead path treat every error as non-fatal.
+func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 	st, err := f.d.Store.GetStation(ctx)
 	if err != nil {
-		return airItem{}, false, false, err
+		return plan{}, err
 	}
 	if !st.OnAir {
-		return airItem{}, false, true, nil // operator stopped us
+		// Reported, never acted on here. Acting on it at plan time would end
+		// the session while the current item is still airing, truncating it
+		// by the lookahead distance. airTrack's per-tick check is what
+		// actually stops the session, within one chunk.
+		return plan{stop: true}, nil
 	}
 
-	// Committed next-up first (design 2026-07-23): a shuffle track pinned at
-	// the previous track's start airs next, locked ahead of any request that
-	// arrived since. Consumed once — cleared before airing.
 	nu, ok, err := f.d.Sched.GetNextUp(ctx)
 	if err != nil {
-		return airItem{}, false, false, err
+		return plan{}, err
 	}
 	if ok {
-		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
-			return airItem{}, false, false, cerr
-		}
 		track, exists, gerr := f.d.Library.Get(ctx, nu.YTID)
 		if gerr != nil {
-			return airItem{}, false, false, gerr
+			return plan{}, gerr
 		}
 		if !exists {
-			return airItem{}, true, false, nil // vanished → skip, re-run boundary
+			return plan{skip: true, consumedNextUp: true}, nil
 		}
-		return airItem{track: track}, false, false, nil
+		return plan{item: airItem{track: track}, consumedNextUp: true}, nil
 	}
 
 	req, found, err := f.d.Requests.NextReady(ctx)
 	if err != nil {
-		return airItem{}, false, false, err
+		return plan{}, err
 	}
 	if found {
-		track, ok, err := f.d.Library.Get(ctx, req.YTID)
-		if err != nil {
-			return airItem{}, false, false, err
+		track, exists, gerr := f.d.Library.Get(ctx, req.YTID)
+		if gerr != nil {
+			return plan{}, gerr
 		}
-		if !ok {
-			if merr := f.d.Requests.MarkFailed(ctx, req.ID, "track vanished from library"); merr != nil {
-				// A persistently-failing store would otherwise leave this
-				// same ready request re-picked on every boundary() call —
-				// an unpaced spin inside the audio goroutine. Surfacing it
-				// as fatal lets Engine.Run's 5s poll pace the retry.
-				f.d.Logger.ErrorContext(ctx, "mark request failed", "id", req.ID, "err", merr)
-				return airItem{}, false, false, merr
-			}
-			return airItem{}, true, false, nil
+		if !exists {
+			return plan{skip: true, failRequestID: req.ID}, nil
 		}
-		return airItem{track: track, requestID: req.ID,
-			source: req.Source, requestedByName: req.DisplayName, reason: req.Reason}, false, false, nil
+		return plan{item: airItem{track: track, requestID: req.ID,
+			source: req.Source, requestedByName: req.DisplayName, reason: req.Reason}}, nil
 	}
 
-	// Shuffle bed: uniform over the library minus the last-N aired.
 	ids, err := f.d.Library.AllIDs(ctx)
 	if err != nil {
-		return airItem{}, false, false, err
+		return plan{}, err
 	}
 	if len(ids) == 0 {
-		return airItem{}, false, true, f.autoOffAir(ctx) // nothing to air at all
+		return plan{stop: true, emptyLib: true}, nil
 	}
 	track, ok, err := f.pickShuffleFrom(ctx, ids)
 	if err != nil {
-		return airItem{}, false, false, err
+		return plan{}, err
 	}
 	if !ok {
-		return airItem{}, true, false, nil // vanished between AllIDs and Get
+		return plan{skip: true}, nil // vanished between AllIDs and Get
 	}
-	return airItem{track: track}, false, false, nil
+	return plan{item: airItem{track: track}}, nil
+}
+
+// commitNext applies a plan's writes and returns boundary()'s historical
+// tuple. It runs on the feed goroutine at the boundary, never on the
+// lookahead path, and keeps today's fatality: a MarkFailed store error ends
+// the session rather than leaving the same request re-picked forever.
+func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, error) {
+	if p.consumedNextUp {
+		if err := f.d.Sched.ClearNextUp(ctx); err != nil {
+			return airItem{}, false, false, err
+		}
+	}
+	if p.failRequestID != "" {
+		if err := f.d.Requests.MarkFailed(ctx, p.failRequestID, "track vanished from library"); err != nil {
+			f.d.Logger.Error("mark request failed", "id", p.failRequestID, "err", err)
+			return airItem{}, false, false, err
+		}
+	}
+	if p.emptyLib {
+		return airItem{}, false, true, f.autoOffAir(ctx)
+	}
+	return p.item, p.skip, p.stop, nil
+}
+
+// boundary decides what airs next and commits it, preserving the exact
+// behaviour it had before the plan/commit split.
+func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
+	p, err := f.planNext(ctx)
+	if err != nil {
+		return airItem{}, false, false, err
+	}
+	return f.commitNext(ctx, p)
 }
 
 // autoOffAir persists off-air (engine-side closure) and reports the sentinel;
