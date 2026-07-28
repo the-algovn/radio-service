@@ -746,14 +746,19 @@ func TestPlanNextDoesNotMarkAVanishedRequestFailed(t *testing.T) {
 		"planNext must not mark the request failed — only commitNext may")
 }
 
-func TestBoundaryStillConsumesTheNextUp(t *testing.T) {
+// planInline + commitNext back to back is what the seam executes, and together
+// they must consume the committed next-up exactly as the single pre-split call
+// did.
+func TestPlanInlineAndCommitNextConsumeTheNextUp(t *testing.T) {
 	store, lib, reqs := newFixture(t, "t1")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
 	ctx := context.Background()
 	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
 
-	item, skip, stop, err := f.boundary(ctx)
+	p, err := f.planInline(ctx)
+	require.NoError(t, err)
+	item, skip, stop, err := f.commitNext(ctx, p)
 	require.NoError(t, err)
 	require.False(t, skip)
 	require.False(t, stop)
@@ -761,14 +766,14 @@ func TestBoundaryStillConsumesTheNextUp(t *testing.T) {
 
 	_, ok, err := f.d.Sched.GetNextUp(ctx)
 	require.NoError(t, err)
-	require.False(t, ok, "boundary must still consume the next-up exactly as before")
+	require.False(t, ok, "the seam must still consume the next-up exactly as before")
 }
 
 var errLibraryGetBroken = errors.New("library: get failed")
 
 // failingGetLibrary wraps a library.Library so Get always errors (e.g. a
 // row-specific scan/malformed-row failure), reads otherwise unaffected. Used
-// to prove boundary() still clears a committed next-up before surfacing this
+// to prove planInline still clears a committed next-up before surfacing this
 // error — exactly as the pre-split code did by clearing unconditionally
 // before this Get ever ran — so the station self-heals on the next restart
 // instead of wedging on the same broken commitment forever.
@@ -785,19 +790,23 @@ func (failingGetLibrary) Get(context.Context, string) (library.Track, bool, erro
 // behaviour: ClearNextUp ran unconditionally before this Get, so a
 // persistent Get failure never left the next-up stuck — the next restart's
 // GetNextUp found nothing and fell through to requests/shuffle.
-func TestBoundaryConsumesNextUpEvenWhenLibraryGetErrors(t *testing.T) {
+//
+// Note there is no commitNext call here, matching the seam: a plan that came
+// with an error is never committed, so planInline is the only thing that can
+// clear the consumption it reported.
+func TestPlanInlineConsumesNextUpEvenWhenLibraryGetErrors(t *testing.T) {
 	store, lib, reqs := newFixture(t, "t1")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	f := newTestFeeder(store, failingGetLibrary{lib}, reqs, enc, prod, clk, t.TempDir())
 	ctx := context.Background()
 	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
 
-	_, _, _, err := f.boundary(ctx)
+	_, err := f.planInline(ctx)
 	require.ErrorIs(t, err, errLibraryGetBroken)
 
 	_, ok, gerr := f.d.Sched.GetNextUp(ctx)
 	require.NoError(t, gerr)
-	require.False(t, ok, "boundary must still clear a consumed next-up even when the Get reading it errors")
+	require.False(t, ok, "planInline must still clear a consumed next-up even when the Get reading it errors")
 }
 
 // planNext must not put the station off-air itself on an empty library —

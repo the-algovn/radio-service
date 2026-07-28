@@ -352,26 +352,6 @@ func (f *Feeder) planInline(ctx context.Context) (plan, error) {
 	return plan{}, err
 }
 
-// boundary decides what airs next (spec §4.1): oldest ready listener
-// request → oldest ready AI pick → library no-repeat shuffle. skip=true
-// means the chosen item can't air (vanished track — already marked failed
-// when it was a request); the caller re-runs the boundary. stop=true ends
-// the session (operator off-air, or empty library → auto off-air). It plans
-// the decision and commits it in one call, back to back, preserving the
-// exact behaviour it had before the plan/commit split — see planNext and
-// commitNext for why the split exists.
-//
-// RunSession no longer calls this: it takes the plan from the lookahead (see
-// takePrefetch) and commits it itself, which is the same two calls with the
-// fetch moved off the feed goroutine in between.
-func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
-	p, err := f.planInline(ctx)
-	if err != nil {
-		return airItem{}, false, false, err
-	}
-	return f.commitNext(ctx, p)
-}
-
 // prefetch is one in-flight lookahead: planNext plus openTrack, run off the
 // feed goroutine. openTrack is a whole-blob MinIO GET plus an ffmpeg spawn,
 // and the feed goroutine is the only thing feeding the encoder — running it
