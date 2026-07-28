@@ -1,64 +1,57 @@
 package brain
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"time"
+
+	"github.com/cloudwego/eino-ext/components/model/gemini"
+	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
+	"google.golang.org/genai"
 )
 
-type Gemini struct {
-	key, model, base string
-	hc               *http.Client
+type geminiModel struct {
+	cm      *gemini.ChatModel
+	modelID string
 }
 
-func NewGemini(key, model string) *Gemini {
-	return &Gemini{key: key, model: model, base: "https://generativelanguage.googleapis.com", hc: &http.Client{Timeout: 25 * time.Second}}
+// NewGemini builds a Gemini-backed Model. Structured output uses Gemini's
+// native response schema via gemini.WithResponseJSONSchema.
+func NewGemini(ctx context.Context, key, modelID string) (Model, error) {
+	return newGeminiBase(ctx, key, modelID, "")
 }
 
-func (g *Gemini) Name() string { return g.model }
+// newGeminiBase is the constructor the round-trip tests use: baseURL != ""
+// points the SDK at an httptest server instead of the Gemini API.
+func newGeminiBase(ctx context.Context, key, modelID, baseURL string) (Model, error) {
+	cc := &genai.ClientConfig{APIKey: key, Backend: genai.BackendGeminiAPI}
+	if baseURL != "" {
+		cc.HTTPOptions.BaseURL = baseURL
+	}
+	cli, err := genai.NewClient(ctx, cc)
+	if err != nil {
+		return nil, fmt.Errorf("genai client: %w", err)
+	}
+	cm, err := gemini.NewChatModel(ctx, &gemini.Config{Client: cli, Model: modelID})
+	if err != nil {
+		return nil, fmt.Errorf("gemini chat model: %w", err)
+	}
+	return &geminiModel{cm: cm, modelID: modelID}, nil
+}
 
-func (g *Gemini) Generate(ctx context.Context, system, user string) (string, Usage, error) {
-	body, _ := json.Marshal(map[string]any{
-		"system_instruction": map[string]any{"parts": []map[string]string{{"text": system}}},
-		"contents":           []map[string]any{{"role": "user", "parts": []map[string]string{{"text": user}}}},
-		"generationConfig":   map[string]any{"responseMimeType": "application/json"},
-	})
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", g.base, g.model, g.key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+func (m *geminiModel) Name() string     { return m.modelID }
+func (m *geminiModel) Provider() string { return "gemini" }
+
+func (m *geminiModel) Generate(ctx context.Context, system, user string, s *jsonschema.Schema) (string, error) {
+	msg, err := m.cm.Generate(ctx,
+		[]*schema.Message{schema.SystemMessage(system), schema.UserMessage(user)},
+		gemini.WithResponseJSONSchema(s),
+	)
 	if err != nil {
-		return "", Usage{}, err
+		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := g.hc.Do(req)
-	if err != nil {
-		return "", Usage{}, err
+	if msg == nil || msg.Content == "" {
+		return "", fmt.Errorf("gemini: empty response")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var e struct{ Error struct{ Message string } }
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		return "", Usage{}, fmt.Errorf("gemini %d: %s", resp.StatusCode, e.Error.Message)
-	}
-	var out struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct{ Text string }
-			}
-		}
-		UsageMetadata struct {
-			PromptTokenCount     int
-			CandidatesTokenCount int
-		}
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", Usage{}, err
-	}
-	if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
-		return "", Usage{}, fmt.Errorf("gemini: empty response")
-	}
-	return out.Candidates[0].Content.Parts[0].Text,
-		Usage{In: out.UsageMetadata.PromptTokenCount, Out: out.UsageMetadata.CandidatesTokenCount}, nil
+	return msg.Content, nil
 }

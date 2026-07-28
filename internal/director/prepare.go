@@ -123,26 +123,19 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 
 // generateValid makes the script call with the on-air validation loop: parse
 // failure aborts; validation violations get ONE retry with the violations
-// appended; every attempt is priced before parsing ("tokens were spent
-// either way").
+// appended. Cost and the spend ledger are handled by the Eino audit callback,
+// so this loop no longer prices anything itself.
 func (dr *Director) generateValid(ctx context.Context, system, user string, maxChars int) (brain.Output, bool) {
 	ctx = audit.WithLabel(ctx, "director:backsell")
 	for attempt := 0; ; attempt++ {
-		raw, usage, err := dr.d.Model.Generate(ctx, system, user)
+		raw, err := dr.d.Model.Generate(ctx, system, user, brain.ScriptSchema)
 		if err != nil {
 			dr.d.Logger.Error("director: model call failed", "err", err)
 			return brain.Output{}, false
 		}
-		cost := brain.CostUSD(dr.d.Model.Name(), usage)
-		if lerr := dr.d.Ledger.Append(ctx, spend.Line{
-			TS: time.Now(), Kind: "llm", Provider: dr.d.Model.Name(), Label: "director:backsell",
-			InTokens: usage.In, OutTokens: usage.Out, CostUSD: cost,
-		}); lerr != nil {
-			dr.d.Logger.Error("director: ledger append failed", "err", lerr)
-		}
 		out, perr := brain.ParseOutput(raw)
 		if perr != nil {
-			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", raw[:min(len(raw), 200)])
+			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", string([]rune(raw)[:min(utf8.RuneCountInString(raw), 200)]))
 			return brain.Output{}, false
 		}
 		v := brain.Validate(out.Script, maxChars)

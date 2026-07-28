@@ -4,25 +4,25 @@ import (
 	"context"
 	"testing"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
-	"github.com/the-algovn/radio-service/internal/brain"
 )
 
 type cannedModel struct{ raw string }
 
-func (c cannedModel) Name() string { return "fake" }
-func (c cannedModel) Generate(context.Context, string, string) (string, brain.Usage, error) {
-	return c.raw, brain.Usage{In: 10, Out: 5}, nil
+func (c cannedModel) Name() string     { return "fake" }
+func (c cannedModel) Provider() string { return "fake" }
+func (c cannedModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
+	return c.raw, nil
 }
 
 func TestParseHappyPath(t *testing.T) {
 	m := cannedModel{raw: `{"song_query":"Em Của Ngày Hôm Qua Sơn Tùng","recipient":"Ngọc","message":"chúc ngủ ngon",` +
 		`"verdict":"allow","reject_reason":"","digest":"Đức chúc Ngọc ngủ ngon","weight":"warm"}`}
-	r, u, err := Parse(context.Background(), m, "cho mình xin bài...")
+	r, err := Parse(context.Background(), m, "cho mình xin bài...")
 	require.NoError(t, err)
 	require.Equal(t, "allow", r.Verdict)
 	require.Equal(t, "warm", r.Weight)
-	require.Equal(t, 10, u.In)
 }
 
 func TestNormalizeRejectsBadEnums(t *testing.T) {

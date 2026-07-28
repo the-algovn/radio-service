@@ -8,8 +8,6 @@ import (
 	"regexp"
 )
 
-func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
-
 var nameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // SaveFixture records a reviewer-blessed case into the committed corpus

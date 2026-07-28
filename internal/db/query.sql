@@ -196,13 +196,14 @@ INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, ou
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
 
 -- name: ListLLMCalls :many
--- label_filter: "" = all; "script:" = all script:* call-sites (prefix); else exact match.
+-- label_filter: "" = all; "script:" = all script:* call-sites (prefix); "programmer:" = all programmer:* call-sites (prefix); else exact match.
 SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
        in_tokens, out_tokens, cost_usd, latency_ms, error, fake
 FROM llm_call
 WHERE (sqlc.arg(label_filter)::text = ''
        OR label = sqlc.arg(label_filter)
-       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%'))
+       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%')
+       OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%'))
   AND (sqlc.arg(errors_only)::bool = false OR error <> '')
 ORDER BY ts DESC
 LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
@@ -211,7 +212,8 @@ LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
 SELECT count(*) FROM llm_call
 WHERE (sqlc.arg(label_filter)::text = ''
        OR label = sqlc.arg(label_filter)
-       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%'))
+       OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%')
+       OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%'))
   AND (sqlc.arg(errors_only)::bool = false OR error <> '');
 
 -- name: StatsLLMCalls :many

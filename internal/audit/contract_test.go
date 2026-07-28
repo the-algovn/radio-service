@@ -78,6 +78,25 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Len(t, exact, 1)
 	})
 
+	t.Run("programmer: filter matches all programmer:* labels (prefix), exact still works", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "programmer:intent", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(time.Minute), Label: "programmer:choose", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(2 * time.Minute), Label: "programmer:repair", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(3 * time.Minute), Label: "director:backsell", Model: "m", Provider: "fake"}))
+
+		byPrefix, err := s.List(ctx, audit.Filter{Label: "programmer:"}, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, byPrefix, 3) // all three programmer:* rows, not director:backsell
+		n, err := s.Count(ctx, audit.Filter{Label: "programmer:"})
+		require.NoError(t, err)
+		require.Equal(t, int64(3), n)
+
+		exact, err := s.List(ctx, audit.Filter{Label: "programmer:choose"}, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, exact, 1)
+	})
+
 	t.Run("stats group by label+model since", func(t *testing.T) {
 		s := newStore(t)
 		seed(s)
