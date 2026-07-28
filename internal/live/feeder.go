@@ -580,10 +580,12 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	// the final dir left to reclaim.
 	defer func() { os.RemoveAll(dir) }()
 
-	// Every reader opened below is registered here as well as owned by the
-	// item that opened it, so no exit path can leave an ffmpeg decode process
-	// and its fetch temp dir behind. Each cleanup is `once`-wrapped, so the
-	// ones already run at item end are no-ops.
+	// Every reader an ITEM holds is registered here as well as owned by that
+	// item, so no exit path can leave an ffmpeg decode process and its fetch
+	// temp dir behind. Each cleanup is `once`-wrapped, so the ones already run
+	// at item end are no-ops. A reader the lookahead has opened but no item has
+	// adopted yet is NOT in here — it is owned solely by its prefetch until the
+	// boundary registers it, and the drain defer just below is what closes it.
 	set := &openSet{}
 	defer set.closeAll()
 
