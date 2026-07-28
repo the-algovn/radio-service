@@ -165,6 +165,21 @@ func (e *fakeEncoder) count() int {
 	return len(e.sessions)
 }
 
+// firstSessionBytes reports how many bytes the first encoder session has been
+// fed so far — a test's stand-in for "how far into the stream are we". It is a
+// method because the two pieces live under different locks: the session slice
+// under the encoder's mutex, the byte count under the session's own.
+func (e *fakeEncoder) firstSessionBytes() int {
+	e.mu.Lock()
+	if len(e.sessions) == 0 {
+		e.mu.Unlock()
+		return 0
+	}
+	s := e.sessions[0]
+	e.mu.Unlock()
+	return len(s.bytes())
+}
+
 func (s *fakeSession) fail(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,10 +215,10 @@ func (e *crashingEncoder) Start(ctx context.Context, dir string) (Session, error
 // Open, so crash-resume tests can assert the reader was reopened at the
 // aired offset.
 //
-// Offsets are keyed by artifact path rather than kept as a single "last
-// Open": once the feeder opens the NEXT item ahead of the boundary — always
-// at offset 0 — the most recent Open is routinely not the one a resume test
-// is asking about.
+// Offsets are keyed by artifact path rather than kept as "the last Open": the
+// lookahead opens the NEXT item — always at offset 0 — while the current one
+// is still airing, so the most recent Open is routinely not the one a resume
+// test is asking about.
 type offsetRecordingDecoder struct {
 	mu      sync.Mutex
 	inner   fakeDecoder
@@ -1067,11 +1082,15 @@ func TestSessionClosesEveryReaderItOpened(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
 
-	// Pump until the first track has hit EOF and the second has been opened.
+	// Pump until the SECOND track has been announced. A second reader existing
+	// no longer means the first track ended — the lookahead opens the next
+	// item while the current one is still airing, which is the whole point of
+	// it — so the now-playing frame for track two is what marks the boundary
+	// as actually crossed.
 	deadline := time.Now().Add(2 * time.Second)
-	for atomic.LoadInt32(&dec.opened) < 2 {
+	for len(prod.byTopic(TopicNowPlaying)) < 2 {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for a second reader (opened=%d)", atomic.LoadInt32(&dec.opened))
+			t.Fatalf("timed out waiting for the second track to air (opened=%d)", atomic.LoadInt32(&dec.opened))
 		}
 		select {
 		case err := <-done:
@@ -1100,6 +1119,112 @@ func TestSessionClosesEveryReaderItOpened(t *testing.T) {
 	require.GreaterOrEqual(t, opened, int32(2), "the session should have aired past its first track")
 	require.Equal(t, opened, atomic.LoadInt32(&dec.closed),
 		"every opened reader must be closed by the time RunSession returns")
+}
+
+// The lookahead exists so the incoming item is already fetched and decoded by
+// the time the outgoing one ends. Its whole observable signature is WHEN the
+// fetch happens: the second item's fetch must be requested while the first is
+// still being fed, not after the first has hit EOF.
+func TestPrefetchOpensBeforeTheBoundary(t *testing.T) {
+	const trackBytes = chunkBytes * 6
+
+	var mu sync.Mutex
+	var fetchAt []int // bytes fed to the stream when each fetch was requested
+
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) {
+			d.Decoder = fakeDecoder{bytesPerTrack: trackBytes}
+			d.Fetch = func(_ context.Context, id, _ string) (string, error) {
+				written := enc.firstSessionBytes()
+				mu.Lock()
+				fetchAt = append(fetchAt, written)
+				mu.Unlock()
+				return "/fake/" + id, nil
+			}
+		})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	for range 12 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := store.GoOffAir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 40))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(fetchAt), 2, "at least two items should have been fetched")
+	require.Less(t, fetchAt[1], 2*chunkBytes,
+		"the second item's fetch must start while the first is still being fed, not at its EOF (%d bytes in)", trackBytes)
+}
+
+// Every way a lookahead can fail degrades to opening inline at the boundary —
+// the property the whole change rests on. A fetch that fails on the lookahead
+// must not end the session; the feeder retries it on the feed goroutine and
+// takes the pre-existing skip path only if that fails too.
+func TestPrefetchErrorFallsBackToInlineOpen(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	var calls int32
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) {
+			d.Fetch = func(_ context.Context, id, _ string) (string, error) {
+				if atomic.AddInt32(&calls, 1) == 2 {
+					return "", errors.New("transient minio failure")
+				}
+				return "/fake/" + id, nil
+			}
+		})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	for range 12 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := store.GoOffAir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 40), "a failed prefetch must not end the session with an error")
+	require.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(3),
+		"the feeder should have retried the fetch inline after the prefetch failed")
+}
+
+// A lookahead the session never gets to air still owns an ffmpeg decode
+// process and a temp dir holding a whole audio artifact. Going off air with
+// one in flight must close it, or the leak is permanent: FFDecoder binds the
+// process to RunSession's ctx, which is Engine.Run's ctx, which is process
+// lifetime.
+func TestAbandonedPrefetchIsClosed(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	dec := &closeRecordingDecoder{bytesPerTrack: chunkBytes * 4}
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Decoder = dec })
+
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	for range 3 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Go off air with a prefetch in flight for the next item.
+	_, err := store.GoOffAir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 40))
+
+	require.Equal(t, atomic.LoadInt32(&dec.opened), atomic.LoadInt32(&dec.closed),
+		"a prefetched reader abandoned by going off air must still be closed")
 }
 
 // The session backstop must shed a reader's registration as soon as that

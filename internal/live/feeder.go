@@ -333,9 +333,9 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 // surfaces — otherwise the commitment outlives the failed plan and every
 // restart re-picks the same broken next-up forever instead of self-healing.
 //
-// A lookahead path must NOT call this: a plan that may still be abandoned has
-// to consume nothing. That asymmetry is why the clear lives here rather than
-// inside planNext.
+// The lookahead path must NOT call this: a prefetch that is abandoned has to
+// consume nothing. That asymmetry is the whole reason planNext and commitNext
+// are separate — see startPrefetch.
 func (f *Feeder) planInline(ctx context.Context) (plan, error) {
 	p, err := f.planNext(ctx)
 	if err == nil {
@@ -360,12 +360,104 @@ func (f *Feeder) planInline(ctx context.Context) (plan, error) {
 // the decision and commits it in one call, back to back, preserving the
 // exact behaviour it had before the plan/commit split — see planNext and
 // commitNext for why the split exists.
+//
+// RunSession no longer calls this: it takes the plan from the lookahead (see
+// takePrefetch) and commits it itself, which is the same two calls with the
+// fetch moved off the feed goroutine in between.
 func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
 	p, err := f.planInline(ctx)
 	if err != nil {
 		return airItem{}, false, false, err
 	}
 	return f.commitNext(ctx, p)
+}
+
+// prefetch is one in-flight lookahead: planNext plus openTrack, run off the
+// feed goroutine. openTrack is a whole-blob MinIO GET plus an ffmpeg spawn,
+// and the feed goroutine is the only thing feeding the encoder — running it
+// inline during a track would stall the live stream for the fetch duration.
+//
+// Nothing here commits anything. commitNext still runs on the feed goroutine
+// at the boundary, so an abandoned prefetch loses no state.
+//
+// Every field is written by the prefetch goroutine before it closes done and
+// read by the feed goroutine only after done is closed, so the channel is the
+// only synchronization these need.
+type prefetch struct {
+	done    chan struct{}
+	p       plan
+	rd      io.ReadCloser
+	cleanup func()
+	err     error
+}
+
+// startPrefetch plans and opens the next item on its own goroutine. The
+// returned prefetch is always non-nil; every failure is reported through it
+// and handled by the caller as "plan and open inline instead", which is what
+// the boundary did before this existed.
+//
+// It calls planNext, never planInline, and discards the plan whole on any
+// error. planNext reports a pending next-up consumption alongside its errors
+// so that the feed goroutine can commit it (see planInline); a lookahead is
+// the opposite case — it may be abandoned by going off air, by a ctx
+// cancellation or by the session ending, and an abandoned lookahead must
+// consume nothing. Leaving the consumption unclaimed here costs nothing: the
+// inline re-plan that follows a failed prefetch takes exactly the path the
+// boundary always took.
+func (f *Feeder) startPrefetch(ctx context.Context) *prefetch {
+	pf := &prefetch{done: make(chan struct{})}
+	go func() {
+		defer close(pf.done)
+		p, err := f.planNext(ctx)
+		if err != nil {
+			pf.err = err // p deliberately discarded — see above
+			return
+		}
+		pf.p = p
+		if p.skip || p.stop {
+			return // nothing to open; the boundary acts on the flags
+		}
+		rd, cleanup, skip, oerr := f.openTrack(ctx, p.item.track, 0)
+		if oerr != nil {
+			pf.err = oerr
+			return
+		}
+		if skip {
+			// This artifact failed to fetch or decode. Reported as "opened
+			// nothing" rather than as an error: the plan is still good, so the
+			// boundary commits it and retries the open inline, where the
+			// existing mark-failed-and-skip path already lives.
+			return
+		}
+		pf.rd, pf.cleanup = rd, cleanup
+	}()
+	return pf
+}
+
+// takePrefetch waits for an in-flight lookahead and returns what it produced.
+// A nil prefetch, one that failed, or one whose plan opened nothing all yield
+// a nil reader, which tells the caller to open inline — exactly the
+// pre-prefetch behaviour, so every failure path degrades to today's stream.
+//
+// It waits unconditionally rather than racing ctx.Done. The prefetch goroutine
+// is the sole owner of any reader it has opened until this call hands it over,
+// so returning early would strand an ffmpeg process and its temp dir with
+// nothing left holding them. Waiting is also exactly the blocking this change
+// preserves: a lookahead that is not ready at the boundary costs the same
+// stall the inline open cost before it, and planNext/openTrack both take ctx,
+// so a cancelled session unblocks this promptly.
+func (f *Feeder) takePrefetch(ctx context.Context, pf *prefetch) (plan, io.ReadCloser, func(), error) {
+	if pf == nil {
+		p, err := f.planInline(ctx)
+		return p, nil, nil, err
+	}
+	<-pf.done
+	if pf.err != nil {
+		f.d.Logger.ErrorContext(ctx, "prefetch failed; planning inline", "err", pf.err)
+		p, err := f.planInline(ctx)
+		return p, nil, nil, err
+	}
+	return pf.p, pf.rd, pf.cleanup, nil
 }
 
 // autoOffAir persists off-air (engine-side closure) and reports the sentinel;
@@ -495,6 +587,25 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	set := &openSet{}
 	defer set.closeAll()
 
+	// pf is the lookahead for the item AFTER the one currently airing, started
+	// as soon as that one is announced and consumed at the next boundary. It
+	// outlives an iteration of the loop (a talk break or a crash-capped track
+	// leaves it in flight), so it lives out here with the session.
+	var pf *prefetch
+	// A lookahead that is never consumed owns its reader alone — the boundary
+	// is what hands it to set — so every exit that leaves one in flight has to
+	// wait for it and close whatever it opened. Declared after set.closeAll so
+	// it runs BEFORE it: both are backstops, and draining first keeps the
+	// ordering "nothing is still being opened by the time the set is emptied".
+	defer func() {
+		if pf != nil {
+			<-pf.done
+			if pf.cleanup != nil {
+				pf.cleanup()
+			}
+		}
+	}()
+
 	sess, err := f.d.Encoder.Start(ctx, dir)
 	if err != nil {
 		return err
@@ -521,8 +632,11 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			resume = nil
 		} else {
 			// Talk break first — take-if-ready, never waits (v2). Placed
-			// before boundary() so a due break airs at the seam between
-			// tracks; lastFinished carries the backsell freshness anchor.
+			// before the boundary below so a due break airs at the seam
+			// between tracks; lastFinished carries the backsell freshness
+			// anchor. It runs ahead of takePrefetch on purpose: a clip is
+			// already on disk, so airing one costs no fetch, and the lookahead
+			// it leaves in flight is simply taken at the seam after it.
 			if f.d.Talk != nil && !awaitMusic {
 				if clip, ok := f.d.Talk.Take(lastFinished); ok {
 					awaitMusic = true
@@ -544,14 +658,41 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 					continue
 				}
 			}
-			it, skip, stop, err := f.boundary(ctx)
+			p, rd, cleanup, err := f.takePrefetch(ctx, pf)
+			pf = nil
+			if rd != nil {
+				// Adopt the prefetched reader into cur AND the session
+				// backstop right here, ahead of the checks below: every one of
+				// them is a return or a continue, and a reader held only in a
+				// local would be stranded by any of them. own folds
+				// deregistration into the cleanup, so cur.cleanup is the
+				// single owner exactly as on the inline-open path.
+				cur.rd, cur.cleanup = rd, set.own(cleanup)
+			}
+			var it airItem
+			var skip, stop bool
+			if err == nil {
+				// A plan reaches commitNext only when it planned cleanly.
+				// planNext returns a ZERO plan alongside its errors, and
+				// commitNext turns that into an empty airItem with neither
+				// skip nor stop set — which everything below would air as a
+				// real track with a blank YTID.
+				it, skip, stop, err = f.commitNext(ctx, p)
+			}
 			if stop || ctx.Err() != nil {
-				return nil
+				return nil // the deferred set.closeAll closes an adopted reader
 			}
 			if err != nil {
 				return err
 			}
-			if skip { // vanished track: boundary already handled it
+			if skip { // vanished track: commitNext already handled it
+				// Unreachable holding a reader today — the prefetch opens only
+				// for a plan that airs — but continue is the one exit the
+				// session backstop does not cover until the session ends, so
+				// close here rather than rely on the argument.
+				if cur.cleanup != nil {
+					cur.cleanup()
+				}
 				continue
 			}
 			cur.item = it
@@ -562,24 +703,32 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// that fails to fetch/decode must never be logged or published as
 		// now-playing — it never aired, and doing so would poison the
 		// sample-clock resume anchor with a track nobody heard.
+		//
+		// cur.rd is already set when the lookahead opened this item ahead of
+		// the boundary. Everything else — the boot resume, and every fallback
+		// in takePrefetch — opens here, on the feed goroutine, exactly as
+		// before.
 		var openSkip bool
-		var err error
-		cur.rd, cur.cleanup, openSkip, err = f.openTrack(ctx, cur.track, offsetS)
-		if err != nil {
-			return err
-		}
-		if openSkip {
-			if cur.item.requestID != "" {
-				if err := f.d.Requests.MarkFailed(ctx, cur.item.requestID, "artifact failed to open"); err != nil {
-					f.d.Logger.ErrorContext(ctx, "mark request failed", "id", cur.item.requestID, "err", err)
-				}
+		if cur.rd == nil {
+			var oerr error
+			cur.rd, cur.cleanup, openSkip, oerr = f.openTrack(ctx, cur.track, offsetS)
+			if oerr != nil {
+				return oerr
 			}
-			continue
+			if openSkip {
+				if cur.item.requestID != "" {
+					if err := f.d.Requests.MarkFailed(ctx, cur.item.requestID, "artifact failed to open"); err != nil {
+						f.d.Logger.ErrorContext(ctx, "mark request failed", "id", cur.item.requestID, "err", err)
+					}
+				}
+				continue
+			}
+			// Hand the reader to the session backstop. cur.cleanup stays the
+			// single owner: own folds the deregistration into it, so closing
+			// the reader and dropping it from the set are one act that cannot
+			// come apart.
+			cur.cleanup = set.own(cur.cleanup)
 		}
-		// Hand the reader to the session backstop. cur.cleanup stays the single
-		// owner: own folds the deregistration into it, so closing the reader
-		// and dropping it from the set are one act that cannot come apart.
-		cur.cleanup = set.own(cur.cleanup)
 
 		// cur.startSamples anchors this track's aired offset: on a crash
 		// mid-track, offset = (samplesFed at crash - cur.startSamples)/48000.
@@ -610,6 +759,11 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 		}
 		f.commitNextUp(ctx)
+		// Start the lookahead for the item after this one. It must run AFTER
+		// commitNextUp: planNext reads the next-up commitment commitNextUp
+		// just made, and that ordering is what keeps the pick identical to the
+		// one the boundary made when it planned at the seam.
+		pf = f.startPrefetch(ctx)
 		n, _ := f.d.Listeners.Count(ctx)
 		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(cur.entry, n))
 		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Sched, f.d.Logger)
