@@ -310,7 +310,7 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	}
 	if p.failRequestID != "" {
 		if err := f.d.Requests.MarkFailed(ctx, p.failRequestID, "track vanished from library"); err != nil {
-			f.d.Logger.Error("mark request failed", "id", p.failRequestID, "err", err)
+			f.d.Logger.ErrorContext(ctx, "mark request failed", "id", p.failRequestID, "err", err)
 			return airItem{}, false, false, err
 		}
 	}
