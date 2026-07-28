@@ -310,6 +310,10 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	}
 	if p.failRequestID != "" {
 		if err := f.d.Requests.MarkFailed(ctx, p.failRequestID, "track vanished from library"); err != nil {
+			// A persistently-failing store would otherwise leave this same
+			// ready request re-picked on every boundary() call — an unpaced
+			// spin inside the audio goroutine. Surfacing it as fatal lets
+			// Engine.Run's 5s poll pace the retry.
 			f.d.Logger.ErrorContext(ctx, "mark request failed", "id", p.failRequestID, "err", err)
 			return airItem{}, false, false, err
 		}
@@ -320,8 +324,14 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	return p.item, p.skip, p.stop, nil
 }
 
-// boundary decides what airs next and commits it, preserving the exact
-// behaviour it had before the plan/commit split.
+// boundary decides what airs next (spec §4.1): oldest ready listener
+// request → oldest ready AI pick → library no-repeat shuffle. skip=true
+// means the chosen item can't air (vanished track — already marked failed
+// when it was a request); the caller re-runs the boundary. stop=true ends
+// the session (operator off-air, or empty library → auto off-air). It plans
+// the decision and commits it in one call, back to back, preserving the
+// exact behaviour it had before the plan/commit split — see planNext and
+// commitNext for why the split exists.
 func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
 	p, err := f.planNext(ctx)
 	if err != nil {
