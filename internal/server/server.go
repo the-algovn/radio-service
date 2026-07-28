@@ -428,7 +428,7 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 		return nil, status.Error(codes.InvalidArgument, "yt_id is required")
 	}
 	acq := acquire.New(acquire.Deps{
-		Download: s.deps.Ingest.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm,
+		Download: s.deps.Ingest.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm, Cues: ingest.Cues,
 		Store: s.deps.Store, Library: s.deps.Library, TmpDir: s.deps.TmpDir, Logger: s.logger,
 	})
 	tr, cached, err := acq.Acquire(ctx, req.GetYtId(), req.GetTitle(), req.GetChannel())

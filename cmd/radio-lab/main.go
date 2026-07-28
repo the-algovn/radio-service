@@ -268,7 +268,7 @@ func main() {
 	}()
 
 	acquirer := acquire.New(acquire.Deps{
-		Download: runner.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm,
+		Download: runner.Download, Probe: ingest.Probe, Loudnorm: ingest.Loudnorm, Cues: ingest.Cues,
 		Store: store, Library: lib, TmpDir: tmpDir, Logger: logger, MaxDurationS: 600,
 	})
 	worker := acquire.NewWorker(acquire.WorkerDeps{

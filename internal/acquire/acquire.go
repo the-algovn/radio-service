@@ -23,10 +23,16 @@ type Deps struct {
 	Download func(ctx context.Context, ytID, destDir string) (string, error)
 	Probe    func(ctx context.Context, path string) (float64, error)
 	Loudnorm func(ctx context.Context, path string) (i, tp, lra float64, err error)
-	Store    artifact.Store
-	Library  library.Library
-	TmpDir   string
-	Logger   *slog.Logger
+	// Cues measures the track's overlap budget. Injected like Probe and
+	// Loudnorm so tests never exec ffmpeg. A nil Cues, or an error from it,
+	// leaves the track UNMEASURED (-1) rather than failing the acquire —
+	// a track that cannot be cue-measured must still be airable, because
+	// unmeasured simply means the later crossfade butt-joins it.
+	Cues    func(ctx context.Context, path string) (tailSilenceS, tailDecayS float64, err error)
+	Store   artifact.Store
+	Library library.Library
+	TmpDir  string
+	Logger  *slog.Logger
 	// MaxDurationS rejects a probed track longer than this many seconds
 	// before it is normalized/stored/added to the library. 0 = uncapped
 	// (the lab bench's DownloadTrack stays uncapped by never setting this).
@@ -70,6 +76,18 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("loudnorm: %w", err)
 	}
+	// Unlike Probe and Loudnorm above, whose values the feeder cannot air
+	// without, a cue is an optimisation: its absence just costs a hard cut
+	// instead of a crossfade, so a Cues failure must not fail the acquire.
+	tailSilenceS, tailDecayS := -1.0, -1.0
+	if a.d.Cues != nil {
+		if s, d, cerr := a.d.Cues(ctx, p); cerr != nil {
+			a.d.Logger.Warn("cue measurement failed; track stays unmeasured",
+				"yt_id", ytID, "err", cerr)
+		} else {
+			tailSilenceS, tailDecayS = s, d
+		}
+	}
 	label := title
 	if label == "" {
 		label = ytID
@@ -83,6 +101,7 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	tr := library.Track{
 		YTID: ytID, Title: label, Channel: channel, DurationS: dur,
 		ArtifactID: art.ID, InputI: i, InputTP: tp, InputLRA: lra,
+		TailSilenceS: tailSilenceS, TailDecayS: tailDecayS,
 	}
 	// Unlike the old lab RPC, an Add failure here is an error: the worker's
 	// track MUST reach the library or the request can never air.

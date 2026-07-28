@@ -124,6 +124,49 @@ func TestAcquireCappedRejectsProbedOverCap(t *testing.T) {
 	require.False(t, found) // never persisted to the library
 }
 
+func TestAcquireRecordsCues(t *testing.T) {
+	lib := library.NewMemLibrary()
+	arts := &fakeArtifacts{}
+	a := New(Deps{
+		Download: func(_ context.Context, ytID, destDir string) (string, error) {
+			p := filepath.Join(destDir, ytID+".m4a")
+			require.NoError(t, os.WriteFile(p, []byte("audio"), 0o644))
+			return p, nil
+		},
+		Probe:    func(context.Context, string) (float64, error) { return 100, nil },
+		Loudnorm: func(context.Context, string) (float64, float64, float64, error) { return -9, -1, 5, nil },
+		Cues:     func(context.Context, string) (float64, float64, error) { return 2.5, 4, nil },
+		Store:    arts, Library: lib, TmpDir: t.TempDir(),
+	})
+
+	tr, cached, err := a.Acquire(context.Background(), "yt1", "T", "C")
+	require.NoError(t, err)
+	require.False(t, cached)
+	require.Equal(t, 2.5, tr.TailSilenceS)
+	require.Equal(t, 4.0, tr.TailDecayS)
+}
+
+func TestAcquireSurvivesCueFailure(t *testing.T) {
+	lib := library.NewMemLibrary()
+	arts := &fakeArtifacts{}
+	a := New(Deps{
+		Download: func(_ context.Context, ytID, destDir string) (string, error) {
+			p := filepath.Join(destDir, ytID+".m4a")
+			require.NoError(t, os.WriteFile(p, []byte("audio"), 0o644))
+			return p, nil
+		},
+		Probe:    func(context.Context, string) (float64, error) { return 100, nil },
+		Loudnorm: func(context.Context, string) (float64, float64, float64, error) { return -9, -1, 5, nil },
+		Cues:     func(context.Context, string) (float64, float64, error) { return 0, 0, errors.New("ffmpeg exploded") },
+		Store:    arts, Library: lib, TmpDir: t.TempDir(),
+	})
+
+	tr, _, err := a.Acquire(context.Background(), "yt1", "T", "C")
+	require.NoError(t, err, "a cue failure must never block a track from airing")
+	require.Equal(t, -1.0, tr.TailSilenceS)
+	require.Equal(t, -1.0, tr.TailDecayS)
+}
+
 func TestAcquireUncappedAllowsProbedOverSixHundred(t *testing.T) {
 	lib := library.NewMemLibrary()
 	arts := &fakeArtifacts{}
