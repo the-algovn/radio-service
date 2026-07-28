@@ -940,17 +940,37 @@ func TestSessionClosesEveryReaderItOpened(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
 
-	// Air a few chunks, then take the station off air mid-track.
-	for range 3 {
-		clk.step(250 * time.Millisecond)
-		time.Sleep(5 * time.Millisecond)
+	// Pump until the first track has hit EOF and the second has been opened.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&dec.opened) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for a second reader (opened=%d)", atomic.LoadInt32(&dec.opened))
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("session ended early: %v", err)
+		default:
+			clk.step(250 * time.Millisecond)
+			time.Sleep(time.Millisecond)
+		}
 	}
+
+	// Assert MID-SESSION, not just at return: the finished track's reader must
+	// be closed at item end. Checking only after RunSession returns is blind,
+	// because the session-end backstop would close everything anyway — a build
+	// that dropped the per-item cleanup entirely would keep every track's
+	// ffmpeg process and its temp dir alive for the whole session (weeks, on
+	// this station) and still satisfy an at-return-only assertion.
+	require.Positive(t, atomic.LoadInt32(&dec.closed),
+		"the finished track's reader must close at item end, not at session end")
+
+	// Now take the station off air mid-track and drain the session.
 	_, err := store.GoOffAir(ctx)
 	require.NoError(t, err)
 	require.NoError(t, drive(t, clk, done, 40))
 
 	opened := atomic.LoadInt32(&dec.opened)
-	require.Positive(t, opened, "the session should have opened at least one reader")
+	require.GreaterOrEqual(t, opened, int32(2), "the session should have aired past its first track")
 	require.Equal(t, opened, atomic.LoadInt32(&dec.closed),
 		"every opened reader must be closed by the time RunSession returns")
 }
@@ -963,21 +983,21 @@ func TestOpenSetDropsClosedReadersAndClosesTheRest(t *testing.T) {
 	var set openSet
 	var closed []string
 
-	first := once(func() { closed = append(closed, "first") })
-	removeFirst := set.add(first)
+	first := set.own(once(func() { closed = append(closed, "first") }))
 	first()
-	removeFirst()
 	require.Empty(t, set.open, "a closed reader must leave no registration behind")
 
 	// Readers still open at session end are closed by the backstop, newest first.
-	set.add(once(func() { closed = append(closed, "older") }))
-	set.add(once(func() { closed = append(closed, "newer") }))
+	older := set.own(once(func() { closed = append(closed, "older") }))
+	newer := set.own(once(func() { closed = append(closed, "newer") }))
 	set.closeAll()
 	require.Equal(t, []string{"first", "newer", "older"}, closed)
 
-	// A remove landing after closeAll (session end racing an item's own
-	// cleanup) is a no-op, and no cleanup ever runs twice.
-	require.NotPanics(t, removeFirst)
+	// A cleanup landing after closeAll (session end racing an item's own
+	// cleanup) neither panics nor re-runs anything.
+	require.NotPanics(t, first)
+	require.NotPanics(t, older)
+	require.NotPanics(t, newer)
 	set.closeAll()
 	require.Equal(t, []string{"first", "newer", "older"}, closed)
 }

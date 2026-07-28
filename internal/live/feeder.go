@@ -491,12 +491,10 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 			continue
 		}
-		// Register with the session backstop and fold the deregistration into
-		// this item's own cleanup, so cur.cleanup stays the single owner and
-		// the set only ever holds readers that are genuinely still open.
-		closeReader := cur.cleanup
-		remove := set.add(closeReader)
-		cur.cleanup = func() { closeReader(); remove() }
+		// Hand the reader to the session backstop. cur.cleanup stays the single
+		// owner: own folds the deregistration into it, so closing the reader
+		// and dropping it from the set are one act that cannot come apart.
+		cur.cleanup = set.own(cur.cleanup)
 
 		// cur.startSamples anchors this track's aired offset: on a crash
 		// mid-track, offset = (samplesFed at crash - cur.startSamples)/48000.
@@ -585,9 +583,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				break feedTrack
 			}
 			// Same single-owner registration as the first open above.
-			closeReader := cur.cleanup
-			remove := set.add(closeReader)
-			cur.cleanup = func() { closeReader(); remove() }
+			cur.cleanup = set.own(cur.cleanup)
 		}
 		if stopSession {
 			return nil
@@ -648,7 +644,7 @@ func once(fn func()) func() {
 // weeks — so an entry per track open would accumulate for the whole run, each
 // one pinning a *decodeReader and through it an *exec.Cmd and that command's
 // stderr buffer. That is unbounded growth in a process designed never to
-// restart, so `add` hands back a remove and the item's cleanup calls it.
+// restart, so registering and deregistering are one operation: see own.
 type openSet struct {
 	mu   sync.Mutex
 	next int64
@@ -662,18 +658,30 @@ type openEntry struct {
 	cleanup func()
 }
 
-// add registers cleanup as an open reader and returns a remove that drops the
-// registration. The caller must fold remove into the cleanup it owns, so the
-// set sheds the entry the moment the reader closes — see the type comment for
-// what append-only would cost. remove is idempotent and safe to call after
-// closeAll has already run.
-func (o *openSet) add(cleanup func()) (remove func()) {
+// own registers cleanup as an open reader and returns the cleanup the caller
+// must hold from here on: running it closes the reader and then drops the
+// registration, so the set only ever holds readers still genuinely open.
+//
+// This is deliberately the ONLY way to register. A bare "add" that handed back
+// a separate remove would let an open site register without folding the
+// removal back in, silently restoring the unbounded growth described above —
+// and nothing would catch it, since the openSet tests exercise the type, not
+// its call sites.
+//
+// The returned cleanup tolerates being called twice, and being called after
+// closeAll: cleanup is `once`-wrapped by openTrack, and closeAll invokes the
+// registered cleanups only after releasing o.mu, so a late call re-entering
+// removeID simply scans an already-emptied set.
+func (o *openSet) own(cleanup func()) func() {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	id := o.next
 	o.next++
 	o.open = append(o.open, openEntry{id: id, cleanup: cleanup})
-	return func() { o.removeID(id) }
+	o.mu.Unlock()
+	return func() {
+		cleanup()
+		o.removeID(id)
+	}
 }
 
 func (o *openSet) removeID(id int64) {
@@ -707,8 +715,11 @@ func (o *openSet) closeAll() {
 // means fetch/decode failed for THIS track specifically — already logged;
 // the caller advances past it and re-runs the boundary without announcing
 // anything. err != nil is a fatal, session-ending error (e.g. can't even
-// create the fetch scratch dir). On success, cleanup must be called exactly
-// once, after the caller is done reading from rd.
+// create the fetch scratch dir). On success, cleanup must be called once the
+// caller is done reading from rd. It is idempotent (`once`-wrapped) because it
+// has two owners: the item that opened the reader, and the session-level
+// backstop that closes whatever an aborted item left open — either may reach
+// it first, and the reader must close exactly once regardless.
 func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS float64) (rd io.ReadCloser, cleanup func(), skip bool, err error) {
 	tmp, err := os.MkdirTemp(f.d.Dir, "fetch-*")
 	if err != nil {
