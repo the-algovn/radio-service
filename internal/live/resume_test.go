@@ -33,6 +33,9 @@ func TestEncoderCrashStartsNewSessionAndResumes(t *testing.T) {
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: dec, Encoder: enc, Producer: prod, Clock: clk, Dir: t.TempDir(),
+		// Deterministic shuffle so the bed starts on 'a': the assertion below
+		// names the artifact whose reopen offset it is checking.
+		Rand: func(int) int { return 0 },
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -53,7 +56,7 @@ func TestEncoderCrashStartsNewSessionAndResumes(t *testing.T) {
 		clk.step(250 * time.Millisecond)
 		time.Sleep(time.Millisecond)
 	}
-	require.InDelta(t, 0.25, dec.lastOffset(), 0.01)
+	require.InDelta(t, 0.25, dec.offsetFor("/fake/art-a"), 0.01)
 	cancel()
 	<-done
 }
@@ -137,7 +140,7 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 	}
 	cancel()
 	<-done
-	require.InDelta(t, 30.0, dec.lastOffset(), 1.5)                        // resumed ~30s in
+	require.InDelta(t, 30.0, dec.offsetFor("/fake/art-a"), 1.5)            // resumed ~30s in
 	require.Contains(t, prod.byTopic(TopicNowPlaying)[0], `"title":"t-a"`) // same entry
 }
 
@@ -190,7 +193,7 @@ func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
 		clk.step(250 * time.Millisecond)
 		time.Sleep(time.Millisecond)
 	}
-	require.InDelta(t, 30.5, dec.lastOffset(), 1.5)
+	require.InDelta(t, 30.5, dec.offsetFor("/fake/art-a"), 1.5)
 	cancel()
 	<-done
 }

@@ -199,22 +199,32 @@ func (e *crashingEncoder) Start(ctx context.Context, dir string) (Session, error
 // offsetRecordingDecoder wraps fakeDecoder to record the offsetS passed to
 // Open, so crash-resume tests can assert the reader was reopened at the
 // aired offset.
+//
+// Offsets are keyed by artifact path rather than kept as a single "last
+// Open": once the feeder opens the NEXT item ahead of the boundary — always
+// at offset 0 — the most recent Open is routinely not the one a resume test
+// is asking about.
 type offsetRecordingDecoder struct {
-	mu     sync.Mutex
-	inner  fakeDecoder
-	offset float64
+	mu      sync.Mutex
+	inner   fakeDecoder
+	offsets map[string]float64
 }
 
 func (d *offsetRecordingDecoder) Open(ctx context.Context, path string, l Loudness, offsetS float64) (io.ReadCloser, error) {
 	d.mu.Lock()
-	d.offset = offsetS
+	if d.offsets == nil {
+		d.offsets = map[string]float64{}
+	}
+	d.offsets[path] = offsetS
 	d.mu.Unlock()
 	return d.inner.Open(ctx, path, l, offsetS)
 }
-func (d *offsetRecordingDecoder) lastOffset() float64 {
+
+// offsetFor reports the offset this artifact was most recently opened at.
+func (d *offsetRecordingDecoder) offsetFor(path string) float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.offset
+	return d.offsets[path]
 }
 
 // countingReadCloser records whether Close was called.
