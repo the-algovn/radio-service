@@ -1341,6 +1341,50 @@ func TestTakePrefetchPlansInlineAfterAFailedLookahead(t *testing.T) {
 	require.True(t, p.consumedNextUp, "the inline re-plan owns the consumption the lookahead left alone")
 }
 
+// The seam's re-plan must use planInline, never planNext. planNext deliberately
+// cannot clear the next-up it consumed, so a persistent Library.Get failure on
+// the committed next-up would leave that commitment standing: Engine.Run
+// restarts every 5s, re-picks the same broken next-up, fails again, and the
+// station wedges on dead air forever.
+//
+// This is the same invariant TestPlanInlineConsumesNextUpEvenWhenLibraryGetErrors
+// pins one layer down. It is asserted again here because takePrefetch is what
+// RunSession actually calls, and swapping planInline for planNext at these call
+// sites is otherwise invisible to the whole suite.
+func TestTakePrefetchClearsBrokenNextUpOnInlineReplanFailure(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, failingGetLibrary{lib}, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	finished := make(chan struct{})
+	close(finished)
+	_, _, _, err := f.takePrefetch(ctx, &prefetch{done: finished, err: errLibraryGetBroken})
+	require.ErrorIs(t, err, errLibraryGetBroken)
+
+	_, ok, gerr := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, gerr)
+	require.False(t, ok, "the inline re-plan must clear the broken commitment so the station self-heals")
+}
+
+// The same invariant on the path with no lookahead at all — the first boundary
+// of every session, and every boundary after a skipped item.
+func TestTakePrefetchClearsBrokenNextUpWithNoLookahead(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, failingGetLibrary{lib}, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	_, _, _, err := f.takePrefetch(ctx, nil)
+	require.ErrorIs(t, err, errLibraryGetBroken)
+
+	_, ok, gerr := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, gerr)
+	require.False(t, ok, "the inline re-plan must clear the broken commitment so the station self-heals")
+}
+
 // A lookahead whose OPEN fails (as opposed to its plan — see the two tests
 // above) reports "opened nothing" rather than an error, so the boundary commits
 // the plan and retries the open on the feed goroutine, where the pre-existing
