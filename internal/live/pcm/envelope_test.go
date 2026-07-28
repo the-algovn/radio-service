@@ -36,6 +36,26 @@ func tone(seconds float64, gain func(t float64) float64) []byte {
 
 func flat(float64) float64 { return 1 }
 
+// jitterWindows perturbs alternating windows of buf by lsb raw amplitude
+// units. tone() produces bit-identical consecutive windows for a constant
+// gain, which real audio never does — even a held pad or room-tone tail has
+// some dither. Alternating the perturbation guarantees no two adjacent
+// windows are ever bit-identical, matching that reality.
+func jitterWindows(buf []byte, windowBytes int, lsb int16) []byte {
+	out := append([]byte(nil), buf...)
+	on := true
+	for off := 0; off+windowBytes <= len(out); off += windowBytes {
+		if on {
+			for i := off; i+SampleBytes <= off+windowBytes; i += SampleBytes {
+				v := int16(binary.LittleEndian.Uint16(out[i:]))
+				binary.LittleEndian.PutUint16(out[i:], uint16(v+lsb))
+			}
+		}
+		on = !on
+	}
+	return out
+}
+
 func TestTailCuesColdEndingHasNoSilenceAndNoDecay(t *testing.T) {
 	// 3s at full level, stopping dead. Both cues must be ~0 — a cold
 	// ending has no room to overlap.
@@ -78,10 +98,45 @@ func TestTailCuesSilenceAndDecayAreDisjoint(t *testing.T) {
 	require.Less(t, sil+dec, 3.3, "the sum must not exceed the real 3s tail")
 }
 
+// A lead-in that is merely close to flat, not bit-exact, is what real audio
+// actually looks like: a held pad, a reverb tail, room tone before the fade
+// starts. The decay boundary must not be fooled by that near-flatness into
+// swallowing the whole lead-in the way it would be fooled by exact equality.
+func TestTailCuesToleratesJitteryLeadIn(t *testing.T) {
+	windowBytes := 48000 * windowMS / 1000 * 2 * SampleBytes
+	leadIn := jitterWindows(tone(2, flat), windowBytes, 3)
+	buf := append(leadIn, tone(2, func(t float64) float64 { return 1 - t })...)
+	sil, dec, err := TailCues(bytes.NewReader(buf), 48000, 2)
+	require.NoError(t, err)
+	require.Less(t, sil+dec, 2.6, "a jittery lead-in must not be swept into the decay run")
+}
+
+// Pins minDecayDropDB's boundary from both sides: a decline too small to be
+// a real fade must report zero decay, and one clearly past the floor must
+// not.
+func TestTailCuesGatesOnMinimumDrop(t *testing.T) {
+	rampTo := func(targetDB float64) []byte {
+		target := math.Pow(10, targetDB/20)
+		return append(tone(2, flat), tone(1, func(t float64) float64 { return 1 - t*(1-target) })...)
+	}
+
+	_, dec, err := TailCues(bytes.NewReader(rampTo(-4)), 48000, 2)
+	require.NoError(t, err)
+	require.Equal(t, 0.0, dec, "a ~4 dB decline is below the minimum drop and must not register as decay")
+
+	_, dec, err = TailCues(bytes.NewReader(rampTo(-10)), 48000, 2)
+	require.NoError(t, err)
+	require.Greater(t, dec, 0.0, "a ~10 dB decline is past the minimum drop and must register as decay")
+}
+
 func TestTailCuesRejectsBadGeometry(t *testing.T) {
 	_, _, err := TailCues(bytes.NewReader(nil), 0, 2)
 	require.Error(t, err)
 	_, _, err = TailCues(bytes.NewReader(nil), 48000, 0)
+	require.Error(t, err)
+	// sampleRate*windowMS/1000 truncates to 0 below ~20Hz, which used to
+	// leave the read loop spinning forever on a zero-length buffer.
+	_, _, err = TailCues(bytes.NewReader(nil), 19, 2)
 	require.Error(t, err)
 }
 

@@ -54,6 +54,14 @@ func TailCues(r io.Reader, sampleRate, channels int) (tailSilenceS, tailDecayS f
 	frameBytes := channels * SampleBytes
 	windowFrames := sampleRate * windowMS / 1000
 	windowBytes := windowFrames * frameBytes
+	if windowBytes == 0 {
+		// sampleRate*windowMS/1000 truncates to 0 below ~20Hz. Left
+		// unchecked, io.ReadFull on a zero-length buffer returns (0, nil)
+		// forever — neither loop exit below ever fires and TailCues hangs.
+		// Unreachable with any real sample rate, but the geometry check
+		// exists precisely to reject bad geometry, so this belongs here.
+		return 0, 0, errors.New("pcm: sampleRate too low for windowMS resolution")
+	}
 
 	// One pass, accumulating one dBFS value per window. A track is minutes
 	// long, so this is a few thousand float64s — cheaper than buffering the
@@ -95,13 +103,25 @@ func TailCues(r io.Reader, sampleRate, channels int) (tailSilenceS, tailDecayS f
 	// it), so nothing ever breaks the loop. That is not decay — nothing is
 	// declining — so gate on the run's actual drop rather than its length.
 	if sil-dec >= 1 && levels[dec]-levels[sil-1] >= minDecayDropDB {
-		// The same slack lets a flat lead-in ride along in front of a real
-		// decline (e.g. a held intro before the fade proper starts): those
-		// windows are bit-identical to their successor, so they add length
-		// to the run without adding any of the drop that justified keeping
-		// it. Trim them off the front so the reported run starts where the
-		// level actually begins to fall.
-		for dec < sil-1 && levels[dec] == levels[dec+1] {
+		// The tolerant walk's own left boundary is not trustworthy as the
+		// run's start: the same slack that survives one dither bump chains
+		// through an unbroken run of them, so a merely near-flat lead-in —
+		// any real held pad or room tone, not just a bit-exact synthetic
+		// tone — rides along too, inflating the reported run far past the
+		// actual decline. Re-anchor to the run's own peak instead: walk
+		// forward from the gate-approved start only while the level is
+		// still within decayTolerance of the loudest window actually in
+		// the run. That can only shorten the run — it never disqualifies
+		// one the gate already approved — and it biases the reported
+		// start slightly late, 1.5dB into the decline, which is the safe
+		// direction for a crossfade budget to be wrong in.
+		peak := levels[dec]
+		for _, lv := range levels[dec:sil] {
+			if lv > peak {
+				peak = lv
+			}
+		}
+		for dec < sil-1 && levels[dec] >= peak-decayTolerance {
 			dec++
 		}
 		tailDecayS = float64(sil-dec) * windowS
