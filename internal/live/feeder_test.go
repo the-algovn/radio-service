@@ -1,7 +1,9 @@
 package live
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -65,25 +67,70 @@ func (f *fakeClock) step(d time.Duration) {
 	}
 }
 
-// fakeDecoder yields n bytes of PCM then EOF.
-type fakeDecoder struct{ bytesPerTrack int }
+// pumpChunk fires one pacing tick and waits for the feeder to write the
+// resulting chunk, so a test's step count equals the chunks actually fed.
+// Returns false when no write arrives before the deadline, which is how a
+// test observes "the item ended on this tick" rather than hanging.
+func pumpChunk(t *testing.T, clk *fakeClock, s *fakeSession) bool {
+	t.Helper()
+	clk.step(250 * time.Millisecond)
+	select {
+	case <-s.writes:
+		return true
+	case <-time.After(2 * time.Second):
+		return false
+	}
+}
 
-func (d fakeDecoder) Open(_ context.Context, _ string, _ Loudness, _ float64) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader(strings.Repeat("\x00", d.bytesPerTrack))), nil
+// fakeDecoder yields bytesPerTrack of PCM then EOF. sample, when non-nil, is
+// consulted per artifact path for the constant s16le value that artifact
+// decodes to — which is what makes a mix of two tracks verifiable by
+// arithmetic. nil keeps the historical all-zero fill, so tests that predate
+// transitions are unaffected.
+type fakeDecoder struct {
+	bytesPerTrack int
+	sample        func(path string) int16
+}
+
+func (d fakeDecoder) Open(_ context.Context, path string, _ Loudness, _ float64) (io.ReadCloser, error) {
+	var v int16
+	if d.sample != nil {
+		v = d.sample(path)
+	}
+	buf := make([]byte, d.bytesPerTrack)
+	for i := 0; i+1 < len(buf); i += 2 {
+		binary.LittleEndian.PutUint16(buf[i:], uint16(v))
+	}
+	return io.NopCloser(bytes.NewReader(buf)), nil
 }
 
 type fakeSession struct {
 	mu     sync.Mutex
 	wrote  int
+	buf    bytes.Buffer  // the mixer's only witness — see pumpChunk
+	writes chan struct{} // one token per Write, for the synchronous pump
 	done   chan error
 	closed bool
 }
 
 func (s *fakeSession) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.wrote += len(p)
+	s.buf.Write(p)
+	s.mu.Unlock()
+	// Non-blocking: a test that is not pumping must never deadlock the feeder.
+	select {
+	case s.writes <- struct{}{}:
+	default:
+	}
 	return len(p), nil
+}
+
+// bytes returns a copy of everything fed to this session so far.
+func (s *fakeSession) bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...)
 }
 func (s *fakeSession) Close() error {
 	s.mu.Lock()
@@ -106,7 +153,7 @@ type fakeEncoder struct {
 func (e *fakeEncoder) Start(_ context.Context, _ string) (Session, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := &fakeSession{done: make(chan error, 1)}
+	s := &fakeSession{done: make(chan error, 1), writes: make(chan struct{}, 1024)}
 	e.sessions = append(e.sessions, s)
 	return s, nil
 }
@@ -214,14 +261,25 @@ func newFixture(t *testing.T, ytIDs ...string) (station.Store, library.Library, 
 }
 
 func newTestFeeder(store station.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string) *Feeder {
-	return NewFeeder(FeederDeps{
+	return newTestFeederWith(store, lib, reqs, enc, prod, clk, dir)
+}
+
+// newTestFeederWith is newTestFeeder with per-test overrides applied to the
+// deps before construction — used by tests that need a sighted decoder or a
+// fetch that fails on demand.
+func newTestFeederWith(store station.Store, lib library.Library, reqs request.Store, enc *fakeEncoder, prod *fakeProducer, clk Clock, dir string, opts ...func(*FeederDeps)) *Feeder {
+	d := FeederDeps{
 		Store: store, Requests: reqs, Library: lib, Sched: schedule.NewMemStore(),
 		Log: NewMemAirLog(), Listeners: NewMemListeners(time.Now),
 		Fetch:   func(_ context.Context, id, _ string) (string, error) { return "/fake/" + id, nil },
 		Decoder: fakeDecoder{bytesPerTrack: chunkBytes * 2}, // 2 chunks per track
 		Encoder: enc, Producer: prod, Clock: clk, Dir: dir,
 		Rand: func(int) int { return 0 }, // deterministic shuffle for tests
-	})
+	}
+	for _, o := range opts {
+		o(&d)
+	}
+	return NewFeeder(d)
 }
 
 // drive pumps the fake clock until the session goroutine finishes or times out.
@@ -237,6 +295,52 @@ func drive(t *testing.T, clk *fakeClock, done <-chan error, maxSteps int) error 
 	}
 	t.Fatal("session did not finish")
 	return nil
+}
+
+func TestFakeDecoderEmitsPerArtifactSamples(t *testing.T) {
+	d := fakeDecoder{bytesPerTrack: 8, sample: func(path string) int16 {
+		if strings.HasSuffix(path, "a") {
+			return 1000
+		}
+		return -1000
+	}}
+
+	ra, err := d.Open(context.Background(), "/fake/a", Loudness{}, 0)
+	require.NoError(t, err)
+	got, err := io.ReadAll(ra)
+	require.NoError(t, err)
+	require.Len(t, got, 8)
+	require.Equal(t, int16(1000), int16(binary.LittleEndian.Uint16(got[0:])))
+
+	rb, err := d.Open(context.Background(), "/fake/b", Loudness{}, 0)
+	require.NoError(t, err)
+	got, err = io.ReadAll(rb)
+	require.NoError(t, err)
+	require.Equal(t, int16(-1000), int16(binary.LittleEndian.Uint16(got[0:])))
+}
+
+func TestFakeSessionCapturesWrittenBytes(t *testing.T) {
+	s := &fakeSession{done: make(chan error, 1), writes: make(chan struct{}, 4)}
+	_, err := s.Write([]byte{0x01, 0x02})
+	require.NoError(t, err)
+	_, err = s.Write([]byte{0x03})
+	require.NoError(t, err)
+
+	require.Equal(t, []byte{0x01, 0x02, 0x03}, s.bytes())
+	require.Equal(t, 3, s.wrote)
+}
+
+func TestPumpChunkCountsExactChunks(t *testing.T) {
+	s := &fakeSession{done: make(chan error, 1), writes: make(chan struct{}, 4)}
+	clk := newFakeClock()
+
+	go func() {
+		_, _ = s.Write(make([]byte, chunkBytes))
+	}()
+	require.True(t, pumpChunk(t, clk, s), "a write should have been observed")
+	require.Equal(t, chunkBytes, s.wrote)
+
+	require.False(t, pumpChunk(t, clk, s), "no further write should arrive")
 }
 
 // Shuffle-only: with a 2-track library the no-repeat window is 1, so the
