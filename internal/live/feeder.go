@@ -109,7 +109,7 @@ func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 		return
 	}
 	if err := f.d.Producer.Publish(ctx, topic, val); err != nil {
-		f.d.Logger.Error("publish failed", "topic", topic, "err", err)
+		f.d.Logger.ErrorContext(ctx, "publish failed", "topic", topic, "err", err)
 	}
 }
 
@@ -172,18 +172,18 @@ func (f *Feeder) pickShuffleFrom(ctx context.Context, ids []string) (library.Tra
 func (f *Feeder) commitNextUp(ctx context.Context) {
 	pending, err := f.d.Requests.Pending(ctx)
 	if err != nil {
-		f.d.Logger.Error("commit next-up: pending read failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "commit next-up: pending read failed", "err", err)
 		return
 	}
 	if len(pending) > 0 {
 		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
-			f.d.Logger.Error("commit next-up: clear failed", "err", cerr)
+			f.d.Logger.ErrorContext(ctx, "commit next-up: clear failed", "err", cerr)
 		}
 		return
 	}
 	ids, err := f.d.Library.AllIDs(ctx)
 	if err != nil {
-		f.d.Logger.Error("commit next-up: library read failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "commit next-up: library read failed", "err", err)
 		return
 	}
 	if len(ids) == 0 {
@@ -191,7 +191,7 @@ func (f *Feeder) commitNextUp(ctx context.Context) {
 	}
 	track, ok, err := f.pickShuffleFrom(ctx, ids)
 	if err != nil {
-		f.d.Logger.Error("commit next-up: shuffle pick failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "commit next-up: shuffle pick failed", "err", err)
 		return
 	}
 	if !ok {
@@ -200,7 +200,7 @@ func (f *Feeder) commitNextUp(ctx context.Context) {
 	if serr := f.d.Sched.SetNextUp(ctx, schedule.NextUp{
 		YTID: track.YTID, Title: track.Title, Channel: track.Channel,
 	}); serr != nil {
-		f.d.Logger.Error("commit next-up: set failed", "err", serr)
+		f.d.Logger.ErrorContext(ctx, "commit next-up: set failed", "err", serr)
 	}
 }
 
@@ -254,7 +254,7 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 				// same ready request re-picked on every boundary() call —
 				// an unpaced spin inside the audio goroutine. Surfacing it
 				// as fatal lets Engine.Run's 5s poll pace the retry.
-				f.d.Logger.Error("mark request failed", "id", req.ID, "err", merr)
+				f.d.Logger.ErrorContext(ctx, "mark request failed", "id", req.ID, "err", merr)
 				return airItem{}, false, false, merr
 			}
 			return airItem{}, true, false, nil
@@ -285,9 +285,9 @@ func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, e
 // store errors are logged, not fatal — the session ends either way.
 func (f *Feeder) autoOffAir(ctx context.Context) error {
 	if _, err := f.d.Store.GoOffAir(ctx); err != nil {
-		f.d.Logger.Error("auto off-air persist failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "auto off-air persist failed", "err", err)
 	}
-	f.d.Logger.Info("auto off-air: library is empty")
+	f.d.Logger.InfoContext(ctx, "auto off-air: library is empty")
 	return nil
 }
 
@@ -317,7 +317,7 @@ type bootResumeEntry struct {
 func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	entry, found, err := f.d.Log.Latest(ctx)
 	if err != nil {
-		f.d.Logger.Error("boot resume: air log read failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "boot resume: air log read failed", "err", err)
 		return nil
 	}
 	if !found {
@@ -329,7 +329,7 @@ func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	}
 	track, ok, err := f.d.Library.Get(ctx, entry.YTID)
 	if err != nil {
-		f.d.Logger.Error("boot resume: library read failed", "err", err)
+		f.d.Logger.ErrorContext(ctx, "boot resume: library read failed", "err", err)
 		return nil
 	}
 	if !ok {
@@ -453,7 +453,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		if openSkip {
 			if item.requestID != "" {
 				if err := f.d.Requests.MarkFailed(ctx, item.requestID, "artifact failed to open"); err != nil {
-					f.d.Logger.Error("mark request failed", "id", item.requestID, "err", err)
+					f.d.Logger.ErrorContext(ctx, "mark request failed", "id", item.requestID, "err", err)
 				}
 			}
 			continue
@@ -477,14 +477,14 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				StartedAt: startedAt, DurationS: int(track.DurationS),
 				Source: item.source, RequestedByName: item.requestedByName, Reason: item.reason}
 			if err := f.d.Log.Append(ctx, entry); err != nil {
-				f.d.Logger.Error("air log append failed", "err", err)
+				f.d.Logger.ErrorContext(ctx, "air log append failed", "err", err)
 			}
 			trackStartSamples = samplesFed
 			// Mark the request aired only now: openTrack succeeded and the
 			// air-log entry is written, so this track genuinely aired.
 			if item.requestID != "" {
 				if err := f.d.Requests.MarkAired(ctx, item.requestID, entry.StartedAt); err != nil {
-					f.d.Logger.Error("mark request aired", "id", item.requestID, "err", err)
+					f.d.Logger.ErrorContext(ctx, "mark request aired", "id", item.requestID, "err", err)
 				}
 			}
 		}
@@ -524,7 +524,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			dir, sess = newDir, newSess
 
 			if crashRestarts > 3 {
-				f.d.Logger.Error("crash-resume attempts exhausted; skipping track",
+				f.d.Logger.ErrorContext(ctx, "crash-resume attempts exhausted; skipping track",
 					"yt_id", track.YTID, "restarts", crashRestarts-1)
 				break feedTrack
 			}
@@ -541,7 +541,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				return oerr
 			}
 			if openSkip {
-				f.d.Logger.Error("resume reopen failed; skipping track", "yt_id", track.YTID)
+				f.d.Logger.ErrorContext(ctx, "resume reopen failed; skipping track", "yt_id", track.YTID)
 				break feedTrack
 			}
 		}
@@ -599,13 +599,13 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS flo
 	path, ferr := f.d.Fetch(ctx, track.ArtifactID, tmp)
 	if ferr != nil {
 		_ = os.RemoveAll(tmp)
-		f.d.Logger.Error("artifact fetch failed; skipping track", "yt_id", track.YTID, "err", ferr)
+		f.d.Logger.ErrorContext(ctx, "artifact fetch failed; skipping track", "yt_id", track.YTID, "err", ferr)
 		return nil, nil, true, nil
 	}
 	rd, derr := f.d.Decoder.Open(ctx, path, Loudness{I: track.InputI, TP: track.InputTP, LRA: track.InputLRA}, offsetS)
 	if derr != nil {
 		_ = os.RemoveAll(tmp)
-		f.d.Logger.Error("decoder open failed; skipping track", "yt_id", track.YTID, "err", derr)
+		f.d.Logger.ErrorContext(ctx, "decoder open failed; skipping track", "yt_id", track.YTID, "err", derr)
 		return nil, nil, true, nil
 	}
 	return rd, func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }, false, nil
@@ -622,7 +622,7 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS flo
 func (f *Feeder) airClip(ctx context.Context, sess Session, clip Clip, samplesFed *int64, tick, republish <-chan time.Time) (stop, crashed bool, err error) {
 	rd, oerr := os.Open(clip.Path)
 	if oerr != nil {
-		f.d.Logger.Error("talk clip open failed; skipping break", "path", clip.Path, "err", oerr)
+		f.d.Logger.ErrorContext(ctx, "talk clip open failed; skipping break", "path", clip.Path, "err", oerr)
 		_ = os.Remove(clip.Path)
 		return false, false, nil
 	}

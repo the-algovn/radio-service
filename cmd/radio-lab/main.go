@@ -19,6 +19,7 @@ import (
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/the-algovn/gopkg/obs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -45,8 +46,23 @@ import (
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=<sha>".
+var version = "dev"
+
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	obsCfg, err := obs.ConfigFromEnv("radio-service", version)
+	if err != nil {
+		slog.Error("observability config", "err", err)
+		os.Exit(1)
+	}
+	shutdownObs, err := obs.Setup(context.Background(), obsCfg)
+	if err != nil {
+		slog.Error("observability setup", "err", err)
+		os.Exit(1)
+	}
+	logger := slog.Default()
+	defer func() { _ = shutdownObs(context.Background()) }()
+
 	if err := config.Load(); err != nil {
 		logger.Error("config load failed", "err", err)
 	}
@@ -55,26 +71,29 @@ func main() {
 
 	lis, err := net.Listen("tcp", config.Get("LISTEN_ADDR", ":9290"))
 	if err != nil {
-		logger.Error("listen failed", "err", err)
+		logger.ErrorContext(ctx, "listen failed", "err", err)
 		os.Exit(1)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(
+		grpc.StatsHandler(obs.ServerHandler()),
+		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor()),
+	)
 	dataDir := config.Get("LAB_DATA_DIR", "lab-data")
 	tmpDir := filepath.Join(dataDir, "tmp")
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		logger.Error("mkdir tmp failed", "err", err)
+		logger.ErrorContext(ctx, "mkdir tmp failed", "err", err)
 		os.Exit(1)
 	}
 
 	// Postgres ledger
 	pgURL := config.Get("PG_URL", "")
 	if pgURL == "" {
-		logger.Error("config", "err", "PG_URL is required")
+		logger.ErrorContext(ctx, "config", "err", "PG_URL is required")
 		os.Exit(1)
 	}
 	pool, err := pgxpool.New(ctx, pgURL)
 	if err != nil {
-		logger.Error("pg connect failed", "err", err)
+		logger.ErrorContext(ctx, "pg connect failed", "err", err)
 		os.Exit(1)
 	}
 	defer pool.Close()
@@ -98,7 +117,7 @@ func main() {
 		PublicUseSSL:   config.GetBool("MINIO_PUBLIC_USE_SSL", config.GetBool("MINIO_USE_SSL", false)),
 	})
 	if err != nil {
-		logger.Error("minio init failed", "err", err)
+		logger.ErrorContext(ctx, "minio init failed", "err", err)
 		os.Exit(1)
 	}
 	// Ensure the bucket exists, tolerating a brief MinIO startup race.
@@ -107,7 +126,7 @@ func main() {
 			break
 		}
 		if i >= 15 {
-			logger.Error("minio bucket ensure failed", "err", err)
+			logger.ErrorContext(ctx, "minio bucket ensure failed", "err", err)
 			os.Exit(1)
 		}
 		time.Sleep(time.Second)
@@ -129,7 +148,7 @@ func main() {
 	if k := config.Get("GEMINI_API_KEY", ""); k != "" {
 		m, err := brain.NewGemini(ctx, k, config.Get("GEMINI_MODEL", "gemini-2.5-flash"))
 		if err != nil {
-			logger.Error("config", "err", "gemini model init failed", "detail", err)
+			logger.ErrorContext(ctx, "config", "err", "gemini model init failed", "detail", err)
 			os.Exit(1)
 		}
 		models["gemini"] = m
@@ -138,7 +157,7 @@ func main() {
 	if k := config.Get("ANTHROPIC_API_KEY", ""); k != "" {
 		m, err := brain.NewClaude(ctx, k, config.Get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"))
 		if err != nil {
-			logger.Error("config", "err", "anthropic model init failed", "detail", err)
+			logger.ErrorContext(ctx, "config", "err", "anthropic model init failed", "detail", err)
 			os.Exit(1)
 		}
 		models["anthropic"] = m
@@ -166,30 +185,30 @@ func main() {
 	sched := schedule.NewPGStore(pool)
 	loc, err := time.LoadLocation("Asia/Ho_Chi_Minh")
 	if err != nil {
-		logger.Error("load station timezone failed", "err", err)
+		logger.ErrorContext(ctx, "load station timezone failed", "err", err)
 		os.Exit(1)
 	}
 	budget, err := strconv.ParseFloat(config.Get("RADIO_DAILY_BUDGET_USD", "1.0"), 64)
 	if err != nil {
-		logger.Error("config", "err", "RADIO_DAILY_BUDGET_USD is not a number", "raw", config.Get("RADIO_DAILY_BUDGET_USD", "1.0"))
+		logger.ErrorContext(ctx, "config", "err", "RADIO_DAILY_BUDGET_USD is not a number", "raw", config.Get("RADIO_DAILY_BUDGET_USD", "1.0"))
 		os.Exit(1)
 	}
 	hlsDir := config.Get("HLS_DIR", filepath.Join(dataDir, "hls"))
 	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
-		logger.Error("mkdir hls failed", "err", err)
+		logger.ErrorContext(ctx, "mkdir hls failed", "err", err)
 		os.Exit(1)
 	}
 	var producer live.Producer
 	if brokers := config.Get("KAFKA_BROKERS", ""); brokers != "" {
 		kp, err := live.NewKafkaProducer(strings.Split(brokers, ","))
 		if err != nil {
-			logger.Error("kafka producer init failed", "err", err)
+			logger.ErrorContext(ctx, "kafka producer init failed", "err", err)
 			os.Exit(1)
 		}
 		defer kp.Close()
 		producer = kp
 	} else {
-		logger.Warn("KAFKA_BROKERS not set; radio SSE feeds disabled")
+		logger.WarnContext(ctx, "KAFKA_BROKERS not set; radio SSE feeds disabled")
 	}
 	// airLog/listeners are hoisted so the feeder and the RadioService
 	// registration below share the same stores.
@@ -205,7 +224,7 @@ func main() {
 		// Startup sweep: clips are regenerable; orphans from a crash are junk.
 		_ = os.RemoveAll(djDir)
 		if err := os.MkdirAll(djDir, 0o755); err != nil {
-			logger.Error("mkdir dj failed", "err", err)
+			logger.ErrorContext(ctx, "mkdir dj failed", "err", err)
 			os.Exit(1)
 		}
 		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
@@ -220,7 +239,7 @@ func main() {
 			Clock: live.RealClock(), Location: loc, Logger: logger,
 		})
 		talk = dj
-		logger.Info("dj talk breaks enabled", "voice_fake", voiceFake, "model", defaultModel)
+		logger.InfoContext(ctx, "dj talk breaks enabled", "voice_fake", voiceFake, "model", defaultModel)
 	}
 
 	feeder := live.NewFeeder(live.FeederDeps{
@@ -234,13 +253,13 @@ func main() {
 	engine := live.NewEngine(feeder, logger)
 	go func() {
 		if err := engine.Run(ctx); err != nil {
-			logger.Error("engine exited", "err", err)
+			logger.ErrorContext(ctx, "engine exited", "err", err)
 		}
 	}()
 	hlsSrv := &http.Server{Addr: config.Get("HLS_ADDR", ":9291"), Handler: live.NewHLSHandler(feeder.SessionDir)}
 	go func() {
 		if err := hlsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("hls listener failed", "err", err)
+			logger.ErrorContext(ctx, "hls listener failed", "err", err)
 		}
 	}()
 	go func() {
@@ -258,7 +277,7 @@ func main() {
 	})
 	go func() {
 		if err := worker.Run(ctx); err != nil {
-			logger.Error("ingest worker exited", "err", err)
+			logger.ErrorContext(ctx, "ingest worker exited", "err", err)
 		}
 	}()
 
@@ -272,14 +291,14 @@ func main() {
 	})
 	go func() {
 		if err := prog.Run(ctx); err != nil {
-			logger.Error("programmer exited", "err", err)
+			logger.ErrorContext(ctx, "programmer exited", "err", err)
 		}
 	}()
 
 	if dj != nil {
 		go func() {
 			if err := dj.Run(ctx); err != nil {
-				logger.Error("director exited", "err", err)
+				logger.ErrorContext(ctx, "director exited", "err", err)
 			}
 		}()
 	}
@@ -307,9 +326,9 @@ func main() {
 		<-ctx.Done()
 		gs.GracefulStop()
 	}()
-	logger.Info("radio-lab listening", "grpc", ":9290")
+	logger.InfoContext(ctx, "radio-lab listening", "grpc", ":9290")
 	if err := gs.Serve(lis); err != nil {
-		logger.Error("serve failed", "err", err)
+		logger.ErrorContext(ctx, "serve failed", "err", err)
 		os.Exit(1)
 	}
 }

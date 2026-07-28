@@ -12,16 +12,30 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/the-algovn/gopkg/obs"
 	"github.com/the-algovn/radio-service/internal/migrate"
 )
+
+// version is stamped at build time with -ldflags "-X main.version=<sha>".
+var version = "dev"
 
 func main() {
 	down := flag.Bool("down", false, "reverse the most recently applied migration instead of applying pending ones")
 	forceDestructive := flag.Bool("force-destructive", false, "with -down, bypass the guard that refuses to reverse migration 001 (DROPS ledger_line); only for a throwaway/dev database")
 	flag.Parse()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+	obsCfg, err := obs.ConfigFromEnv("radio-lab-migrate", version)
+	if err != nil {
+		slog.Error("observability config", "err", err)
+		os.Exit(1)
+	}
+	shutdownObs, err := obs.Setup(context.Background(), obsCfg)
+	if err != nil {
+		slog.Error("observability setup", "err", err)
+		os.Exit(1)
+	}
+	logger := slog.Default()
+	defer func() { _ = shutdownObs(context.Background()) }()
 
 	url := os.Getenv("PG_URL")
 	if url == "" {
@@ -35,23 +49,23 @@ func main() {
 	if *down {
 		reversed, err := migrate.Down(ctx, url, *forceDestructive)
 		if err != nil {
-			logger.Error("migrate down failed", "err", err)
+			logger.ErrorContext(ctx, "migrate down failed", "err", err)
 			os.Exit(1)
 		}
-		logger.Info("migration reversed", "detail", reversed)
+		logger.InfoContext(ctx, "migration reversed", "detail", reversed)
 		return
 	}
 
 	applied, err := migrate.Up(ctx, url)
 	if err != nil {
-		logger.Error("migrate failed", "err", err)
+		logger.ErrorContext(ctx, "migrate failed", "err", err)
 		os.Exit(1)
 	}
 	if len(applied) == 0 {
-		logger.Info("no pending migrations")
+		logger.InfoContext(ctx, "no pending migrations")
 		return
 	}
 	for _, line := range applied {
-		logger.Info("migration applied", "detail", line)
+		logger.InfoContext(ctx, "migration applied", "detail", line)
 	}
 }

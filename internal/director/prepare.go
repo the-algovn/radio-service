@@ -55,19 +55,19 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 		entry, found, err := dr.d.AirLog.Latest(ctx)
 		if err != nil || !found {
 			if err != nil {
-				dr.d.Logger.Error("director: air log read failed", "err", err)
+				dr.d.Logger.ErrorContext(ctx, "director: air log read failed", "err", err)
 			}
 			return live.Clip{}, false // nothing airing → nothing to talk about
 		}
 		anchorYTID, anchorStartedAt = entry.YTID, entry.StartedAt
 		pers, err := persona.Load(dr.d.PersonaDir)
 		if err != nil {
-			dr.d.Logger.Error("director: persona load failed", "err", err)
+			dr.d.Logger.ErrorContext(ctx, "director: persona load failed", "err", err)
 			return live.Clip{}, false
 		}
 		briefJSON, err := json.Marshal(dr.buildBrief(ctx, entry, dj.MaxChars))
 		if err != nil {
-			dr.d.Logger.Error("director: brief marshal failed", "err", err)
+			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
 			return live.Clip{}, false
 		}
 		system, user := brain.BuildPrompts(pers+talkRules, string(briefJSON))
@@ -81,7 +81,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 
 	data, ext, err := dr.d.Voice.Synthesize(ctx, script, dj.VoiceID, dj.Rate)
 	if err != nil {
-		dr.d.Logger.Error("director: tts failed", "kind", kind, "err", err)
+		dr.d.Logger.ErrorContext(ctx, "director: tts failed", "kind", kind, "err", err)
 		return live.Clip{}, false
 	}
 	chars := utf8.RuneCountInString(script)
@@ -94,13 +94,13 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 		TS: time.Now(), Kind: "tts", Provider: provider, Label: "director:" + kind,
 		Chars: chars, CostUSD: cost,
 	}); lerr != nil {
-		dr.d.Logger.Error("director: ledger append failed", "err", lerr)
+		dr.d.Logger.ErrorContext(ctx, "director: ledger append failed", "err", lerr)
 	}
 
 	n := dr.seq.Add(1)
 	takePath := filepath.Join(dr.d.DataDir, fmt.Sprintf("take-%d.%s", n, ext))
 	if err := os.WriteFile(takePath, data, 0o644); err != nil {
-		dr.d.Logger.Error("director: take write failed", "err", err)
+		dr.d.Logger.ErrorContext(ctx, "director: take write failed", "err", err)
 		return live.Clip{}, false
 	}
 	defer func() { _ = os.Remove(takePath) }()
@@ -108,7 +108,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 	outPath := filepath.Join(dr.d.DataDir, fmt.Sprintf("clip-%d.pcm", n))
 	durS, err := dr.d.Render(ctx, takePath, outPath)
 	if err != nil {
-		dr.d.Logger.Error("director: render failed", "kind", kind, "err", err)
+		dr.d.Logger.ErrorContext(ctx, "director: render failed", "kind", kind, "err", err)
 		_ = os.Remove(outPath)
 		return live.Clip{}, false
 	}
@@ -116,7 +116,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 	if kind == live.ClipBacksell {
 		dr.pushRing(out.Summary, out.UsedPhrases)
 	}
-	dr.d.Logger.Info("talk clip prepared", "kind", kind, "duration_s", durS, "script", script)
+	dr.d.Logger.InfoContext(ctx, "talk clip prepared", "kind", kind, "duration_s", durS, "script", script)
 	return live.Clip{Path: outPath, DurationS: durS, Script: script, Kind: kind,
 		AnchorYTID: anchorYTID, AnchorStartedAt: anchorStartedAt}, true
 }
@@ -130,12 +130,12 @@ func (dr *Director) generateValid(ctx context.Context, system, user string, maxC
 	for attempt := 0; ; attempt++ {
 		raw, err := dr.d.Model.Generate(ctx, system, user, brain.ScriptSchema)
 		if err != nil {
-			dr.d.Logger.Error("director: model call failed", "err", err)
+			dr.d.Logger.ErrorContext(ctx, "director: model call failed", "err", err)
 			return brain.Output{}, false
 		}
 		out, perr := brain.ParseOutput(raw)
 		if perr != nil {
-			dr.d.Logger.Error("director: parse failed", "err", perr, "raw", string([]rune(raw)[:min(utf8.RuneCountInString(raw), 200)]))
+			dr.d.Logger.ErrorContext(ctx, "director: parse failed", "err", perr, "raw", string([]rune(raw)[:min(utf8.RuneCountInString(raw), 200)]))
 			return brain.Output{}, false
 		}
 		v := brain.Validate(out.Script, maxChars)
@@ -143,7 +143,7 @@ func (dr *Director) generateValid(ctx context.Context, system, user string, maxC
 			return out, true
 		}
 		if attempt > 0 {
-			dr.d.Logger.Warn("director: script invalid after retry; giving up", "violations", v)
+			dr.d.Logger.WarnContext(ctx, "director: script invalid after retry; giving up", "violations", v)
 			return brain.Output{}, false
 		}
 		user = user + "\n\nLỗi cần sửa (viết lại toàn bộ):\n- " + strings.Join(v, "\n- ")

@@ -58,7 +58,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) RunOnce(ctx context.Context) {
 	it, found, err := w.d.Requests.OldestApproved(ctx)
 	if err != nil {
-		w.d.Logger.Error("worker: read approved failed", "err", err)
+		w.d.Logger.ErrorContext(ctx, "worker: read approved failed", "err", err)
 		return
 	}
 	if !found {
@@ -66,9 +66,9 @@ func (w *Worker) RunOnce(ctx context.Context) {
 	}
 	if _, _, err := w.d.Acquire(ctx, it.YTID, it.Title, it.Channel); err != nil {
 		if errors.Is(err, ErrTooLong) {
-			w.d.Logger.Error("worker: acquire failed (too long)", "yt_id", it.YTID, "err", err)
+			w.d.Logger.ErrorContext(ctx, "worker: acquire failed (too long)", "yt_id", it.YTID, "err", err)
 			if ferr := w.d.Requests.MarkFailed(ctx, it.ID, reasonTooLong); ferr != nil {
-				w.d.Logger.Error("worker: mark failed failed", "id", it.ID, "err", ferr)
+				w.d.Logger.ErrorContext(ctx, "worker: mark failed failed", "id", it.ID, "err", ferr)
 				return
 			}
 			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
@@ -76,13 +76,13 @@ func (w *Worker) RunOnce(ctx context.Context) {
 		}
 		attempts, berr := w.d.Requests.BumpAttempts(ctx, it.ID, err.Error())
 		if berr != nil {
-			w.d.Logger.Error("worker: bump attempts failed", "id", it.ID, "err", berr)
+			w.d.Logger.ErrorContext(ctx, "worker: bump attempts failed", "id", it.ID, "err", berr)
 			return
 		}
-		w.d.Logger.Error("worker: acquire failed", "yt_id", it.YTID, "attempt", attempts, "err", err)
+		w.d.Logger.ErrorContext(ctx, "worker: acquire failed", "yt_id", it.YTID, "attempt", attempts, "err", err)
 		if attempts >= MaxAttempts {
 			if ferr := w.d.Requests.MarkFailed(ctx, it.ID, err.Error()); ferr != nil {
-				w.d.Logger.Error("worker: mark failed failed", "id", it.ID, "err", ferr)
+				w.d.Logger.ErrorContext(ctx, "worker: mark failed failed", "id", it.ID, "err", ferr)
 				return
 			}
 			live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
@@ -90,9 +90,9 @@ func (w *Worker) RunOnce(ctx context.Context) {
 		return
 	}
 	if err := w.d.Requests.MarkReady(ctx, it.ID); err != nil {
-		w.d.Logger.Error("worker: mark ready failed", "id", it.ID, "err", err)
+		w.d.Logger.ErrorContext(ctx, "worker: mark ready failed", "id", it.ID, "err", err)
 		return
 	}
-	w.d.Logger.Info("request ready", "yt_id", it.YTID, "source", it.Source)
+	w.d.Logger.InfoContext(ctx, "request ready", "yt_id", it.YTID, "source", it.Source)
 	live.PublishQueueSnapshot(ctx, w.d.Producer, w.d.Requests, w.d.Sched, w.d.Logger)
 }

@@ -156,11 +156,11 @@ func (p *Programmer) RunOnce(ctx context.Context) {
 	}
 	spent, err := p.d.Ledger.SpentSince(ctx, request.DayStart(p.d.Clock.Now(), p.d.Location))
 	if err != nil {
-		p.d.Logger.Error("programmer: spend read failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: spend read failed", "err", err)
 		return
 	}
 	if spent >= p.d.BudgetUSD {
-		p.d.Logger.Warn("programmer: daily budget reached; idling", "spent_usd", spent)
+		p.d.Logger.WarnContext(ctx, "programmer: daily budget reached; idling", "spent_usd", spent)
 		return
 	}
 	p.decide(ctx, len(pending))
@@ -189,19 +189,19 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 
 	pers, err := persona.Load(p.d.PersonaDir)
 	if err != nil {
-		p.d.Logger.Error("programmer: persona load failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: persona load failed", "err", err)
 		respinOnly()
 		return
 	}
 	brief, err := p.buildBrief(ctx)
 	if err != nil {
-		p.d.Logger.Error("programmer: brief failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: brief failed", "err", err)
 		respinOnly()
 		return
 	}
 	briefJSON, err := json.Marshal(brief)
 	if err != nil {
-		p.d.Logger.Error("programmer: brief marshal failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: brief marshal failed", "err", err)
 		respinOnly()
 		return
 	}
@@ -221,7 +221,7 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 	choiceBrief.Library.Sample = nil
 	choiceBriefJSON, err := json.Marshal(choiceBrief)
 	if err != nil {
-		p.d.Logger.Error("programmer: phase-2 brief marshal failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: phase-2 brief marshal failed", "err", err)
 		respinOnly()
 		return
 	}
@@ -247,24 +247,24 @@ func (p *Programmer) proposeAndResolve(ctx context.Context, pers, briefJSON stri
 	system, user := BuildIntentPrompts(pers, briefJSON)
 	raw, err := p.generate(ctx, "programmer:intent", system, user, brain.IntentSchema)
 	if err != nil {
-		p.d.Logger.Error("programmer: intent call failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: intent call failed", "err", err)
 		return nil, false
 	}
 	in, err := ParseIntent(raw)
 	if err != nil {
-		p.d.Logger.Error("programmer: intent parse failed", "err", err, "raw", clip(raw))
+		p.d.Logger.ErrorContext(ctx, "programmer: intent parse failed", "err", err, "raw", clip(raw))
 		return nil, false
 	}
 	if in.empty() {
-		p.d.Logger.Info("programmer: no intent this decision", "note", in.Note)
+		p.d.Logger.InfoContext(ctx, "programmer: no intent this decision", "note", in.Note)
 		return nil, true
 	}
 	pool, err := p.resolve(ctx, in)
 	if err != nil {
-		p.d.Logger.Error("programmer: resolve failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: resolve failed", "err", err)
 		return nil, false
 	}
-	p.d.Logger.Info("programmer: pool resolved", "note", in.Note, "candidates", len(pool))
+	p.d.Logger.InfoContext(ctx, "programmer: pool resolved", "note", in.Note, "candidates", len(pool))
 	return pool, true
 }
 
@@ -273,14 +273,14 @@ func (p *Programmer) proposeAndResolve(ctx context.Context, pers, briefJSON stri
 func (p *Programmer) chooseFrom(ctx context.Context, pers, briefJSON string, pool []Candidate, want int) []Choice {
 	poolJSON, err := json.Marshal(pool)
 	if err != nil {
-		p.d.Logger.Error("programmer: pool marshal failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: pool marshal failed", "err", err)
 		return nil
 	}
 	system, user := BuildChoosePrompts(pers, briefJSON, string(poolJSON), want)
 
 	raw, err := p.generate(ctx, "programmer:choose", system, user, brain.ChoiceSchema)
 	if err != nil {
-		p.d.Logger.Error("programmer: choose call failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: choose call failed", "err", err)
 		return nil
 	}
 	choices, perr := ParseChoice(raw, pool, want)
@@ -289,15 +289,15 @@ func (p *Programmer) chooseFrom(ctx context.Context, pers, briefJSON string, poo
 	}
 
 	// One repair turn, naming the violation.
-	p.d.Logger.Warn("programmer: choice invalid; repairing", "err", perr)
+	p.d.Logger.WarnContext(ctx, "programmer: choice invalid; repairing", "err", perr)
 	raw2, err := p.generate(ctx, "programmer:repair", system, RepairUser(user, raw, perr.Error()), brain.ChoiceSchema)
 	if err != nil {
-		p.d.Logger.Error("programmer: repair call failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: repair call failed", "err", err)
 		return nil
 	}
 	choices, perr = ParseChoice(raw2, pool, want)
 	if perr != nil {
-		p.d.Logger.Warn("programmer: choice still invalid after repair; falling back", "err", perr)
+		p.d.Logger.WarnContext(ctx, "programmer: choice still invalid after repair; falling back", "err", perr)
 		return nil
 	}
 	return choices
@@ -313,7 +313,7 @@ func (p *Programmer) generate(ctx context.Context, label, system, user string, s
 	if err == nil {
 		return raw, nil
 	}
-	p.d.Logger.Warn("programmer: model call failed; retrying once", "label", label, "err", err)
+	p.d.Logger.WarnContext(ctx, "programmer: model call failed; retrying once", "label", label, "err", err)
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -335,10 +335,10 @@ func (p *Programmer) enqueueChoice(ctx context.Context, c Choice) bool {
 		Source: request.SourceAI, YTID: cand.YTID, Title: cand.Title, Channel: cand.Channel,
 		DurationS: cand.DurationS, Status: status, Reason: c.Reason,
 	}); err != nil {
-		p.d.Logger.Error("programmer: enqueue failed", "err", err)
+		p.d.Logger.ErrorContext(ctx, "programmer: enqueue failed", "err", err)
 		return false
 	}
-	p.d.Logger.Info("ai pick queued", "yt_id", cand.YTID, "reason", c.Reason, "from", cand.Source)
+	p.d.Logger.InfoContext(ctx, "ai pick queued", "yt_id", cand.YTID, "reason", c.Reason, "from", cand.Source)
 	return true
 }
 
@@ -392,7 +392,7 @@ func (p *Programmer) respin(ctx context.Context) bool {
 	}); err != nil {
 		return false
 	}
-	p.d.Logger.Info("ai respin queued", "yt_id", tr.YTID)
+	p.d.Logger.InfoContext(ctx, "ai respin queued", "yt_id", tr.YTID)
 	return true
 }
 

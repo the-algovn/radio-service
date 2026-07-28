@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/the-algovn/gopkg/obs"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/the-algovn/radio-service/internal/request"
@@ -43,6 +44,7 @@ func NewKafkaProducer(brokers []string) (*KafkaProducer, error) {
 func (p *KafkaProducer) Publish(ctx context.Context, topic string, value []byte) error {
 	// Fixed key: single partition, strict ordering per topic.
 	rec := &kgo.Record{Topic: topic, Key: []byte("radio"), Value: value}
+	obs.InjectKafka(ctx, &rec.Headers)
 	return p.cl.ProduceSync(ctx, rec).FirstErr()
 }
 
@@ -125,16 +127,16 @@ func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, s
 	}
 	items, err := reqs.Pending(ctx)
 	if err != nil {
-		logger.Error("queue read for snapshot failed", "err", err)
+		logger.ErrorContext(ctx, "queue read for snapshot failed", "err", err)
 		return
 	}
 	var next *schedule.NextUp
 	if nu, ok, gerr := sched.GetNextUp(ctx); gerr != nil {
-		logger.Error("queue next-up read failed", "err", gerr)
+		logger.ErrorContext(ctx, "queue next-up read failed", "err", gerr)
 	} else if ok {
 		next = &nu
 	}
 	if err := p.Publish(ctx, TopicQueue, RequestQueuePayload(items, next)); err != nil {
-		logger.Error("queue snapshot publish failed", "err", err)
+		logger.ErrorContext(ctx, "queue snapshot publish failed", "err", err)
 	}
 }
