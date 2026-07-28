@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 )
 
@@ -59,15 +60,60 @@ func ParseOutput(raw string) (Output, error) {
 	return out, nil
 }
 
-// CostUSD prices a call. VERIFY against current provider pricing
-// (assumed: gemini flash $0.30/$2.50 per 1M in/out; claude haiku $1/$5).
+// CostUSD prices a call, in USD per 1M input/output tokens.
+//
+// This feeds the programmer's daily budget gate, so UNDER-pricing is the
+// dangerous direction: too low a number means `spent >= BudgetUSD` never trips
+// and spend runs unbounded. An unknown model therefore prices at the most
+// expensive tier we know of rather than at zero or at the cheapest — the cap
+// fires early instead of never.
+//
+// Anthropic prices confirmed 2026-07-28. Gemini's are still unverified.
 func CostUSD(modelName string, u Usage) float64 {
-	inPer1M, outPer1M := 0.0, 0.0
+	const (
+		maxKnownIn  = 10.00 // claude-fable-5
+		maxKnownOut = 50.00
+	)
+	var inPer1M, outPer1M float64
 	switch {
-	case strings.HasPrefix(modelName, "gemini"):
-		inPer1M, outPer1M = 0.30, 2.50
-	case strings.HasPrefix(modelName, "claude"):
+	case strings.HasPrefix(modelName, "gemini-2.5-flash"), strings.HasPrefix(modelName, "gemini-2.0-flash"):
+		inPer1M, outPer1M = 0.30, 2.50 // VERIFY against current Google pricing
+	case strings.HasPrefix(modelName, "claude-haiku"):
 		inPer1M, outPer1M = 1.00, 5.00
+	case strings.HasPrefix(modelName, "claude-sonnet"):
+		inPer1M, outPer1M = 3.00, 15.00
+	case strings.HasPrefix(modelName, "claude-opus"):
+		inPer1M, outPer1M = 5.00, 25.00
+	case strings.HasPrefix(modelName, "claude-fable"), strings.HasPrefix(modelName, "claude-mythos"):
+		inPer1M, outPer1M = 10.00, 50.00
+	case modelName == "fake":
+		return 0
+	default:
+		// Unknown model — price pessimistically so the budget gate still bites.
+		inPer1M, outPer1M = maxKnownIn, maxKnownOut
 	}
 	return inPer1M/1e6*float64(u.In) + outPer1M/1e6*float64(u.Out)
+}
+
+// errIfTruncated reports a response the provider cut short at its output cap.
+//
+// This restores a check the pre-Eino Anthropic client had and the migration
+// silently dropped: the old code returned an explicit
+// "output truncated at max_tokens" error. Without it a truncated reply is
+// partial JSON, which surfaces as an opaque unmarshal failure and — in the
+// programmer — burns a repair turn on a response that was never going to
+// parse. Naming the real cause is worth the few lines.
+//
+// Provider vocabularies differ ("max_tokens" vs "MAX_TOKENS"/"length"), so
+// match case-insensitively across the known spellings.
+func errIfTruncated(provider string, msg *schema.Message) error {
+	if msg.ResponseMeta == nil {
+		return nil
+	}
+	switch strings.ToLower(msg.ResponseMeta.FinishReason) {
+	case "max_tokens", "maxtokens", "length":
+		return fmt.Errorf("%s: output truncated at max_tokens (finish_reason=%q)",
+			provider, msg.ResponseMeta.FinishReason)
+	}
+	return nil
 }

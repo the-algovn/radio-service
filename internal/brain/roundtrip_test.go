@@ -95,3 +95,30 @@ func TestGeminiGenerateRoundTrip(t *testing.T) {
 	require.Contains(t, string(body), "USERPROMPT")
 	require.Contains(t, string(body), "used_phrases", "the response schema must be sent")
 }
+
+// The pre-Eino Anthropic client returned an explicit
+// "output truncated at max_tokens" error (592bfcd:internal/brain/anthropic.go:66);
+// the Eino migration silently dropped that check, and no test caught it because
+// every stub returns stop_reason "end_turn". A truncated reply is partial JSON,
+// so without this the failure surfaces as an opaque unmarshal error and the
+// programmer burns a repair turn on a response that could never parse.
+func TestClaudeGenerateRejectsTruncatedOutput(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			// Valid-looking but truncated JSON, exactly as a real cap-hit yields.
+			"content":     []any{map[string]any{"type": "text", "text": `{"script":"đêm nay tr`}},
+			"usage":       map[string]any{"input_tokens": 100, "output_tokens": 2048},
+			"stop_reason": "max_tokens",
+		})
+	}))
+	defer ts.Close()
+
+	m, err := newClaudeBase(context.Background(), "k", "claude-haiku-4-5-20251001", ts.URL)
+	require.NoError(t, err)
+
+	_, err = m.Generate(context.Background(), "s", "u", ScriptSchema)
+	require.Error(t, err, "a max_tokens truncation must be an error, not partial JSON")
+	require.Contains(t, err.Error(), "truncated",
+		"the error must name truncation so the cause is diagnosable in logs")
+}

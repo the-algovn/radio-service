@@ -60,5 +60,8 @@ func (m *claudeModel) Generate(ctx context.Context, system, user string, s *json
 	if msg == nil || msg.Content == "" {
 		return "", fmt.Errorf("anthropic: empty response")
 	}
+	if err := errIfTruncated("anthropic", msg); err != nil {
+		return "", err
+	}
 	return msg.Content, nil
 }

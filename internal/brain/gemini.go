@@ -53,5 +53,8 @@ func (m *geminiModel) Generate(ctx context.Context, system, user string, s *json
 	if msg == nil || msg.Content == "" {
 		return "", fmt.Errorf("gemini: empty response")
 	}
+	if err := errIfTruncated("gemini", msg); err != nil {
+		return "", err
+	}
 	return msg.Content, nil
 }
