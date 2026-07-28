@@ -775,6 +775,27 @@ func TestBoundaryConsumesNextUpEvenWhenLibraryGetErrors(t *testing.T) {
 	require.False(t, ok, "boundary must still clear a consumed next-up even when the Get reading it errors")
 }
 
+// planNext must not put the station off-air itself on an empty library —
+// only commitNext (via autoOffAir) may. Acting on it at plan time would be
+// the most visibly wrong of the three deferred writes: it would end the
+// broadcast while the current item is still airing, from a prefetch
+// goroutine that was only ever supposed to look ahead.
+func TestPlanNextDoesNotAutoOffAirOnEmptyLibrary(t *testing.T) {
+	store, lib, reqs := newFixture(t) // no tracks at all
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.True(t, p.stop)
+	require.True(t, p.emptyLib)
+
+	st, err := store.GetStation(ctx)
+	require.NoError(t, err)
+	require.True(t, st.OnAir, "planNext must not put the station off-air — only commitNext may")
+}
+
 // Empty library (the only remaining engine-side closure): auto off-air.
 func TestEmptyLibraryAutoOffAir(t *testing.T) {
 	store, lib, reqs := newFixture(t) // no tracks at all
