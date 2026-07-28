@@ -3,3 +3,4 @@ lab-data/
 .env.*
 /radio-lab
 .superpowers/
+.claude/
