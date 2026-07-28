@@ -90,6 +90,63 @@ func TestAllIDsSorted(t *testing.T) {
 	require.Equal(t, []string{"aa", "mm", "zz"}, ids)
 }
 
+// TestLibraryCuesRoundTripAndUnmeasuredSentinel exercises the SetCues /
+// MissingCues contract. Note this deliberately does NOT rely on Add to
+// invent -1 from Go's zero value (see the correction to task-3-brief.md
+// Step 4): the caller sets the unmeasured sentinel explicitly, exactly as
+// acquire.Acquire does on Cues' failure path.
+func TestLibraryCuesRoundTripAndUnmeasuredSentinel(t *testing.T) {
+	ctx := context.Background()
+	lib := NewMemLibrary()
+
+	require.NoError(t, lib.Add(ctx, Track{YTID: "a", ArtifactID: "art-a", DurationS: 60, TailSilenceS: -1, TailDecayS: -1}))
+
+	got, ok, err := lib.Get(ctx, "a")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, -1.0, got.TailSilenceS, "a track added with the unmeasured sentinel stays unmeasured")
+	require.Equal(t, -1.0, got.TailDecayS)
+
+	missing, err := lib.MissingCues(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, missing, 1)
+
+	require.NoError(t, lib.SetCues(ctx, "a", 1.25, 3.5))
+
+	got, _, err = lib.Get(ctx, "a")
+	require.NoError(t, err)
+	require.Equal(t, 1.25, got.TailSilenceS)
+	require.Equal(t, 3.5, got.TailDecayS)
+
+	missing, err = lib.MissingCues(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, missing, "a measured track is no longer backfill work")
+}
+
+// TestLibraryAddDoesNotDefaultGenuineZeroCues is the regression guard for
+// the correction to task-3-brief.md Step 4. A cold ending legitimately
+// measures 0/0 (see pcm.TestTailCuesColdEndingHasNoSilenceAndNoDecay in
+// internal/live/pcm) — that is "measured, no usable tail", a true and useful
+// fact, not an absence of measurement. If Add ever defaults a zero-value
+// Track's cues to -1, this test fails: got would read back -1/-1 instead of
+// 0/0, and the track would wrongly reappear in MissingCues.
+func TestLibraryAddDoesNotDefaultGenuineZeroCues(t *testing.T) {
+	ctx := context.Background()
+	lib := NewMemLibrary()
+
+	require.NoError(t, lib.Add(ctx, Track{YTID: "cold", ArtifactID: "art-cold", DurationS: 60, TailSilenceS: 0, TailDecayS: 0}))
+
+	got, ok, err := lib.Get(ctx, "cold")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 0.0, got.TailSilenceS, "a cold ending measures 0/0 and must survive Add untouched")
+	require.Equal(t, 0.0, got.TailDecayS)
+
+	missing, err := lib.MissingCues(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, missing, "0/0 is measured, not unmeasured — must not appear in backfill work")
+}
+
 func TestMemLibraryListPaginationAndCount(t *testing.T) {
 	ctx := context.Background()
 	l := NewMemLibrary()

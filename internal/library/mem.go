@@ -92,3 +92,34 @@ func (m *MemLibrary) Delete(_ context.Context, ytID string) (string, bool, error
 	delete(m.tracks, ytID)
 	return t.ArtifactID, true, nil
 }
+
+func (m *MemLibrary) SetCues(_ context.Context, ytID string, tailSilenceS, tailDecayS float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tracks[ytID]
+	if !ok {
+		return nil
+	}
+	t.TailSilenceS, t.TailDecayS = tailSilenceS, tailDecayS
+	m.tracks[ytID] = t
+	return nil
+}
+
+func (m *MemLibrary) MissingCues(_ context.Context, limit int) ([]Track, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Track, 0)
+	for _, t := range m.tracks {
+		if t.TailSilenceS < 0 {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AddedAt.After(out[j].AddedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}

@@ -13,7 +13,13 @@ import (
 type Track struct {
 	YTID, Title, Channel, ArtifactID     string
 	DurationS, InputI, InputTP, InputLRA float64
-	AddedAt                              time.Time
+	// TailSilenceS and TailDecayS are the overlap budget inputs (Plan 2).
+	// -1 means UNMEASURED and must not be treated as 0: a consumer reads
+	// unmeasured as "no budget", which is a butt-join, which is today's
+	// behaviour. Zero would claim the track was measured and found to have
+	// no usable tail.
+	TailSilenceS, TailDecayS float64
+	AddedAt                  time.Time
 }
 
 // Library stores and looks up cached tracks by yt_id. Implementations:
@@ -34,4 +40,10 @@ type Library interface {
 	// AllIDs returns every yt_id in the library, sorted ascending — the
 	// shuffle fallback and the programmer's brief sample read this.
 	AllIDs(ctx context.Context) ([]string, error)
+	// SetCues records a measured tail for an existing track. Used by the
+	// backfill; ingest sets the values through Add.
+	SetCues(ctx context.Context, ytID string, tailSilenceS, tailDecayS float64) error
+	// MissingCues returns up to limit tracks still carrying the unmeasured
+	// sentinel, newest first. limit<=0 defaults to 100.
+	MissingCues(ctx context.Context, limit int) ([]Track, error)
 }

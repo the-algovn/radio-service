@@ -30,6 +30,7 @@ func (l *PGLibrary) Add(ctx context.Context, t Track) error {
 	return db.New(l.pool).InsertTrack(ctx, db.InsertTrackParams{
 		YtID: t.YTID, Title: t.Title, Channel: t.Channel, DurationS: t.DurationS,
 		ArtifactID: t.ArtifactID, InputI: t.InputI, InputTp: t.InputTP, InputLra: t.InputLRA,
+		TailSilenceS: t.TailSilenceS, TailDecayS: t.TailDecayS,
 	})
 }
 
@@ -69,10 +70,32 @@ func (l *PGLibrary) AllIDs(ctx context.Context) ([]string, error) {
 	return db.New(l.pool).AllTrackIDs(ctx)
 }
 
+func (l *PGLibrary) SetCues(ctx context.Context, ytID string, tailSilenceS, tailDecayS float64) error {
+	return db.New(l.pool).UpdateTrackCues(ctx, db.UpdateTrackCuesParams{
+		YtID: ytID, TailSilenceS: tailSilenceS, TailDecayS: tailDecayS,
+	})
+}
+
+func (l *PGLibrary) MissingCues(ctx context.Context, limit int) ([]Track, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := db.New(l.pool).ListTracksMissingCues(ctx, int32(limit))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Track, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, trackFromRow(r))
+	}
+	return out, nil
+}
+
 func trackFromRow(r db.Track) Track {
 	return Track{
 		YTID: r.YtID, Title: r.Title, Channel: r.Channel, ArtifactID: r.ArtifactID,
 		DurationS: r.DurationS, InputI: r.InputI, InputTP: r.InputTp, InputLRA: r.InputLra,
+		TailSilenceS: r.TailSilenceS, TailDecayS: r.TailDecayS,
 		AddedAt: r.AddedAt,
 	}
 }
