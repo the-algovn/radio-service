@@ -324,6 +324,34 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	return p.item, p.skip, p.stop, nil
 }
 
+// planInline is planNext run ON THE FEED GOROUTINE, where a failed plan may
+// still commit the one consumption planNext could only report.
+//
+// planNext can fail with consumedNextUp set (a Library.Get error on the
+// next-up's own track). The pre-split code cleared the next-up unconditionally
+// before attempting that Get, so the clear has to happen here before the error
+// surfaces — otherwise the commitment outlives the failed plan and every
+// restart re-picks the same broken next-up forever instead of self-healing.
+//
+// A lookahead path must NOT call this: a plan that may still be abandoned has
+// to consume nothing. That asymmetry is why the clear lives here rather than
+// inside planNext.
+func (f *Feeder) planInline(ctx context.Context) (plan, error) {
+	p, err := f.planNext(ctx)
+	if err == nil {
+		return p, nil
+	}
+	if p.consumedNextUp {
+		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
+			// Matches the original's precedence: ClearNextUp ran first there,
+			// so its own failure was the only error a caller ever saw — the
+			// Get failure it would have masked never surfaced.
+			return plan{}, cerr
+		}
+	}
+	return plan{}, err
+}
+
 // boundary decides what airs next (spec §4.1): oldest ready listener
 // request → oldest ready AI pick → library no-repeat shuffle. skip=true
 // means the chosen item can't air (vanished track — already marked failed
@@ -333,23 +361,8 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 // exact behaviour it had before the plan/commit split — see planNext and
 // commitNext for why the split exists.
 func (f *Feeder) boundary(ctx context.Context) (item airItem, skip, stop bool, err error) {
-	p, err := f.planNext(ctx)
+	p, err := f.planInline(ctx)
 	if err != nil {
-		// planNext can fail with consumedNextUp set (a Library.Get error on
-		// the next-up's own track). The pre-split code cleared the next-up
-		// unconditionally before attempting that Get, so replicate the
-		// clear here before surfacing the error — otherwise the commitment
-		// outlives the failed plan and every restart re-picks the same
-		// broken next-up forever instead of self-healing.
-		if p.consumedNextUp {
-			if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
-				// Matches the original's precedence: ClearNextUp ran first
-				// there, so its own failure was the only error a caller
-				// ever saw — the Get failure it would have masked never
-				// surfaced.
-				return airItem{}, false, false, cerr
-			}
-		}
 		return airItem{}, false, false, err
 	}
 	return f.commitNext(ctx, p)
