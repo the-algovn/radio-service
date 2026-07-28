@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -490,7 +491,12 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			}
 			continue
 		}
-		set.add(cur.cleanup)
+		// Register with the session backstop and fold the deregistration into
+		// this item's own cleanup, so cur.cleanup stays the single owner and
+		// the set only ever holds readers that are genuinely still open.
+		closeReader := cur.cleanup
+		remove := set.add(closeReader)
+		cur.cleanup = func() { closeReader(); remove() }
 
 		// cur.startSamples anchors this track's aired offset: on a crash
 		// mid-track, offset = (samplesFed at crash - cur.startSamples)/48000.
@@ -578,7 +584,10 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				f.d.Logger.ErrorContext(ctx, "resume reopen failed; skipping track", "yt_id", cur.track.YTID)
 				break feedTrack
 			}
-			set.add(cur.cleanup)
+			// Same single-owner registration as the first open above.
+			closeReader := cur.cleanup
+			remove := set.add(closeReader)
+			cur.cleanup = func() { closeReader(); remove() }
 		}
 		if stopSession {
 			return nil
@@ -627,32 +636,68 @@ func once(fn func()) func() {
 	return func() { o.Do(fn) }
 }
 
-// openSet is the session-level backstop for every reader opened during one
+// openSet is the session-level backstop for every reader STILL OPEN during one
 // RunSession. Today one reader is open at a time and the per-item cleanup
 // covers it; once a transition holds two, an aborted transition would
 // otherwise leak an ffmpeg decode process and a temp dir holding a whole
 // audio artifact — permanently, because FFDecoder binds the process to
 // RunSession's ctx, which is Engine.Run's ctx, which is process lifetime.
+//
+// Registrations are dropped as the readers close. Append-only would be
+// simpler and wrong: a session lasts as long as the station stays on air —
+// weeks — so an entry per track open would accumulate for the whole run, each
+// one pinning a *decodeReader and through it an *exec.Cmd and that command's
+// stderr buffer. That is unbounded growth in a process designed never to
+// restart, so `add` hands back a remove and the item's cleanup calls it.
 type openSet struct {
-	mu      sync.Mutex
-	cleanup []func()
+	mu   sync.Mutex
+	next int64
+	open []openEntry // registration order, oldest first
 }
 
-func (o *openSet) add(fn func()) {
+// openEntry is one still-open reader. It carries an id because func values are
+// not comparable in Go, so a cleanup cannot be found in the slice by identity.
+type openEntry struct {
+	id      int64
+	cleanup func()
+}
+
+// add registers cleanup as an open reader and returns a remove that drops the
+// registration. The caller must fold remove into the cleanup it owns, so the
+// set sheds the entry the moment the reader closes — see the type comment for
+// what append-only would cost. remove is idempotent and safe to call after
+// closeAll has already run.
+func (o *openSet) add(cleanup func()) (remove func()) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.cleanup = append(o.cleanup, fn)
+	id := o.next
+	o.next++
+	o.open = append(o.open, openEntry{id: id, cleanup: cleanup})
+	return func() { o.removeID(id) }
 }
 
-// closeAll runs every registered cleanup, newest first. Each is `once`-wrapped,
-// so those already run at item end are no-ops.
+func (o *openSet) removeID(id int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for i, e := range o.open {
+		if e.id == id {
+			// slices.Delete, not a re-slice: it zeroes the vacated tail, so
+			// the backing array stops pinning the removed closure.
+			o.open = slices.Delete(o.open, i, i+1)
+			return
+		}
+	}
+}
+
+// closeAll runs every cleanup still registered, newest first. Each is
+// `once`-wrapped, so one that raced an item's own cleanup is a no-op.
 func (o *openSet) closeAll() {
 	o.mu.Lock()
-	fns := o.cleanup
-	o.cleanup = nil
+	entries := o.open
+	o.open = nil
 	o.mu.Unlock()
-	for i := len(fns) - 1; i >= 0; i-- {
-		fns[i]()
+	for i := len(entries) - 1; i >= 0; i-- {
+		entries[i].cleanup()
 	}
 }
 

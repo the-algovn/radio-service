@@ -955,6 +955,33 @@ func TestSessionClosesEveryReaderItOpened(t *testing.T) {
 		"every opened reader must be closed by the time RunSession returns")
 }
 
+// The session backstop must shed a reader's registration as soon as that
+// reader closes, while still closing anything genuinely left open at session
+// end. Append-only would pin one dead closure per track for the whole life of
+// a session, which on a 24/7 station is weeks.
+func TestOpenSetDropsClosedReadersAndClosesTheRest(t *testing.T) {
+	var set openSet
+	var closed []string
+
+	first := once(func() { closed = append(closed, "first") })
+	removeFirst := set.add(first)
+	first()
+	removeFirst()
+	require.Empty(t, set.open, "a closed reader must leave no registration behind")
+
+	// Readers still open at session end are closed by the backstop, newest first.
+	set.add(once(func() { closed = append(closed, "older") }))
+	set.add(once(func() { closed = append(closed, "newer") }))
+	set.closeAll()
+	require.Equal(t, []string{"first", "newer", "older"}, closed)
+
+	// A remove landing after closeAll (session end racing an item's own
+	// cleanup) is a no-op, and no cleanup ever runs twice.
+	require.NotPanics(t, removeFirst)
+	set.closeAll()
+	require.Equal(t, []string{"first", "newer", "older"}, closed)
+}
+
 // --- talk-break fakes and tests (v2) ---
 
 // fakeTalkSource hands out clips in order, but only after at least minFinished
