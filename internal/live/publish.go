@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/the-algovn/gopkg/obs"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/the-algovn/radio-service/internal/request"
@@ -43,6 +44,7 @@ func NewKafkaProducer(brokers []string) (*KafkaProducer, error) {
 func (p *KafkaProducer) Publish(ctx context.Context, topic string, value []byte) error {
 	// Fixed key: single partition, strict ordering per topic.
 	rec := &kgo.Record{Topic: topic, Key: []byte("radio"), Value: value}
+	obs.InjectKafka(ctx, &rec.Headers)
 	return p.cl.ProduceSync(ctx, rec).FirstErr()
 }
 
