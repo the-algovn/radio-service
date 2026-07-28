@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -214,6 +215,35 @@ func (d *offsetRecordingDecoder) lastOffset() float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.offset
+}
+
+// countingReadCloser records whether Close was called.
+type countingReadCloser struct {
+	io.Reader
+	closed *int32
+}
+
+func (c countingReadCloser) Close() error {
+	atomic.AddInt32(c.closed, 1)
+	return nil
+}
+
+// closeRecordingDecoder hands out readers and counts opens and closes, so a
+// test can assert that a session leaks no decoder. A leak here is permanent
+// in production: FFDecoder binds the ffmpeg process to RunSession's ctx,
+// which is Engine.Run's ctx, which is process lifetime.
+type closeRecordingDecoder struct {
+	bytesPerTrack int
+	opened        int32
+	closed        int32
+}
+
+func (d *closeRecordingDecoder) Open(_ context.Context, _ string, _ Loudness, _ float64) (io.ReadCloser, error) {
+	atomic.AddInt32(&d.opened, 1)
+	return countingReadCloser{
+		Reader: bytes.NewReader(make([]byte, d.bytesPerTrack)),
+		closed: &d.closed,
+	}, nil
 }
 
 type publishedFrame struct {
@@ -897,6 +927,32 @@ func TestStaleSkipClearedAtSessionStart(t *testing.T) {
 	require.Len(t, prod.byTopic(TopicNowPlaying), 1) // still the first track
 	cancel()
 	<-done
+}
+
+func TestSessionClosesEveryReaderItOpened(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	dec := &closeRecordingDecoder{bytesPerTrack: chunkBytes * 2}
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Decoder = dec })
+
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	// Air a few chunks, then take the station off air mid-track.
+	for range 3 {
+		clk.step(250 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := store.GoOffAir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 40))
+
+	opened := atomic.LoadInt32(&dec.opened)
+	require.Positive(t, opened, "the session should have opened at least one reader")
+	require.Equal(t, opened, atomic.LoadInt32(&dec.closed),
+		"every opened reader must be closed by the time RunSession returns")
 }
 
 // --- talk-break fakes and tests (v2) ---

@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -338,6 +339,27 @@ func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	return &bootResumeEntry{track: track, entry: entry, offsetS: offsetS}
 }
 
+// onAir is everything that describes the item currently being fed.
+//
+// It exists as one struct rather than six loop variables because a transition
+// flips which item is on air *inside* an airTrack call. With the variables
+// loose, the crash-resume block reads the OUTGOING item's track, entry and
+// start offset and reopens the wrong file past its EOF — no compile error, no
+// failing test, and the listener silently loses the song they are hearing.
+// One struct makes the flip a single assignment and crash-resume correct by
+// construction.
+type onAir struct {
+	track library.Track
+	entry Entry
+	item  airItem
+	// startSamples is samplesFed when this item's first byte was fed. Crash
+	// resume computes its offset from here, so it is fixed once per item and
+	// never per crash-restart.
+	startSamples int64
+	rd           io.ReadCloser
+	cleanup      func()
+}
+
 // RunSession broadcasts until off-air or ctx cancellation. An encoder crash
 // (Session.Done() delivering a non-nil error) does NOT end the session: a
 // new session dir + encoder is started in place and the current track is
@@ -380,6 +402,13 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	// the final dir left to reclaim.
 	defer func() { os.RemoveAll(dir) }()
 
+	// Every reader opened below is registered here as well as owned by the
+	// item that opened it, so no exit path can leave an ffmpeg decode process
+	// and its fetch temp dir behind. Each cleanup is `once`-wrapped, so the
+	// ones already run at item end are no-ops.
+	set := &openSet{}
+	defer set.closeAll()
+
 	sess, err := f.d.Encoder.Start(ctx, dir)
 	if err != nil {
 		return err
@@ -395,13 +424,14 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	republish := f.d.Clock.Tick(republishEvery)
 
 	for {
-		var track library.Track
-		var entry Entry
+		var cur onAir
+		// offsetS stays a local because it is per-OPEN, not per-item: the boot
+		// resume offset for the first open, then recomputed from
+		// cur.startSamples on every crash-resume reopen.
 		var offsetS float64
-		var item airItem
 		resumed := resume != nil
 		if resumed {
-			track, entry, offsetS = resume.track, resume.entry, resume.offsetS
+			cur.track, cur.entry, offsetS = resume.track, resume.entry, resume.offsetS
 			resume = nil
 		} else {
 			// Talk break first — take-if-ready, never waits (v2). Placed
@@ -438,29 +468,32 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			if skip { // vanished track: boundary already handled it
 				continue
 			}
-			item = it
-			track = item.track
+			cur.item = it
+			cur.track = cur.item.track
 		}
 
 		// Open the artifact + decoder BEFORE announcing anything: a track
 		// that fails to fetch/decode must never be logged or published as
 		// now-playing — it never aired, and doing so would poison the
 		// sample-clock resume anchor with a track nobody heard.
-		rd, cleanup, openSkip, err := f.openTrack(ctx, track, offsetS)
+		var openSkip bool
+		var err error
+		cur.rd, cur.cleanup, openSkip, err = f.openTrack(ctx, cur.track, offsetS)
 		if err != nil {
 			return err
 		}
 		if openSkip {
-			if item.requestID != "" {
-				if err := f.d.Requests.MarkFailed(ctx, item.requestID, "artifact failed to open"); err != nil {
-					f.d.Logger.ErrorContext(ctx, "mark request failed", "id", item.requestID, "err", err)
+			if cur.item.requestID != "" {
+				if err := f.d.Requests.MarkFailed(ctx, cur.item.requestID, "artifact failed to open"); err != nil {
+					f.d.Logger.ErrorContext(ctx, "mark request failed", "id", cur.item.requestID, "err", err)
 				}
 			}
 			continue
 		}
+		set.add(cur.cleanup)
 
-		// trackStartSamples anchors this track's aired offset: on a crash
-		// mid-track, offset = (samplesFed at crash - trackStartSamples)/48000.
+		// cur.startSamples anchors this track's aired offset: on a crash
+		// mid-track, offset = (samplesFed at crash - cur.startSamples)/48000.
 		// It is fixed once per track (not per crash-restart), so repeated
 		// crashes on the same track keep computing offset from the track's
 		// true start, not from the previous restart point. For a
@@ -468,39 +501,38 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// resumed offset (see above), and the track's true start is 0
 		// frames from f.anchor (== the entry's original StartedAt) — not
 		// the current samplesFed value.
-		var trackStartSamples int64
 		if resumed {
-			trackStartSamples = 0
+			cur.startSamples = 0
 		} else {
 			startedAt := f.startedAt(samplesFed)
-			entry = Entry{YTID: track.YTID, Title: track.Title, Artist: track.Channel,
-				StartedAt: startedAt, DurationS: int(track.DurationS),
-				Source: item.source, RequestedByName: item.requestedByName, Reason: item.reason}
-			if err := f.d.Log.Append(ctx, entry); err != nil {
+			cur.entry = Entry{YTID: cur.track.YTID, Title: cur.track.Title, Artist: cur.track.Channel,
+				StartedAt: startedAt, DurationS: int(cur.track.DurationS),
+				Source: cur.item.source, RequestedByName: cur.item.requestedByName, Reason: cur.item.reason}
+			if err := f.d.Log.Append(ctx, cur.entry); err != nil {
 				f.d.Logger.ErrorContext(ctx, "air log append failed", "err", err)
 			}
-			trackStartSamples = samplesFed
+			cur.startSamples = samplesFed
 			// Mark the request aired only now: openTrack succeeded and the
 			// air-log entry is written, so this track genuinely aired.
-			if item.requestID != "" {
-				if err := f.d.Requests.MarkAired(ctx, item.requestID, entry.StartedAt); err != nil {
-					f.d.Logger.ErrorContext(ctx, "mark request aired", "id", item.requestID, "err", err)
+			if cur.item.requestID != "" {
+				if err := f.d.Requests.MarkAired(ctx, cur.item.requestID, cur.entry.StartedAt); err != nil {
+					f.d.Logger.ErrorContext(ctx, "mark request aired", "id", cur.item.requestID, "err", err)
 				}
 			}
 		}
 		f.commitNextUp(ctx)
 		n, _ := f.d.Listeners.Count(ctx)
-		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(entry, n))
+		f.publish(ctx, TopicNowPlaying, NowPlayingPayload(cur.entry, n))
 		PublishQueueSnapshot(ctx, f.d.Producer, f.d.Requests, f.d.Sched, f.d.Logger)
 
 		crashRestarts := 0
 		stopSession := false
 	feedTrack:
 		for {
-			stopTrack, crashed, aerr := f.airTrack(ctx, sess, rd, &samplesFed, tick, republish,
-				func(n int) []byte { return NowPlayingPayload(entry, n) })
+			stopTrack, crashed, aerr := f.airTrack(ctx, sess, cur.rd, &samplesFed, tick, republish,
+				func(n int) []byte { return NowPlayingPayload(cur.entry, n) })
 			if !crashed {
-				cleanup()
+				cur.cleanup()
 				if aerr != nil {
 					return aerr
 				}
@@ -515,7 +547,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			// The crashed Session is deliberately not Stop()'d — the encoder process
 			// already exited, and os/exec's Wait (running in FFEncoder's goroutine)
 			// closes the parent's pipe FDs, so there is no leak.
-			cleanup()
+			cur.cleanup()
 			crashRestarts++
 			newDir, newSess, rerr := f.restartSession(ctx, dir)
 			if rerr != nil {
@@ -525,25 +557,28 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 
 			if crashRestarts > 3 {
 				f.d.Logger.ErrorContext(ctx, "crash-resume attempts exhausted; skipping track",
-					"yt_id", track.YTID, "restarts", crashRestarts-1)
+					"yt_id", cur.track.YTID, "restarts", crashRestarts-1)
 				break feedTrack
 			}
 
-			offsetS := float64(samplesFed-trackStartSamples) / 48000
-			// Assignment, not `:=` — rd/cleanup/openSkip are the SAME
-			// variables read at the top of this loop and at the end of the
-			// outer per-track block; `:=` here would shadow them inside
-			// just this iteration's block and the reopened reader would
-			// never actually be fed (classic for-loop redeclaration trap).
+			offsetS := float64(samplesFed-cur.startSamples) / 48000
+			// Assignment, not `:=` — cur.rd/cur.cleanup are the SAME fields
+			// read at the top of this loop and at the end of the outer
+			// per-track block, and openSkip is the same variable; `:=` here
+			// would shadow them inside just this iteration's block and the
+			// reopened reader would never actually be fed (classic for-loop
+			// redeclaration trap). Routing rd/cleanup through cur makes that
+			// trap structurally impossible for them; oerr still needs the care.
 			var oerr error
-			rd, cleanup, openSkip, oerr = f.openTrack(ctx, track, offsetS)
+			cur.rd, cur.cleanup, openSkip, oerr = f.openTrack(ctx, cur.track, offsetS)
 			if oerr != nil {
 				return oerr
 			}
 			if openSkip {
-				f.d.Logger.ErrorContext(ctx, "resume reopen failed; skipping track", "yt_id", track.YTID)
+				f.d.Logger.ErrorContext(ctx, "resume reopen failed; skipping track", "yt_id", cur.track.YTID)
 				break feedTrack
 			}
+			set.add(cur.cleanup)
 		}
 		if stopSession {
 			return nil
@@ -554,9 +589,9 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// here (airClip's branch continues the loop above); failed-open
 		// tracks continue before this point and were never announced.
 		if f.d.Talk != nil {
-			f.d.Talk.TrackFinished(entry)
+			f.d.Talk.TrackFinished(cur.entry)
 		}
-		lastFinished = entry
+		lastFinished = cur.entry
 		awaitMusic = false // a music item just aired — the seam guard resets
 	}
 }
@@ -581,6 +616,44 @@ func (f *Feeder) restartSession(ctx context.Context, oldDir string) (dir string,
 	f.sessionDir.Store(dir)
 	_ = os.RemoveAll(oldDir)
 	return dir, sess, nil
+}
+
+// once wraps a cleanup so it runs at most once. Item cleanup is called at the
+// item's end AND by the session-end backstop, and once a transition can abort
+// mid-item there is no single place that reliably owns the call — so the
+// cleanup itself has to tolerate being invoked twice.
+func once(fn func()) func() {
+	var o sync.Once
+	return func() { o.Do(fn) }
+}
+
+// openSet is the session-level backstop for every reader opened during one
+// RunSession. Today one reader is open at a time and the per-item cleanup
+// covers it; once a transition holds two, an aborted transition would
+// otherwise leak an ffmpeg decode process and a temp dir holding a whole
+// audio artifact — permanently, because FFDecoder binds the process to
+// RunSession's ctx, which is Engine.Run's ctx, which is process lifetime.
+type openSet struct {
+	mu      sync.Mutex
+	cleanup []func()
+}
+
+func (o *openSet) add(fn func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cleanup = append(o.cleanup, fn)
+}
+
+// closeAll runs every registered cleanup, newest first. Each is `once`-wrapped,
+// so those already run at item end are no-ops.
+func (o *openSet) closeAll() {
+	o.mu.Lock()
+	fns := o.cleanup
+	o.cleanup = nil
+	o.mu.Unlock()
+	for i := len(fns) - 1; i >= 0; i-- {
+		fns[i]()
+	}
 }
 
 // openTrack fetches the artifact and opens the decoder for track at offsetS
@@ -608,7 +681,7 @@ func (f *Feeder) openTrack(ctx context.Context, track library.Track, offsetS flo
 		f.d.Logger.ErrorContext(ctx, "decoder open failed; skipping track", "yt_id", track.YTID, "err", derr)
 		return nil, nil, true, nil
 	}
-	return rd, func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }, false, nil
+	return rd, once(func() { _ = rd.Close(); _ = os.RemoveAll(tmp) }), false, nil
 }
 
 // airClip airs one pre-rendered talk clip: a raw s16le/48kHz/stereo file fed
