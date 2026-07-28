@@ -1165,11 +1165,121 @@ func TestPrefetchOpensBeforeTheBoundary(t *testing.T) {
 		"the second item's fetch must start while the first is still being fed, not at its EOF (%d bytes in)", trackBytes)
 }
 
-// Every way a lookahead can fail degrades to opening inline at the boundary —
-// the property the whole change rests on. A fetch that fails on the lookahead
-// must not end the session; the feeder retries it on the feed goroutine and
-// takes the pre-existing skip path only if that fails too.
-func TestPrefetchErrorFallsBackToInlineOpen(t *testing.T) {
+// A lookahead that fails to PLAN must consume nothing. planNext reports a
+// pending next-up consumption alongside its error so that the feed goroutine
+// can commit it (see planInline), but a lookahead may still be abandoned — by
+// going off air, by a ctx cancellation, by the session ending — and an
+// abandoned lookahead that had already thrown the commitment away would leave
+// the station having skipped a track nothing ever aired.
+//
+// This pins startPrefetch calling planNext rather than planInline. Swapping the
+// two is exactly the "consistency cleanup" a future maintainer reaches for, and
+// nothing else in the suite notices.
+func TestPrefetchDoesNotConsumeTheNextUpWhenPlanningFails(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, failingGetLibrary{lib}, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	pf := f.startPrefetch(ctx)
+	<-pf.done
+
+	require.ErrorIs(t, pf.err, errLibraryGetBroken)
+	require.Nil(t, pf.rd, "a plan that failed must not have opened anything")
+
+	got, ok, err := f.d.Sched.GetNextUp(ctx)
+	require.NoError(t, err)
+	require.True(t, ok, "the lookahead must not consume the next-up — only the feed goroutine may")
+	require.Equal(t, "t1", got.YTID)
+}
+
+// getFailingAfterLibrary wraps a library.Library so Get succeeds n times and
+// then fails forever. A library that fails from its very first Get never gets
+// a track on air at all, so it can only ever exercise the FIRST boundary —
+// this is what makes the lookahead's error arm reachable from a full
+// RunSession, which is where the zero-plan trap lives.
+type getFailingAfterLibrary struct {
+	library.Library
+	mu   sync.Mutex
+	left int
+}
+
+func (l *getFailingAfterLibrary) Get(ctx context.Context, ytID string) (library.Track, bool, error) {
+	l.mu.Lock()
+	if l.left <= 0 {
+		l.mu.Unlock()
+		return library.Track{}, false, errLibraryGetBroken
+	}
+	l.left--
+	l.mu.Unlock()
+	return l.Library.Get(ctx, ytID)
+}
+
+// A plan that failed must never be aired. planNext returns a ZERO plan
+// alongside its errors, and commitNext turns that into an empty airItem with
+// neither skip nor stop set — and, worse, overwrites the error with nil. Commit
+// it and the feeder airs a track with a blank YTID and no title, air-logs it,
+// and publishes it as now-playing, poisoning the sample-clock resume anchor
+// with something nobody heard. Only the error survives to end the session.
+//
+// The library here succeeds exactly twice — the first boundary's shuffle pick
+// and commitNextUp's next-up pick — so the very next Get, the lookahead's
+// read of that committed next-up, fails, and so does the inline re-plan that
+// follows it. That is the only way to reach takePrefetch's error arm from a
+// running session.
+func TestFailedPlanIsNeverAiredAsATrack(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	log := NewMemAirLog()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) {
+			d.Library = &getFailingAfterLibrary{Library: lib, left: 2}
+			d.Log = log
+		})
+
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(context.Background()) }()
+
+	runErr := drive(t, clk, done, 40)
+	require.ErrorIs(t, runErr, errLibraryGetBroken,
+		"a plan that could not be made must end the session with its error")
+
+	latest, ok, err := log.Latest(context.Background())
+	require.NoError(t, err)
+	require.True(t, ok, "the first track should still have aired before the library broke")
+	require.NotEmpty(t, latest.YTID,
+		"a failed plan must never reach commitNext: an empty airItem airs as a blank track")
+}
+
+// takePrefetch's error arm: a lookahead that failed hands back no reader and a
+// freshly planned plan, so the caller opens inline. This is the fallback the
+// whole change rests on, and it is the one arm a RunSession-level test cannot
+// reach without a library that fails partway through.
+func TestTakePrefetchPlansInlineAfterAFailedLookahead(t *testing.T) {
+	store, lib, reqs := newFixture(t, "t1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	ctx := context.Background()
+	require.NoError(t, f.d.Sched.SetNextUp(ctx, schedule.NextUp{YTID: "t1", Title: "T1"}))
+
+	finished := make(chan struct{})
+	close(finished)
+	failed := &prefetch{done: finished, err: errLibraryGetBroken}
+
+	p, rd, cleanup, err := f.takePrefetch(ctx, failed)
+	require.NoError(t, err, "a failed lookahead is not a session-ending error")
+	require.Nil(t, rd, "a failed lookahead must hand back no reader")
+	require.Nil(t, cleanup)
+	require.Equal(t, "t1", p.item.track.YTID, "the caller must get a freshly planned item to open inline")
+	require.True(t, p.consumedNextUp, "the inline re-plan owns the consumption the lookahead left alone")
+}
+
+// A lookahead whose OPEN fails (as opposed to its plan — see the two tests
+// above) reports "opened nothing" rather than an error, so the boundary commits
+// the plan and retries the open on the feed goroutine, where the pre-existing
+// mark-failed-and-skip path lives. Either way the session must not end.
+func TestPrefetchOpenSkipFallsBackToInlineOpen(t *testing.T) {
 	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	var calls int32
