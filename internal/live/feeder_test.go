@@ -1165,6 +1165,72 @@ func TestPrefetchOpensBeforeTheBoundary(t *testing.T) {
 		"the second item's fetch must start while the first is still being fed, not at its EOF (%d bytes in)", trackBytes)
 }
 
+// The lookahead moves WHEN THE FETCH HAPPENS, never when the decision is made.
+// A listener request whose download lands mid-item must still get the very next
+// slot, exactly as it did before the lookahead existed.
+//
+// The window is real and roughly a third of a track wide: the request is
+// `approved` when item N starts, so commitNextUp sees it pending and clears the
+// next-up, and the lookahead — planning at N's announce — finds no next-up and
+// no READY request and falls through to the shuffle bed. The acquire worker
+// marks it ready while N is still airing. Trust the lookahead's plan and the
+// stale shuffle pick airs; re-plan at the seam and the request airs.
+func TestRequestReadyMidItemStillAirsNext(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b", "req")
+	ctx := context.Background()
+	req, err := reqs.Create(ctx, request.Item{Source: request.SourceListener,
+		RequestedBy: "u1", DisplayName: "Ngọc", YTID: "req", Title: "t-req", Channel: "c-req",
+		DurationS: 60, Status: request.StatusApproved}) // still downloading
+	require.NoError(t, err)
+
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	dec := &closeRecordingDecoder{bytesPerTrack: chunkBytes * 2}
+	// The lookahead's fetch is the second one, and it runs after its plan is
+	// fixed — so this is the instant at which marking the request ready is
+	// guaranteed to be too late for the lookahead to have seen it.
+	planned := make(chan struct{})
+	var fetches int32
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) {
+			d.Decoder = dec
+			d.Fetch = func(_ context.Context, id, _ string) (string, error) {
+				if atomic.AddInt32(&fetches, 1) == 2 {
+					close(planned)
+				}
+				return "/fake/" + id, nil
+			}
+		})
+
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case <-planned:
+		case <-time.After(2 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for the lookahead to plan and fetch")
+			}
+			clk.step(250 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	// The artifact just finished downloading, mid-item.
+	require.NoError(t, reqs.MarkReady(ctx, req.ID))
+
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2)
+	_, err = store.GoOffAir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, drive(t, clk, done, 60))
+
+	require.Contains(t, prod.byTopic(TopicNowPlaying)[1], `"title":"t-req"`,
+		"a request that became ready mid-item must still air at the next boundary")
+	require.Equal(t, atomic.LoadInt32(&dec.opened), atomic.LoadInt32(&dec.closed),
+		"the superseded lookahead's reader must be closed, not stranded")
+}
+
 // A lookahead that fails to PLAN must consume nothing. planNext reports a
 // pending next-up consumption alongside its error so that the feed goroutine
 // can commit it (see planInline), but a lookahead may still be abandoned — by

@@ -434,10 +434,22 @@ func (f *Feeder) startPrefetch(ctx context.Context) *prefetch {
 	return pf
 }
 
-// takePrefetch waits for an in-flight lookahead and returns what it produced.
-// A nil prefetch, one that failed, or one whose plan opened nothing all yield
-// a nil reader, which tells the caller to open inline — exactly the
-// pre-prefetch behaviour, so every failure path degrades to today's stream.
+// takePrefetch produces the boundary's decision, reusing an in-flight
+// lookahead's already-open reader when it is still the right one.
+//
+// The DECISION is always made here, at the seam, from fresh reads — the
+// lookahead moves only the fetch. That is not a detail: a lookahead plans a
+// whole item plus any talk break early, and a listener request that finishes
+// downloading in that window would lose its slot to the stale pick if the
+// lookahead's plan were simply trusted. So the plan is re-made inline and the
+// prefetched reader is kept only when it opened the same track the fresh plan
+// chose; otherwise it is closed and the caller opens inline. Wasting a fetch
+// exactly when the pick changed is the same "degrade to today's stream"
+// fallback every other failure here takes.
+//
+// The re-plan uses planInline, never planNext: it runs on the feed goroutine
+// and is the call that must commit a broken next-up's consumption so the
+// station self-heals rather than wedging on it forever.
 //
 // It waits unconditionally rather than racing ctx.Done. The prefetch goroutine
 // is the sole owner of any reader it has opened until this call hands it over,
@@ -447,17 +459,30 @@ func (f *Feeder) startPrefetch(ctx context.Context) *prefetch {
 // stall the inline open cost before it, and planNext/openTrack both take ctx,
 // so a cancelled session unblocks this promptly.
 func (f *Feeder) takePrefetch(ctx context.Context, pf *prefetch) (plan, io.ReadCloser, func(), error) {
-	if pf == nil {
-		p, err := f.planInline(ctx)
+	if pf != nil {
+		<-pf.done
+		if pf.err != nil {
+			f.d.Logger.ErrorContext(ctx, "prefetch failed; planning inline", "err", pf.err)
+		}
+	}
+	p, err := f.planInline(ctx)
+	if pf == nil || pf.rd == nil {
+		return p, nil, nil, err // nothing was opened ahead; open inline
+	}
+	// The reader is the lookahead's alone until it is returned here — it was
+	// never registered with the session's openSet, which only happens when the
+	// boundary adopts it — so discarding it means closing it right here.
+	if err != nil || p.skip || p.stop || p.item.track.YTID != pf.p.item.track.YTID {
+		f.d.Logger.InfoContext(ctx, "lookahead superseded; opening the new pick inline",
+			"prefetched", pf.p.item.track.YTID, "chosen", p.item.track.YTID)
+		pf.cleanup()
 		return p, nil, nil, err
 	}
-	<-pf.done
-	if pf.err != nil {
-		f.d.Logger.ErrorContext(ctx, "prefetch failed; planning inline", "err", pf.err)
-		p, err := f.planInline(ctx)
-		return p, nil, nil, err
-	}
-	return pf.p, pf.rd, pf.cleanup, nil
+	// Same track — but p, not pf.p, is what gets committed and aired: the fresh
+	// plan carries this item's real provenance (a request id, source and reason
+	// the lookahead's shuffle pick would not have had) and the flags commitNext
+	// must act on.
+	return p, pf.rd, pf.cleanup, nil
 }
 
 // autoOffAir persists off-air (engine-side closure) and reports the sentinel;
