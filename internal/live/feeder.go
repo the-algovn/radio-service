@@ -40,7 +40,7 @@ func RealClock() Clock { return realClock{} }
 
 type FeederDeps struct {
 	Store     station.Store
-	Requests  request.Store  // the play queue; boundary priority 1–2
+	Requests  request.Store  // the play queue; planNext priority 1–2
 	Sched     schedule.Store // committed next-up (design 2026-07-23)
 	Library   library.Library
 	Log       AirLog
@@ -115,7 +115,7 @@ func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
 	}
 }
 
-// airItem is boundary's pick: the library track to air and, when it came
+// airItem is planNext's pick: the library track to air and, when it came
 // from the request queue, the request id to mark aired/failed plus its
 // provenance (copied onto the air-log Entry; empty for shuffle picks).
 type airItem struct {
@@ -170,7 +170,7 @@ func (f *Feeder) pickShuffleFrom(ctx context.Context, ids []string) (library.Tra
 // track goes active, if the request queue is empty, pin a shuffle track as
 // "next up"; otherwise pending requests already cover the slot, so clear any
 // stale commitment. Every failure is logged and swallowed — a missing
-// next-up only means boundary falls back to its own lazy shuffle.
+// next-up only means planNext falls back to its own lazy shuffle.
 func (f *Feeder) commitNextUp(ctx context.Context) {
 	pending, err := f.d.Requests.Pending(ctx)
 	if err != nil {
@@ -189,7 +189,7 @@ func (f *Feeder) commitNextUp(ctx context.Context) {
 		return
 	}
 	if len(ids) == 0 {
-		return // empty library — nothing to commit; boundary handles off-air
+		return // empty library — nothing to commit; commitNext handles off-air
 	}
 	track, ok, err := f.pickShuffleFrom(ctx, ids)
 	if err != nil {
@@ -255,7 +255,7 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 			// planNext cannot clear it itself — the lookahead path must
 			// never commit a consumption it might still abandon — so it
 			// reports the pending consumption via consumedNextUp alongside
-			// the error; boundary() commits it before propagating, while the
+			// the error; planInline commits it before propagating, while the
 			// lookahead path discards the whole plan on any error.
 			return plan{consumedNextUp: true}, gerr
 		}
@@ -298,10 +298,11 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 	return plan{item: airItem{track: track}}, nil
 }
 
-// commitNext applies a plan's writes and returns boundary()'s historical
-// tuple. It runs on the feed goroutine at the boundary, never on the
-// lookahead path, and keeps today's fatality: a MarkFailed store error ends
-// the session rather than leaving the same request re-picked forever.
+// commitNext applies a plan's writes and returns the tuple the seam has always
+// handed RunSession. It runs on the feed goroutine, paired with planInline and
+// never on the lookahead path, and keeps today's fatality: a MarkFailed store
+// error ends the session rather than leaving the same request re-picked
+// forever.
 func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, error) {
 	if p.consumedNextUp {
 		if err := f.d.Sched.ClearNextUp(ctx); err != nil {
@@ -311,7 +312,7 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	if p.failRequestID != "" {
 		if err := f.d.Requests.MarkFailed(ctx, p.failRequestID, "track vanished from library"); err != nil {
 			// A persistently-failing store would otherwise leave this same
-			// ready request re-picked on every boundary() call — an unpaced
+			// ready request re-picked at every seam — an unpaced
 			// spin inside the audio goroutine. Surfacing it as fatal lets
 			// Engine.Run's 5s poll pace the retry.
 			f.d.Logger.ErrorContext(ctx, "mark request failed", "id", p.failRequestID, "err", err)
@@ -495,8 +496,8 @@ type bootResumeEntry struct {
 // engine consumes the request queue and the shuffle bed only, so nothing
 // else gates what airs. Every failure
 // mode here (log/library errors or an expired entry) is treated as "no
-// resume" rather than fatal — RunSession's first real boundary() call right
-// after this hits the same store/library and will surface any persistent
+// resume" rather than fatal — RunSession's first real plan right after this
+// hits the same store/library and will surface any persistent
 // problem through its own (fatal) error path.
 func (f *Feeder) findBootResume(ctx context.Context) *bootResumeEntry {
 	entry, found, err := f.d.Log.Latest(ctx)

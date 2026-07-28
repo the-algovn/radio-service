@@ -72,6 +72,13 @@ func (f *fakeClock) step(d time.Duration) {
 // resulting chunk, so a test's step count equals the chunks actually fed.
 // Returns false when no write arrives before the deadline, which is how a
 // test observes "the item ended on this tick" rather than hanging.
+//
+// That equivalence holds ONLY for a test that pumps every chunk from the very
+// first one and never mixes in a bare clk.step. s.writes is a buffered channel
+// (cap 1024) that fakeSession.Write sends to without blocking, so every chunk
+// fed by a bare step leaves a token behind, and a later pumpChunk can consume
+// one of those stale tokens and report true having observed no new write. A
+// test that needs to mix the two must drain s.writes before it starts pumping.
 func pumpChunk(t *testing.T, clk *fakeClock, s *fakeSession) bool {
 	t.Helper()
 	clk.step(250 * time.Millisecond)
@@ -236,6 +243,9 @@ func (d *offsetRecordingDecoder) Open(ctx context.Context, path string, l Loudne
 }
 
 // offsetFor reports the offset this artifact was most recently opened at.
+// Last-write-wins per path, so a test that lets the shuffle bed come back
+// round to the artifact it is asserting on would see that later open's offset
+// instead. Every current caller ends its session before that can happen.
 func (d *offsetRecordingDecoder) offsetFor(path string) float64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -663,7 +673,7 @@ var errMarkFailedBroken = errors.New("store: write failed")
 
 // failingMarkFailedStore wraps request.MemStore so MarkFailed always errors,
 // simulating a persistently-failing store (reads OK, writes failing). Used
-// to prove boundary()'s vanished-request branch surfaces a MarkFailed
+// to prove commitNext's vanished-request branch surfaces a MarkFailed
 // failure as fatal instead of silently looping (skip=true would let
 // RunSession re-pick the same ready, still-unmarked request on every
 // iteration with no pacing — a hot spin inside the audio goroutine).
@@ -1672,7 +1682,7 @@ func TestTalkClipCrashSkipsRemainder(t *testing.T) {
 // TestAtMostOneTalkBreakPerSeam covers the IMPORTANT fix: at most one talk
 // break per seam. A talk source with two clips ready up-front (minFinished
 // left at its zero value, so nothing gates Take) must NOT air them
-// back-to-back — the feeder's awaitMusic guard forces a boundary() pick
+// back-to-back — the feeder's awaitMusic guard forces a music pick
 // between them, so the now-playing frames strictly alternate dj/track/dj.
 func TestAtMostOneTalkBreakPerSeam(t *testing.T) {
 	store, lib, reqs := newFixture(t, "a")
