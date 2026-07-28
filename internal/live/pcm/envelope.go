@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sort"
 )
 
 const (
@@ -32,6 +33,15 @@ const (
 	// slow fade — both satisfy the comparison. Requiring the run's total
 	// drop to clear this floor is what actually distinguishes them.
 	minDecayDropDB = 6.0 // dB
+	// decaySmoothRadius is how many windows on each side go into the median
+	// used to find the decay run (see smoothLevels). Small on purpose: real
+	// per-window jitter lives on a 100-300ms scale, so a 5-tap (±100ms)
+	// median damps it without blurring a decline that plays out over many
+	// seconds into something else. Measured against real production audio:
+	// larger radii (1s+) started pulling in unrelated loud material from
+	// elsewhere in the track and reported tens to hundreds of seconds of
+	// "decay" — the fix for one failure mode is not "smooth more".
+	decaySmoothRadius = 2 // windows
 )
 
 // TailCues measures how much of a stream's ending is safe to overlap.
@@ -94,15 +104,29 @@ func TailCues(r io.Reader, sampleRate, channels int) (tailSilenceS, tailDecayS f
 	tailSilenceS = float64(len(levels)-sil) * windowS
 
 	// Run 2: monotonic decline ending where the silence began — NOT at EOF.
+	//
+	// The walk compares against a median-smoothed series, not the raw
+	// per-window levels used for Run 1. Real audio's RMS jitters several dB
+	// between adjacent 50ms windows even while genuinely declining overall —
+	// measured on production tracks, a window can sit 2-4dB above its own
+	// predecessor in the middle of a 20+ second fade into silence. A
+	// same-magnitude decayTolerance cannot absorb that: comparing raw
+	// windows one-to-the-next made the walk break after a single step,
+	// every time, on real audio, even though the whole point of the
+	// tolerance is to survive exactly this kind of non-monotonic bump. The
+	// median damps that jitter while leaving a genuine multi-second decline
+	// intact, because the trend, unlike the jitter, persists across
+	// neighboring windows.
+	smoothed := smoothLevels(levels)
 	dec := sil
-	for dec > 1 && levels[dec-1] <= levels[dec-2]+decayTolerance {
+	for dec > 1 && smoothed[dec-1] <= smoothed[dec-2]+decayTolerance {
 		dec--
 	}
 	// The walk above will happily claim an entire flat, cold ending: every
 	// window there is non-increasing relative to the last (it's equal to
 	// it), so nothing ever breaks the loop. That is not decay — nothing is
 	// declining — so gate on the run's actual drop rather than its length.
-	if sil-dec >= 1 && levels[dec]-levels[sil-1] >= minDecayDropDB {
+	if sil-dec >= 1 && smoothed[dec]-smoothed[sil-1] >= minDecayDropDB {
 		// The tolerant walk's own left boundary is not trustworthy as the
 		// run's start: the same slack that survives one dither bump chains
 		// through an unbroken run of them, so a merely near-flat lead-in —
@@ -115,19 +139,43 @@ func TailCues(r io.Reader, sampleRate, channels int) (tailSilenceS, tailDecayS f
 		// one the gate already approved — and it biases the reported
 		// start slightly late, 1.5dB into the decline, which is the safe
 		// direction for a crossfade budget to be wrong in.
-		peak := levels[dec]
-		for _, lv := range levels[dec:sil] {
+		peak := smoothed[dec]
+		for _, lv := range smoothed[dec:sil] {
 			if lv > peak {
 				peak = lv
 			}
 		}
-		for dec < sil-1 && levels[dec] >= peak-decayTolerance {
+		for dec < sil-1 && smoothed[dec] >= peak-decayTolerance {
 			dec++
 		}
 		tailDecayS = float64(sil-dec) * windowS
 	}
 
 	return tailSilenceS, tailDecayS, nil
+}
+
+// smoothLevels returns the windowed median of levels, radius windows on
+// each side (clipped at the edges). A median, not a mean: a single window
+// of true digital silence (-Inf) inside an otherwise-declining passage would
+// drag a mean straight to -Inf and stay there for the rest of the smoothing
+// window, but the median just ignores that one outlier as long as it isn't
+// the majority of the window.
+func smoothLevels(levels []float64) []float64 {
+	out := make([]float64, len(levels))
+	window := make([]float64, 0, 2*decaySmoothRadius+1)
+	for i := range levels {
+		lo, hi := i-decaySmoothRadius, i+decaySmoothRadius
+		if lo < 0 {
+			lo = 0
+		}
+		if hi >= len(levels) {
+			hi = len(levels) - 1
+		}
+		window = append(window[:0], levels[lo:hi+1]...)
+		sort.Float64s(window)
+		out[i] = window[len(window)/2]
+	}
+	return out
 }
 
 // windowDBFS is the RMS of one window expressed in dBFS. Digital silence

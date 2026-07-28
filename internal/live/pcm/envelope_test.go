@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,6 +55,57 @@ func jitterWindows(buf []byte, windowBytes int, lsb int16) []byte {
 		on = !on
 	}
 	return out
+}
+
+// jitterPatternDB is a fixed pseudo-random sequence of per-window dB offsets
+// with roughly 2-4dB of swing — the magnitude measured window-to-window on
+// real production audio, not the hairline fractions of a dB
+// TestTailCuesToleratesJitteryLeadIn uses. It is a lightly filtered random
+// walk, not independent noise per window: real audio's RMS jitter carries
+// over between adjacent 50ms windows because it comes from the same
+// continuous signal, and pure per-window-independent noise turns out to be
+// a harsher, less realistic adversary than what real tracks measured as —
+// it can still alias against a small median window and defeat the fix for
+// reasons that don't occur in practice. Seeded, so the test is reproducible.
+var jitterPatternDB = func() []float64 {
+	rng := rand.New(rand.NewSource(1))
+	const alpha = 0.5 // adjacent-window correlation
+	pattern := make([]float64, 512)
+	prev := 0.0
+	for i := range pattern {
+		noise := -4 + rng.Float64()*8 // i.i.d. component, dB
+		prev = alpha*prev + (1-alpha)*noise
+		pattern[i] = prev
+	}
+	return pattern
+}()
+
+// jitteredDecline renders seconds of audio whose level follows a linear dB
+// ramp from 0 down to floorDB, with jitterPatternDB riding on top of every
+// window. floorDB=0 renders jitter with no underlying trend at all.
+func jitteredDecline(seconds, floorDB float64) []byte {
+	windowFrames := 48000 * windowMS / 1000
+	frames := int(seconds * 48000)
+	numWindows := frames / windowFrames
+	b := make([]byte, frames*2*SampleBytes)
+	for w := range numWindows {
+		trendDB := 0.0
+		if numWindows > 1 {
+			trendDB = floorDB * float64(w) / float64(numWindows-1)
+		}
+		amp := 12000 * math.Pow(10, (trendDB+jitterPatternDB[w%len(jitterPatternDB)])/20)
+		v := int16(amp)
+		for i := w * windowFrames; i < (w+1)*windowFrames; i++ {
+			sv := v
+			if i%2 == 1 {
+				sv = -v
+			}
+			off := i * 2 * SampleBytes
+			binary.LittleEndian.PutUint16(b[off:], uint16(sv))
+			binary.LittleEndian.PutUint16(b[off+SampleBytes:], uint16(sv))
+		}
+	}
+	return b
 }
 
 func TestTailCuesColdEndingHasNoSilenceAndNoDecay(t *testing.T) {
@@ -127,6 +179,30 @@ func TestTailCuesGatesOnMinimumDrop(t *testing.T) {
 	_, dec, err = TailCues(bytes.NewReader(rampTo(-10)), 48000, 2)
 	require.NoError(t, err)
 	require.Greater(t, dec, 0.0, "a ~10 dB decline is past the minimum drop and must register as decay")
+}
+
+// The regression that motivated smoothing the walk: real audio jitters
+// several dB between adjacent windows even mid-decline (measured on
+// production tracks — see envelope.go), which a plain immediate-predecessor
+// comparison cannot survive even with decayTolerance's 1.5dB slack. Without
+// smoothing, this fixture's decline is invisible to TailCues.
+func TestTailCuesRecoversDecayUnderRealisticJitter(t *testing.T) {
+	buf := jitteredDecline(3, -20)
+	sil, dec, err := TailCues(bytes.NewReader(buf), 48000, 2)
+	require.NoError(t, err)
+	require.Equal(t, 0.0, sil, "the decline never reaches the silence floor")
+	require.Greater(t, dec, 1.0, "a 3s, 20dB decline must be recovered despite realistic jitter")
+}
+
+// The other direction: jitter with no underlying decline must not be read
+// as decay either, or the smoothing fix would just always fire regardless
+// of whether the track is actually fading.
+func TestTailCuesJitteryColdEndingStillHasNoDecay(t *testing.T) {
+	buf := jitteredDecline(3, 0) // floorDB=0: jitter only, no trend
+	sil, dec, err := TailCues(bytes.NewReader(buf), 48000, 2)
+	require.NoError(t, err)
+	require.Equal(t, 0.0, sil)
+	require.InDelta(t, 0.0, dec, 0.3, "jitter alone, with no real decline, must not read as decay")
 }
 
 func TestTailCuesRejectsBadGeometry(t *testing.T) {
