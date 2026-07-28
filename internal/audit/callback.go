@@ -188,7 +188,7 @@ func (h *callbackHandler) OnError(ctx context.Context, info *callbacks.RunInfo, 
 // unconditionally after success, and never on error.
 func (h *callbackHandler) write(ctx context.Context, r Rec, appendSpend bool) {
 	if err := h.store.Record(ctx, r); err != nil {
-		h.logger.Error("audit record failed", "err", err)
+		h.logger.ErrorContext(ctx, "audit record failed", "err", err)
 	}
 	if !appendSpend {
 		return
@@ -197,6 +197,6 @@ func (h *callbackHandler) write(ctx context.Context, r Rec, appendSpend bool) {
 		TS: r.TS, Kind: "llm", Provider: r.Provider, Label: r.Label,
 		InTokens: r.InTokens, OutTokens: r.OutTokens, CostUSD: r.CostUSD,
 	}); err != nil {
-		h.logger.Error("ledger append failed", "err", err)
+		h.logger.ErrorContext(ctx, "ledger append failed", "err", err)
 	}
 }

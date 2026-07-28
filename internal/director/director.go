@@ -208,7 +208,7 @@ func (dr *Director) Run(ctx context.Context) error {
 func (dr *Director) RunOnce(ctx context.Context) {
 	st, err := dr.d.Station.GetStation(ctx)
 	if err != nil {
-		dr.d.Logger.Error("director: station read failed", "err", err)
+		dr.d.Logger.ErrorContext(ctx, "director: station read failed", "err", err)
 		return
 	}
 	now := dr.d.Clock.Now()
@@ -231,11 +231,11 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	}
 	spent, err := dr.d.Ledger.SpentSince(ctx, request.DayStart(now, dr.d.Location))
 	if err != nil {
-		dr.d.Logger.Error("director: spend read failed", "err", err)
+		dr.d.Logger.ErrorContext(ctx, "director: spend read failed", "err", err)
 		return
 	}
 	if spent >= dr.d.BudgetUSD {
-		dr.d.Logger.Warn("director: daily budget reached; idling", "spent_usd", spent)
+		dr.d.Logger.WarnContext(ctx, "director: daily budget reached; idling", "spent_usd", spent)
 		return
 	}
 

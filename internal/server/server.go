@@ -66,7 +66,7 @@ func New(deps Deps) *Server {
 // append failure.
 func (s *Server) ledger(ctx context.Context, line spend.Line) {
 	if err := s.deps.Ledger.Append(ctx, line); err != nil {
-		s.logger.Error("ledger append failed", "err", err)
+		s.logger.ErrorContext(ctx, "ledger append failed", "err", err)
 	}
 }
 
@@ -151,7 +151,7 @@ func (s *Server) GetLLMStats(ctx context.Context, req *radiolabv1.GetLLMStatsReq
 func (s *Server) artifactToProto(ctx context.Context, a artifact.Artifact) *radiolabv1.Artifact {
 	url, err := s.deps.Store.PresignGet(ctx, a.ID)
 	if err != nil {
-		s.logger.Error("presign failed", "id", a.ID, "err", err)
+		s.logger.ErrorContext(ctx, "presign failed", "id", a.ID, "err", err)
 	}
 	return &radiolabv1.Artifact{
 		Id: a.ID, Kind: a.Kind, Label: a.Label, Ext: a.Ext, Bytes: a.Bytes,
@@ -418,7 +418,7 @@ func (s *Server) DeleteTrack(ctx context.Context, req *radiolabv1.DeleteTrackReq
 		return nil, status.Errorf(codes.NotFound, "track %q not found", req.GetYtId())
 	}
 	if err := s.deps.Store.Delete(ctx, artifactID); err != nil {
-		s.logger.Error("store delete failed", "artifact_id", artifactID, "err", err)
+		s.logger.ErrorContext(ctx, "store delete failed", "artifact_id", artifactID, "err", err)
 	}
 	return &radiolabv1.DeleteTrackResponse{}, nil
 }

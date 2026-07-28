@@ -127,16 +127,16 @@ func PublishQueueSnapshot(ctx context.Context, p Producer, reqs request.Store, s
 	}
 	items, err := reqs.Pending(ctx)
 	if err != nil {
-		logger.Error("queue read for snapshot failed", "err", err)
+		logger.ErrorContext(ctx, "queue read for snapshot failed", "err", err)
 		return
 	}
 	var next *schedule.NextUp
 	if nu, ok, gerr := sched.GetNextUp(ctx); gerr != nil {
-		logger.Error("queue next-up read failed", "err", gerr)
+		logger.ErrorContext(ctx, "queue next-up read failed", "err", gerr)
 	} else if ok {
 		next = &nu
 	}
 	if err := p.Publish(ctx, TopicQueue, RequestQueuePayload(items, next)); err != nil {
-		logger.Error("queue snapshot publish failed", "err", err)
+		logger.ErrorContext(ctx, "queue snapshot publish failed", "err", err)
 	}
 }

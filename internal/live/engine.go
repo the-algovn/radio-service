@@ -37,13 +37,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	for {
 		st, err := e.f.d.Store.GetStation(ctx)
 		if err != nil {
-			e.logger.Error("station read failed", "err", err)
+			e.logger.ErrorContext(ctx, "station read failed", "err", err)
 		} else if st.OnAir {
-			e.logger.Info("broadcast session starting")
+			e.logger.InfoContext(ctx, "broadcast session starting")
 			if err := e.f.RunSession(ctx); err != nil && ctx.Err() == nil {
-				e.logger.Error("broadcast session failed", "err", err)
+				e.logger.ErrorContext(ctx, "broadcast session failed", "err", err)
 			} else {
-				e.logger.Info("broadcast session ended")
+				e.logger.InfoContext(ctx, "broadcast session ended")
 			}
 		}
 		select {

@@ -171,7 +171,7 @@ func (s *Server) GoOnAir(ctx context.Context, _ *radiov1.GoOnAirRequest) (*radio
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "go on air: %v", err)
 	}
-	s.logger.Info("station on air")
+	s.logger.InfoContext(ctx, "station on air")
 	if s.deps.Notifier != nil {
 		s.deps.Notifier.Poke()
 	}
@@ -183,7 +183,7 @@ func (s *Server) GoOffAir(ctx context.Context, _ *radiov1.GoOffAirRequest) (*rad
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "go off air: %v", err)
 	}
-	s.logger.Info("station off air")
+	s.logger.InfoContext(ctx, "station off air")
 	if s.deps.Notifier != nil {
 		s.deps.Notifier.Poke()
 	}
@@ -373,7 +373,7 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create request: %v", err)
 	}
-	s.logger.Info("listener request queued", "yt_id", it.YTID, "sub", sub, "status", it.Status)
+	s.logger.InfoContext(ctx, "listener request queued", "yt_id", it.YTID, "sub", sub, "status", it.Status)
 	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.deps.Sched, s.logger)
 	return &radiov1.RequestTrackResponse{Request: requestProto(it)}, nil
 }
@@ -441,7 +441,7 @@ func (s *Server) RemoveRequest(ctx context.Context, req *radiov1.RemoveRequestRe
 		}
 		return nil, status.Errorf(codes.Internal, "remove: %v", err)
 	}
-	s.logger.Info("operator removed request", "id", req.GetId())
+	s.logger.InfoContext(ctx, "operator removed request", "id", req.GetId())
 	live.PublishQueueSnapshot(ctx, s.deps.Producer, s.deps.Requests, s.deps.Sched, s.logger)
 	return s.stationRequests(ctx)
 }
@@ -455,7 +455,7 @@ func (s *Server) SkipTrack(ctx context.Context, _ *radiov1.SkipTrackRequest) (*r
 		return nil, status.Error(codes.FailedPrecondition, "station is off air")
 	}
 	s.deps.Skipper.RequestSkip()
-	s.logger.Info("operator skipped the airing track")
+	s.logger.InfoContext(ctx, "operator skipped the airing track")
 	return &radiov1.SkipTrackResponse{}, nil
 }
 
@@ -464,7 +464,7 @@ func (s *Server) SetAIEnabled(ctx context.Context, req *radiov1.SetAIEnabledRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "set ai enabled: %v", err)
 	}
-	s.logger.Info("ai pause toggled", "enabled", req.GetEnabled())
+	s.logger.InfoContext(ctx, "ai pause toggled", "enabled", req.GetEnabled())
 	return &radiov1.SetAIEnabledResponse{Station: stationProto(st)}, nil
 }
 
@@ -496,7 +496,7 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update dj settings: %v", err)
 	}
-	s.logger.Info("dj settings updated", "voice", st.DJ.VoiceID, "rate", st.DJ.Rate,
+	s.logger.InfoContext(ctx, "dj settings updated", "voice", st.DJ.VoiceID, "rate", st.DJ.Rate,
 		"break_every", st.DJ.BreakEvery, "station_id_min", st.DJ.StationIDMin, "max_chars", st.DJ.MaxChars)
 	return &radiov1.UpdateDJSettingsResponse{Settings: djSettingsProto(st.DJ)}, nil
 }

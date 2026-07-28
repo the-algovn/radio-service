@@ -51,7 +51,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 		}
 		skip, err := p.filtered(ctx, c.YTID, c.DurationS, recentSet)
 		if err != nil {
-			p.d.Logger.Error("programmer: filter read failed", "yt_id", c.YTID, "err", err)
+			p.d.Logger.ErrorContext(ctx, "programmer: filter read failed", "yt_id", c.YTID, "err", err)
 			return false
 		}
 		if skip {
@@ -86,7 +86,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 	if in.LibraryQuery != "" {
 		trs, err := p.d.Library.List(ctx, in.LibraryQuery, poolCap, 0)
 		if err != nil {
-			p.d.Logger.Error("programmer: library list failed", "query", in.LibraryQuery, "err", err)
+			p.d.Logger.ErrorContext(ctx, "programmer: library list failed", "query", in.LibraryQuery, "err", err)
 		}
 		for _, tr := range trs {
 			add(Candidate{
@@ -100,7 +100,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 	for _, q := range in.Searches {
 		cs, err := p.d.Search.Search(ctx, q, searchN)
 		if err != nil {
-			p.d.Logger.Error("programmer: search failed", "query", q, "err", err)
+			p.d.Logger.ErrorContext(ctx, "programmer: search failed", "query", q, "err", err)
 			continue
 		}
 		for _, sc := range ingest.Rank(q, cs) {
