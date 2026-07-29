@@ -62,7 +62,10 @@ func TestIntentContractDemandsConcreteSongs(t *testing.T) {
 
 	require.Contains(t, system, "nghệ sĩ")
 	require.Contains(t, system, "tên bài")
-	for _, banned := range []string{"tuyển tập", "liên khúc", "nonstop", "mixtape", "1 hour"} {
+	for _, banned := range []string{
+		"tuyển tập", "liên khúc", "nonstop", "mixtape", "1 hour",
+		"hay nhất", "playlist", "tổng hợp",
+	} {
 		require.Contains(t, system, banned,
 			"the contract must name %q as forbidden", banned)
 	}

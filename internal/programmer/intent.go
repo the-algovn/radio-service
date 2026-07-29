@@ -32,7 +32,7 @@ Ví dụ đúng: "Sơn Tùng M-TP Nắng Ấm Xa Dần". Ví dụ SAI: "nhạc b
 TUYỆT ĐỐI không dùng: "hay nhất", "tuyển tập", "liên khúc", "nonstop", "mixtape",
 "playlist", "1 hour", "tổng hợp" — những truy vấn đó chỉ trả về bản dài hàng giờ,
 đài không phát được.
-Ở bước này CHƯA chọn bài và CHƯA nêu lý do — chỉ nêu ý đồ.
+Ở bước này CHƯA nêu lý do và CHƯA quyết định bài sẽ phát — chỉ nêu bài muốn tìm.
 Nêu bài muốn tìm cho hợp giờ và không khí đài; ưu tiên đa dạng, tránh bài vừa phát và bài đã có trong pending.
 Nếu không có gì cần thêm, trả về các mảng rỗng.`
 
