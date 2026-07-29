@@ -10,17 +10,21 @@ import (
 // deleted entries. Unmarshalling null into a plain float64 is a silent no-op
 // that yields 0 — indistinguishable from a genuine 0-second video, which the
 // programmer's duration floor then rejects as "too short". The parser must
-// report "unknown" instead.
+// keep null, absent and a literal zero as three distinguishable states: the
+// first two are "unknown", the third is a real (if useless) duration — a
+// naive nil-check that also peeked at the pointed-to value would collapse
+// that distinction right back.
 func TestCandidatesFromDistinguishesUnknownDuration(t *testing.T) {
 	raw := []byte(`{"entries":[
 		{"id":"known","title":"Known","channel":"C","duration":212.0,"view_count":900},
 		{"id":"null","title":"Null","channel":"C","duration":null,"view_count":900},
-		{"id":"absent","title":"Absent","channel":"C","view_count":900}
+		{"id":"absent","title":"Absent","channel":"C","view_count":900},
+		{"id":"zero","title":"Zero","channel":"C","duration":0,"view_count":900}
 	]}`)
 
 	cs, err := candidatesFrom(raw)
 	require.NoError(t, err)
-	require.Len(t, cs, 3)
+	require.Len(t, cs, 4)
 
 	byID := map[string]Candidate{}
 	for _, c := range cs {
@@ -32,6 +36,9 @@ func TestCandidatesFromDistinguishesUnknownDuration(t *testing.T) {
 
 	require.False(t, byID["null"].DurationKnown, "explicit null must be unknown, not zero")
 	require.False(t, byID["absent"].DurationKnown, "an absent field must be unknown, not zero")
+
+	require.True(t, byID["zero"].DurationKnown, "a literal 0 is a known duration, not unknown")
+	require.Equal(t, int64(0), byID["zero"].DurationS)
 }
 
 func TestCandidatesFromReadsLiveAndShortForm(t *testing.T) {
