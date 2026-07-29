@@ -37,15 +37,21 @@ func fold(s string) string {
 	s = strings.TrimSuffix(strings.TrimSpace(s), "- topic")
 	// Drop parenthesised/bracketed qualifiers: (Official MV), [Lyric Video].
 	s = bracketed.ReplaceAllString(s, " ")
-	// Keep the longest segment around a separator: "Song - Audio" → "song".
+	// Keep the FIRST segment around a separator: "Song - Audio" → "song".
+	//
+	// Not the longest. YouTube convention puts the title first and qualifiers
+	// after, so "longest wins" picks the qualifier whenever the real title is
+	// short — folding "Mưa | Official Audio" and "Sao | Official Audio" to the
+	// same "official-audio" key and declaring two unrelated songs identical.
+	// It corrupts the artist side the same way, reducing the collab
+	// "Karik - Only C" to "only-c".
+	//
+	// First-segment can still mis-key an "Artist - Title" upload onto the
+	// artist, but that is an under-merge — a duplicate slips through — which is
+	// the safe direction for a soft, non-unique signal. The separator regex
+	// requires surrounding whitespace, so "Sơn Tùng M-TP" is never split.
 	if parts := separator.Split(s, -1); len(parts) > 1 {
-		longest := ""
-		for _, p := range parts {
-			if len(strings.TrimSpace(p)) > len(longest) {
-				longest = strings.TrimSpace(p)
-			}
-		}
-		s = longest
+		s = strings.TrimSpace(parts[0])
 	}
 	// đ does not decompose under NFD, so it needs an explicit mapping BEFORE
 	// the combining marks are stripped.

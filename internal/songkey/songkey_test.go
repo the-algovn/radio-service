@@ -40,3 +40,19 @@ func TestOfReturnsEmptyWhenUnusable(t *testing.T) {
 	require.Empty(t, Of("Ca Sĩ", ""))
 	require.Empty(t, Of("Ca Sĩ", "(Official MV)"), "nothing survives the strip")
 }
+
+// "Longest segment wins" picked the qualifier over the title whenever the real
+// title was shorter than its qualifier, folding unrelated songs onto one key.
+// The separator rule must keep the first segment instead.
+func TestOfDistinguishesShortTitlesSharingALongQualifier(t *testing.T) {
+	require.NotEqual(t,
+		Of("Ca Sĩ", "Mưa | Official Audio"), Of("Ca Sĩ", "Sao | Official Audio"))
+	require.NotEqual(t,
+		Of("Ca Sĩ", "Mưa - Lyrics Video"), Of("Ca Sĩ", "Sao - Lyrics Video"))
+}
+
+// The same "longest wins" bug corrupted the artist side, reducing the collab
+// "Karik - Only C" to "only-c" and losing Karik entirely.
+func TestOfPreservesCollabArtistFirstName(t *testing.T) {
+	require.NotEqual(t, Of("Karik - Only C", "X"), Of("Only C", "X"))
+}
