@@ -108,4 +108,5 @@ type Track struct {
 	AddedAt      time.Time
 	TailSilenceS float64
 	TailDecayS   float64
+	SongKey      string
 }

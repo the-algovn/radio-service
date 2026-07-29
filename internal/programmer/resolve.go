@@ -103,7 +103,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 		add(Candidate{
 			YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
 			DurationS: int64(tr.DurationS), Source: sourceLibrary, Cached: true,
-		}, factsOfTrack(tr.YTID, int64(tr.DurationS)))
+		}, factsOfTrack(tr.YTID, int64(tr.DurationS), tr.SongKey))
 	}
 
 	// 2. The library shelf, by the model's search term.
@@ -121,7 +121,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 			add(Candidate{
 				YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
 				DurationS: int64(tr.DurationS), Source: sourceLibrary, Cached: true,
-			}, factsOfTrack(tr.YTID, int64(tr.DurationS)))
+			}, factsOfTrack(tr.YTID, int64(tr.DurationS), tr.SongKey))
 			if len(pool) > before {
 				fromLibrary++
 			}
@@ -166,7 +166,7 @@ func (p *Programmer) logFunnel(ctx context.Context, rawSearch, pooled int, drops
 	attrs := []any{"raw_search", rawSearch, "pooled", pooled}
 	for _, r := range []dropReason{
 		dropTooShort, dropTooLong, dropLive, dropShortForm,
-		dropRecent, dropNextUp, dropFailed, dropQueued, dropDupe, dropPoolFull, dropReadFailed,
+		dropRecent, dropRecentSong, dropNextUp, dropFailed, dropQueued, dropDupe, dropPoolFull, dropReadFailed,
 	} {
 		if n := drops[r]; n > 0 {
 			attrs = append(attrs, string(r), n)

@@ -30,7 +30,7 @@ func (l *PGLibrary) Add(ctx context.Context, t Track) error {
 	return db.New(l.pool).InsertTrack(ctx, db.InsertTrackParams{
 		YtID: t.YTID, Title: t.Title, Channel: t.Channel, DurationS: t.DurationS,
 		ArtifactID: t.ArtifactID, InputI: t.InputI, InputTp: t.InputTP, InputLra: t.InputLRA,
-		TailSilenceS: t.TailSilenceS, TailDecayS: t.TailDecayS,
+		TailSilenceS: t.TailSilenceS, TailDecayS: t.TailDecayS, SongKey: t.SongKey,
 	})
 }
 
@@ -96,6 +96,7 @@ func trackFromRow(r db.Track) Track {
 		YTID: r.YtID, Title: r.Title, Channel: r.Channel, ArtifactID: r.ArtifactID,
 		DurationS: r.DurationS, InputI: r.InputI, InputTP: r.InputTp, InputLRA: r.InputLra,
 		TailSilenceS: r.TailSilenceS, TailDecayS: r.TailDecayS,
+		SongKey: r.SongKey,
 		AddedAt: r.AddedAt,
 	}
 }

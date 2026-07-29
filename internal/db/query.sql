@@ -11,17 +11,17 @@ SELECT COALESCE(SUM(cost_usd), 0)::double precision AS total FROM ledger_line;
 
 -- name: GetTrack :one
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track WHERE yt_id = $1;
 
 -- name: InsertTrack :exec
-INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s, song_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (yt_id) DO NOTHING;
 
 -- name: ListTracks :many
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track
 WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
 ORDER BY added_at DESC
@@ -40,7 +40,7 @@ UPDATE track SET tail_silence_s = $2, tail_decay_s = $3 WHERE yt_id = $1;
 
 -- name: ListTracksMissingCues :many
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track
 WHERE tail_silence_s < 0
 ORDER BY added_at DESC

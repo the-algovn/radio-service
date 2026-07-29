@@ -379,7 +379,7 @@ func (p *Programmer) respin(ctx context.Context) bool {
 	if err != nil || !ok {
 		return false
 	}
-	if why, _ := p.classify(ctx, factsOfTrack(tr.YTID, int64(tr.DurationS)), g); why != dropNone {
+	if why, _ := p.classify(ctx, factsOfTrack(tr.YTID, int64(tr.DurationS), tr.SongKey), g); why != dropNone {
 		return false
 	}
 	if _, err := p.d.Requests.Create(ctx, request.Item{

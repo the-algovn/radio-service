@@ -5,6 +5,7 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/songkey"
 )
 
 // dropReason names why a candidate did not reach the pool. It replaces a bare
@@ -19,11 +20,16 @@ const (
 	dropLive      dropReason = "live"
 	dropShortForm dropReason = "short-form"
 	dropRecent    dropReason = "recent"
-	dropQueued    dropReason = "queued"
-	dropDupe      dropReason = "dupe"
-	dropPoolFull  dropReason = "pool-full"
-	dropNextUp    dropReason = "next-up"
-	dropFailed    dropReason = "recently-failed"
+	// dropRecentSong is a DIFFERENT yt_id for the same folded song identity as
+	// something recently aired — the duplication every id-keyed guard misses:
+	// one song uploaded as an official MV, a "- Topic" track, and a lyric
+	// video is three ids that all pass dropRecent.
+	dropRecentSong dropReason = "recent-song"
+	dropQueued     dropReason = "queued"
+	dropDupe       dropReason = "dupe"
+	dropPoolFull   dropReason = "pool-full"
+	dropNextUp     dropReason = "next-up"
+	dropFailed     dropReason = "recently-failed"
 	// dropReadFailed is a guard read that errored, NOT a real disqualification.
 	// It has its own reason because the funnel histogram is this task's whole
 	// point: labelling a Postgres outage as "queued" would misreport the one
@@ -36,32 +42,41 @@ const (
 // or short-form.
 type factsOf struct {
 	YTID          string
+	SongKey       string
 	DurationS     int64
 	DurationKnown bool
 	Live          bool
 	ShortForm     bool
 }
 
+// factsFrom builds facts for a YouTube search result. SongKey is a
+// best-effort fold of the channel and title: search results carry no
+// artist/track metadata (it is not in the flat JSON), unlike a library row's
+// stored, acquire-time-computed key.
 func factsFrom(c ingest.Candidate) factsOf {
 	return factsOf{
-		YTID: c.YTID, DurationS: c.DurationS, DurationKnown: c.DurationKnown,
+		YTID: c.YTID, SongKey: songkey.Of(c.Channel, c.Title),
+		DurationS: c.DurationS, DurationKnown: c.DurationKnown,
 		Live: c.Live, ShortForm: c.ShortForm,
 	}
 }
 
 // factsOfTrack builds facts for a library row, whose duration is always known
-// (it was ffprobed at acquire time).
-func factsOfTrack(ytID string, durationS int64) factsOf {
-	return factsOf{YTID: ytID, DurationS: durationS, DurationKnown: true}
+// (it was ffprobed at acquire time). songKey is the row's stored tr.SongKey —
+// computed once, at acquire time, from real artist/track metadata — unlike
+// factsFrom's best-effort fold of a YouTube search result's channel/title.
+func factsOfTrack(ytID string, durationS int64, songKey string) factsOf {
+	return factsOf{YTID: ytID, DurationS: durationS, DurationKnown: true, SongKey: songKey}
 }
 
 // guards is the per-decision rejection state, read ONCE. Previously each
 // candidate hit the database on its own, which cost up to 34 round-trips per
 // decision and made a transient DB error silently thin the pool.
 type guards struct {
-	recent   map[string]bool
-	nextUpID string
-	failed   map[string]bool
+	recent      map[string]bool
+	recentSongs map[string]bool
+	nextUpID    string
+	failed      map[string]bool
 }
 
 func (p *Programmer) buildGuards(ctx context.Context) (guards, error) {
@@ -84,6 +99,17 @@ func (p *Programmer) buildGuards(ctx context.Context) (guards, error) {
 				g.failed[it.YTID] = true
 			}
 		}
+	}
+	// Resolve the recently-aired ids to their song keys, so a DIFFERENT upload
+	// of the same song is also blocked. Tracks with no computed key contribute
+	// nothing — '' is the not-computed sentinel, not a real identity.
+	g.recentSongs = map[string]bool{}
+	for id := range g.recent {
+		tr, found, err := p.d.Library.Get(ctx, id)
+		if err != nil || !found || tr.SongKey == "" {
+			continue
+		}
+		g.recentSongs[tr.SongKey] = true
 	}
 	return g, nil
 }
@@ -112,6 +138,12 @@ func (p *Programmer) classify(ctx context.Context, f factsOf, g guards) (dropRea
 	}
 	if g.recent[f.YTID] {
 		return dropRecent, nil
+	}
+	// The same song under a different upload defeats every id-keyed guard. An
+	// empty key is the not-computed sentinel and must never match, or every
+	// uncomputed track would collapse into one.
+	if f.SongKey != "" && g.recentSongs[f.SongKey] {
+		return dropRecentSong, nil
 	}
 	if f.YTID == g.nextUpID {
 		return dropNextUp, nil

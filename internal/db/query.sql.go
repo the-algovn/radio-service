@@ -377,7 +377,7 @@ func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 
 const getTrack = `-- name: GetTrack :one
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track WHERE yt_id = $1
 `
 
@@ -396,6 +396,7 @@ func (q *Queries) GetTrack(ctx context.Context, ytID string) (Track, error) {
 		&i.AddedAt,
 		&i.TailSilenceS,
 		&i.TailDecayS,
+		&i.SongKey,
 	)
 	return i, err
 }
@@ -485,8 +486,8 @@ func (q *Queries) InsertLedgerLine(ctx context.Context, arg InsertLedgerLinePara
 }
 
 const insertTrack = `-- name: InsertTrack :exec
-INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s, song_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (yt_id) DO NOTHING
 `
 
@@ -501,6 +502,7 @@ type InsertTrackParams struct {
 	InputLra     float64
 	TailSilenceS float64
 	TailDecayS   float64
+	SongKey      string
 }
 
 func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error {
@@ -515,6 +517,7 @@ func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error 
 		arg.InputLra,
 		arg.TailSilenceS,
 		arg.TailDecayS,
+		arg.SongKey,
 	)
 	return err
 }
@@ -649,7 +652,7 @@ func (q *Queries) ListLedgerLines(ctx context.Context) ([]ListLedgerLinesRow, er
 
 const listTracks = `-- name: ListTracks :many
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track
 WHERE ($1 = '' OR title ILIKE '%' || $1 || '%' OR channel ILIKE '%' || $1 || '%')
 ORDER BY added_at DESC
@@ -683,6 +686,7 @@ func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track
 			&i.AddedAt,
 			&i.TailSilenceS,
 			&i.TailDecayS,
+			&i.SongKey,
 		); err != nil {
 			return nil, err
 		}
@@ -696,7 +700,7 @@ func (q *Queries) ListTracks(ctx context.Context, arg ListTracksParams) ([]Track
 
 const listTracksMissingCues = `-- name: ListTracksMissingCues :many
 SELECT yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, added_at,
-       tail_silence_s, tail_decay_s
+       tail_silence_s, tail_decay_s, song_key
 FROM track
 WHERE tail_silence_s < 0
 ORDER BY added_at DESC
@@ -724,6 +728,7 @@ func (q *Queries) ListTracksMissingCues(ctx context.Context, limit int32) ([]Tra
 			&i.AddedAt,
 			&i.TailSilenceS,
 			&i.TailDecayS,
+			&i.SongKey,
 		); err != nil {
 			return nil, err
 		}

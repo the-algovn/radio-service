@@ -7,9 +7,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/songkey"
 )
 
 func TestClassifyReasons(t *testing.T) {
@@ -145,6 +147,47 @@ func TestClassifyIgnoresAiredTerminalRequests(t *testing.T) {
 	g, err := h.prog.buildGuards(h.ctx)
 	require.NoError(t, err)
 	require.False(t, g.failed["played"])
+}
+
+// The duplication hole the whole stage exists for: the same song under a second
+// yt_id passes every id-keyed guard.
+func TestClassifyRejectsTheSameSongUnderADifferentID(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{
+		YTID: "aired-id", Title: "Nắng Ấm Xa Dần", Channel: "Sơn Tùng M-TP",
+		DurationS: 200, SongKey: songkey.Of("Sơn Tùng M-TP", "Nắng Ấm Xa Dần"),
+	}))
+	require.NoError(t, h.airlog.Append(h.ctx, live.Entry{
+		YTID: "aired-id", Title: "Nắng Ấm Xa Dần", DurationS: 200,
+	}))
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+
+	got, err := h.prog.classify(h.ctx, factsOf{
+		YTID: "other-upload", DurationS: 205, DurationKnown: true,
+		SongKey: songkey.Of("Sơn Tùng M-TP", "Nắng Ấm Xa Dần (Official MV)"),
+	}, g)
+	require.NoError(t, err)
+	require.Equal(t, dropRecentSong, got)
+}
+
+// An empty song key is the "not computed" sentinel and must never match.
+func TestClassifyIgnoresEmptySongKey(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{
+		YTID: "a", Title: "A", DurationS: 200, SongKey: "",
+	}))
+	require.NoError(t, h.airlog.Append(h.ctx, live.Entry{YTID: "a", Title: "A", DurationS: 200}))
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+
+	got, err := h.prog.classify(h.ctx, factsOf{
+		YTID: "b", DurationS: 200, DurationKnown: true, SongKey: "",
+	}, g)
+	require.NoError(t, err)
+	require.Equal(t, dropNone, got, "the empty sentinel must not collapse everything into one song")
 }
 
 func TestFactsFromCandidateCarriesEveryFlag(t *testing.T) {

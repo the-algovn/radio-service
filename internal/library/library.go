@@ -19,7 +19,13 @@ type Track struct {
 	// behaviour. Zero would claim the track was measured and found to have
 	// no usable tail.
 	TailSilenceS, TailDecayS float64
-	AddedAt                  time.Time
+	// SongKey is the folded (artist, title) identity from internal/songkey,
+	// used to dedupe the same recording across a second yt_id (an official MV,
+	// a "- Topic" track, a lyric video). "" means NOT COMPUTED — the sentinel
+	// songkey.Of returns when either side folds away to nothing — and must
+	// never be treated as a real identity shared by every uncomputed track.
+	SongKey string
+	AddedAt time.Time
 }
 
 // Library stores and looks up cached tracks by yt_id. Implementations:

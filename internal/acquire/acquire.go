@@ -14,6 +14,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
+	"github.com/the-algovn/radio-service/internal/songkey"
 )
 
 // ErrTooLong wraps the error Acquire returns when the probed duration
@@ -110,10 +111,19 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("store: %w", err)
 	}
+	artist := channel
+	if len(meta.Artists) > 0 {
+		artist = meta.Artists[0]
+	}
+	name := label
+	if meta.Track != "" {
+		name = meta.Track
+	}
 	tr := library.Track{
 		YTID: ytID, Title: label, Channel: channel, DurationS: dur,
 		ArtifactID: art.ID, InputI: i, InputTP: tp, InputLRA: lra,
 		TailSilenceS: tailSilenceS, TailDecayS: tailDecayS,
+		SongKey: songkey.Of(artist, name),
 	}
 	// Unlike the old lab RPC, an Add failure here is an error: the worker's
 	// track MUST reach the library or the request can never air.
