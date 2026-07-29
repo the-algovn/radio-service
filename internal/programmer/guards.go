@@ -21,6 +21,11 @@ const (
 	dropQueued    dropReason = "queued"
 	dropDupe      dropReason = "dupe"
 	dropPoolFull  dropReason = "pool-full"
+	// dropReadFailed is a guard read that errored, NOT a real disqualification.
+	// It has its own reason because the funnel histogram is this task's whole
+	// point: labelling a Postgres outage as "queued" would misreport the one
+	// situation the histogram most needs to name.
+	dropReadFailed dropReason = "read-failed"
 )
 
 // factsOf is everything classify needs about a candidate, independent of where
@@ -93,7 +98,7 @@ func (p *Programmer) classify(ctx context.Context, f factsOf, g guards) (dropRea
 	}
 	queued, err := p.d.Requests.HasPendingYTID(ctx, f.YTID)
 	if err != nil {
-		return dropQueued, err
+		return dropReadFailed, err
 	}
 	if queued {
 		return dropQueued, nil

@@ -1,11 +1,14 @@
 package programmer
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/live"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 func TestClassifyReasons(t *testing.T) {
@@ -67,6 +70,29 @@ func TestClassifyPrefersLiveOverDurationReason(t *testing.T) {
 	got, err := h.prog.classify(h.ctx, factsOf{YTID: "v", DurationKnown: false, Live: true}, g)
 	require.NoError(t, err)
 	require.Equal(t, dropLive, got)
+}
+
+// errRequests wraps a real request.Store and fails only HasPendingYTID —
+// mirrors errCountLibrary in programmer_test.go, the established pattern for
+// making one store call fail without a parallel fake.
+type errRequests struct{ request.Store }
+
+func (errRequests) HasPendingYTID(context.Context, string) (bool, error) {
+	return false, errors.New("pending read boom")
+}
+
+// The guard read itself failing must not be mistaken for its own answer: a
+// Postgres outage has to render in the funnel histogram as "read-failed", not
+// "queued" — the one label the histogram most needs to get right.
+func TestClassifyReturnsReadFailedNotQueuedOnGuardError(t *testing.T) {
+	h := newHarness(t)
+	h.prog.d.Requests = errRequests{h.requests}
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+
+	got, err := h.prog.classify(h.ctx, factsOf{YTID: "x", DurationS: 200, DurationKnown: true}, g)
+	require.Error(t, err)
+	require.Equal(t, dropReadFailed, got)
 }
 
 func TestFactsFromCandidateCarriesEveryFlag(t *testing.T) {

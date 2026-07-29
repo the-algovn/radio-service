@@ -134,7 +134,7 @@ func (p *Programmer) logFunnel(ctx context.Context, rawSearch, pooled int, drops
 	attrs := []any{"raw_search", rawSearch, "pooled", pooled}
 	for _, r := range []dropReason{
 		dropTooShort, dropTooLong, dropLive, dropShortForm,
-		dropRecent, dropQueued, dropDupe, dropPoolFull,
+		dropRecent, dropQueued, dropDupe, dropPoolFull, dropReadFailed,
 	} {
 		if n := drops[r]; n > 0 {
 			attrs = append(attrs, string(r), n)
