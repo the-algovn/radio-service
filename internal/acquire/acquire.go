@@ -82,7 +82,7 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	tailSilenceS, tailDecayS := -1.0, -1.0
 	if a.d.Cues != nil {
 		if s, d, cerr := a.d.Cues(ctx, p); cerr != nil {
-			a.d.Logger.Warn("cue measurement failed; track stays unmeasured",
+			a.d.Logger.WarnContext(ctx, "cue measurement failed; track stays unmeasured",
 				"yt_id", ytID, "err", cerr)
 		} else {
 			tailSilenceS, tailDecayS = s, d
