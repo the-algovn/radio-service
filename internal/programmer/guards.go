@@ -92,11 +92,18 @@ func (p *Programmer) buildGuards(ctx context.Context) (guards, error) {
 		g.recent[id] = true
 	}
 	// Non-fatal: a missing next-up or an unreadable terminal list degrades to
-	// today's behaviour rather than skipping the decision entirely.
-	if nu, found, err := p.d.Sched.GetNextUp(ctx); err == nil && found {
+	// today's behaviour rather than skipping the decision entirely. Still
+	// logged — Stage 1's whole thesis is that no guard fails silently, and a
+	// swallowed error here quietly disables the next-up/failed guards with no
+	// trace in the funnel.
+	if nu, found, err := p.d.Sched.GetNextUp(ctx); err != nil {
+		p.d.Logger.WarnContext(ctx, "programmer: next-up read failed; next-up guard degraded", "err", err)
+	} else if found {
 		g.nextUpID = nu.YTID
 	}
-	if items, err := p.d.Requests.RecentTerminal(ctx, failedWindow); err == nil {
+	if items, err := p.d.Requests.RecentTerminal(ctx, failedWindow); err != nil {
+		p.d.Logger.WarnContext(ctx, "programmer: recent-terminal read failed; failed guard degraded", "err", err)
+	} else {
 		for _, it := range items {
 			if it.Status == request.StatusFailed {
 				g.failed[it.YTID] = true
