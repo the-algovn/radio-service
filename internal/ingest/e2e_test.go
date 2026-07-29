@@ -18,7 +18,7 @@ func TestE2ESearchDownloadProbe(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, cs)
 	ranked := Rank("em của ngày hôm qua sơn tùng", cs)
-	p, err := r.Download(context.Background(), ranked[0].YTID, t.TempDir())
+	p, _, err := r.Download(context.Background(), ranked[0].YTID, t.TempDir())
 	require.NoError(t, err)
 	dur, err := Probe(context.Background(), p)
 	require.NoError(t, err)

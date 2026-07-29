@@ -20,6 +20,10 @@ const MaxAttempts = 3
 // spending MaxAttempts retries on.
 const reasonTooLong = "bài dài quá mười phút, đài không phát được"
 
+// reasonNotMusic is recorded when the completed extraction shows the track is
+// not a song. Like reasonTooLong it is permanent — retrying cannot change it.
+const reasonNotMusic = "không phải nhạc, đài không phát được"
+
 const pollEvery = 5 * time.Second
 
 type WorkerDeps struct {
@@ -65,9 +69,13 @@ func (w *Worker) RunOnce(ctx context.Context) {
 		return
 	}
 	if _, _, err := w.d.Acquire(ctx, it.YTID, it.Title, it.Channel); err != nil {
-		if errors.Is(err, ErrTooLong) {
-			w.d.Logger.ErrorContext(ctx, "worker: acquire failed (too long)", "yt_id", it.YTID, "err", err)
-			if ferr := w.d.Requests.MarkFailed(ctx, it.ID, reasonTooLong); ferr != nil {
+		if errors.Is(err, ErrTooLong) || errors.Is(err, ErrNotMusic) {
+			reason := reasonTooLong
+			if errors.Is(err, ErrNotMusic) {
+				reason = reasonNotMusic
+			}
+			w.d.Logger.ErrorContext(ctx, "worker: acquire failed permanently", "yt_id", it.YTID, "err", err)
+			if ferr := w.d.Requests.MarkFailed(ctx, it.ID, reason); ferr != nil {
 				w.d.Logger.ErrorContext(ctx, "worker: mark failed failed", "id", it.ID, "err", ferr)
 				return
 			}

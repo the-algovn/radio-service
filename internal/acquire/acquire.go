@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 )
 
@@ -19,8 +20,13 @@ import (
 // exceeds MaxDurationS.
 var ErrTooLong = errors.New("track exceeds the duration cap")
 
+// ErrNotMusic wraps the error Acquire returns when the completed extraction
+// shows the track is not a song. The bytes are already downloaded by then —
+// that is the price of a signal that costs no extra network request.
+var ErrNotMusic = errors.New("track is not music")
+
 type Deps struct {
-	Download func(ctx context.Context, ytID, destDir string) (string, error)
+	Download func(ctx context.Context, ytID, destDir string) (string, ingest.Meta, error)
 	Probe    func(ctx context.Context, path string) (float64, error)
 	Loudnorm func(ctx context.Context, path string) (i, tp, lra float64, err error)
 	// Cues measures the track's overlap budget. Injected like Probe and
@@ -61,7 +67,7 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 		return library.Track{}, false, fmt.Errorf("tmp: %w", err)
 	}
 	defer os.RemoveAll(tmp)
-	p, err := a.d.Download(ctx, ytID, tmp)
+	p, meta, err := a.d.Download(ctx, ytID, tmp)
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("download: %w", err)
 	}
@@ -75,6 +81,12 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	i, tp, lra, err := a.d.Loudnorm(ctx, p)
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("loudnorm: %w", err)
+	}
+	// The extraction that resolved -f bestaudio already told us what this is.
+	// Reject before the blob is stored: the bytes are spent either way, but
+	// storage and a library row are not.
+	if notMusic, why := meta.NotMusic(); notMusic {
+		return library.Track{}, false, fmt.Errorf("%s: %w", why, ErrNotMusic)
 	}
 	// Unlike Probe and Loudnorm above, whose values the feeder cannot air
 	// without, a cue is an optimisation: its absence just costs a hard cut

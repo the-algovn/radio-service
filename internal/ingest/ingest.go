@@ -97,22 +97,25 @@ func candidatesFrom(raw []byte) ([]Candidate, error) {
 	return cs, nil
 }
 
-// Download fetches bestaudio into destDir and returns the file path.
-func (r Runner) Download(ctx context.Context, ytID, destDir string) (string, error) {
+// Download fetches bestaudio into destDir and returns the file path plus the
+// music metadata from the same extraction. -f bestaudio already forces a full
+// extraction, so --write-info-json costs no extra request.
+func (r Runner) Download(ctx context.Context, ytID, destDir string) (string, Meta, error) {
 	ctx, cancel := context.WithTimeout(ctx, 110*time.Second)
 	defer cancel()
 	tpl := filepath.Join(destDir, "%(id)s.%(ext)s")
-	_, err := r.run(ctx, "https://www.youtube.com/watch?v="+ytID, "-f", "bestaudio", "-o", tpl, "--no-playlist", "--no-warnings")
+	_, err := r.run(ctx, "https://www.youtube.com/watch?v="+ytID,
+		"-f", "bestaudio", "-o", tpl, "--no-playlist", "--no-warnings", "--write-info-json")
 	if err != nil {
-		return "", err
+		return "", Meta{}, err
 	}
 	matches, _ := filepath.Glob(filepath.Join(destDir, ytID+".*"))
 	for _, m := range matches {
 		if filepath.Ext(m) != ".json" && filepath.Ext(m) != ".part" {
-			return m, nil
+			return m, readMeta(destDir, ytID), nil
 		}
 	}
-	return "", fmt.Errorf("download produced no audio file for %s", ytID)
+	return "", Meta{}, fmt.Errorf("download produced no audio file for %s", ytID)
 }
 
 func (r Runner) run(ctx context.Context, target string, flags ...string) ([]byte, error) {
