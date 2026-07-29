@@ -19,8 +19,13 @@ func TestMetaNotMusic(t *testing.T) {
 			Meta{Categories: []string{"Music"}, MediaType: "livestream"}, true},
 		{"a short is never a full track",
 			Meta{Categories: []string{"Music"}, MediaType: "short"}, true},
-		{"positively categorized as something else",
+		{"positively categorized as something unambiguously not music",
 			Meta{Categories: []string{"News & Politics"}}, true},
+		// The category is uploader-chosen and defaults to "People & Blogs"; a
+		// large share of genuine Vietnamese indie/OST/cover uploads sit under
+		// these categories, so they must be admitted, not rejected.
+		{"Entertainment is admitted", Meta{Categories: []string{"Entertainment"}}, false},
+		{"People & Blogs is admitted", Meta{Categories: []string{"People & Blogs"}}, false},
 		// Fail open. Absent metadata is not evidence of anything, and rejecting
 		// on it would recreate the empty-pool bug one layer down.
 		{"no metadata at all is admitted", Meta{}, false},

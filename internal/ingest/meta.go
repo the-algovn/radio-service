@@ -19,6 +19,27 @@ type Meta struct {
 	MediaType  string   `json:"media_type"`
 }
 
+// notMusicCategories are YouTube categories that are unambiguously not a
+// song. The category is uploader-chosen and defaults to "People & Blogs", so
+// this must be a denylist, not an allowlist of "Music": a large share of
+// genuine Vietnamese indie, OST and cover uploads sit under "Entertainment",
+// "People & Blogs" or "Film & Animation". Rejecting anything that wasn't
+// literally "Music" threw away those real songs after paying to download and
+// decode them, and since a rejected acquire never reaches the library, the
+// same track got re-downloaded and re-rejected forever.
+var notMusicCategories = map[string]bool{
+	"news & politics":       true,
+	"education":             true,
+	"science & technology":  true,
+	"sports":                true,
+	"gaming":                true,
+	"autos & vehicles":      true,
+	"pets & animals":        true,
+	"travel & events":       true,
+	"howto & style":         true,
+	"nonprofits & activism": true,
+}
+
 // NotMusic reports positive evidence that this is not a song, plus a reason.
 //
 // It fails OPEN on purpose: absent metadata returns false. Rejecting on missing
@@ -37,13 +58,9 @@ func (m Meta) NotMusic() (bool, string) {
 		return false, ""
 	}
 	for _, c := range m.Categories {
-		if strings.EqualFold(c, "Music") {
-			return false, ""
+		if notMusicCategories[strings.ToLower(c)] {
+			return true, "YouTube xếp loại: " + strings.Join(m.Categories, ", ")
 		}
-	}
-	// A category YouTube positively assigned, and it isn't Music.
-	if len(m.Categories) > 0 {
-		return true, "YouTube xếp loại: " + strings.Join(m.Categories, ", ")
 	}
 	return false, ""
 }
