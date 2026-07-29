@@ -63,6 +63,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// alreadyFailed remembers, for the life of this invocation only, which
+	// yt_ids have already failed measureOne. A failure leaves the DB
+	// sentinel unchanged, so MissingCues keeps re-selecting a broken track
+	// on every later round; without this filter one bad artifact gets
+	// re-fetched from MinIO and re-decoded by ffmpeg again and again, and
+	// the final tally counts the same track's repeats instead of distinct
+	// failures. Deliberately not persisted: a transient failure (a MinIO
+	// blip, say) deserves another chance on the *next* run, and the DB
+	// sentinel already makes that safe.
+	alreadyFailed := map[string]bool{}
+
 	var done, failed int
 	start := time.Now()
 	for {
@@ -85,10 +96,28 @@ func main() {
 			logger.InfoContext(ctx, "dry run: stopping after one round", "listed", len(tracks))
 			break
 		}
-		// A round that measures nothing would loop forever on the same rows,
-		// because MissingCues re-selects exactly what it just returned.
-		progressed := false
+
+		pending := make([]library.Track, 0, len(tracks))
 		for _, tr := range tracks {
+			if !alreadyFailed[tr.YTID] {
+				pending = append(pending, tr)
+			}
+		}
+		if len(pending) == 0 {
+			// Every track MissingCues just returned already failed earlier
+			// in this run. The sentinel can't tell "never attempted" from
+			// "failed once" apart, so without this check we would query the
+			// same known-bad rows forever.
+			logger.WarnContext(ctx, "every track in this round already failed earlier in the run; stopping rather than spinning",
+				"measured", done, "failed", failed)
+			break
+		}
+
+		// A round in which every pending track fails would otherwise cost
+		// one more no-op round-trip before the alreadyFailed check above
+		// catches it next time; stop here instead.
+		progressed := false
+		for _, tr := range pending {
 			if ctx.Err() != nil {
 				break
 			}
@@ -97,7 +126,17 @@ func main() {
 				progressed = true
 			} else {
 				failed++
+				alreadyFailed[tr.YTID] = true
 			}
+		}
+		if ctx.Err() != nil {
+			// A SIGTERM landing mid-round can leave progressed false even
+			// though nothing here was actually a bad artifact — the round
+			// just never got the chance to finish. That is a clean
+			// shutdown, not a stuck round; label it as such rather than as
+			// "a full round failed".
+			logger.InfoContext(ctx, "cancelled", "measured", done, "failed", failed)
+			break
 		}
 		if !progressed {
 			logger.WarnContext(ctx, "a full round failed; stopping rather than spinning",
@@ -105,7 +144,7 @@ func main() {
 			break
 		}
 	}
-	logger.InfoContext(ctx, "backfill finished",
+	logger.InfoContext(ctx, "backfill finished: measured/failed are distinct tracks, not attempts",
 		"measured", done, "failed", failed, "elapsed", time.Since(start).String())
 }
 
