@@ -58,7 +58,7 @@ type factsOf struct {
 // upload carried real Content-ID track/artists metadata (see factsOfTrack).
 func factsFrom(c ingest.Candidate) factsOf {
 	return factsOf{
-		YTID: c.YTID,
+		YTID:      c.YTID,
 		DurationS: c.DurationS, DurationKnown: c.DurationKnown,
 		Live: c.Live, ShortForm: c.ShortForm,
 	}
