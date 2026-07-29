@@ -155,7 +155,10 @@ func (p *Programmer) classify(ctx context.Context, f factsOf, g guards) (dropRea
 	if f.SongKey != "" && g.recentSongs[f.SongKey] {
 		return dropRecentSong, nil
 	}
-	if f.YTID == g.nextUpID {
+	// g.nextUpID == "" means no next-up is committed; an empty f.YTID must
+	// never match it, or a candidate with no id would be counted as a phantom
+	// "next-up" drop in the funnel.
+	if g.nextUpID != "" && f.YTID == g.nextUpID {
 		return dropNextUp, nil
 	}
 	if g.failed[f.YTID] {

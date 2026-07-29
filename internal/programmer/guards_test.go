@@ -114,6 +114,22 @@ func TestClassifyRejectsNextUp(t *testing.T) {
 	require.Equal(t, dropNextUp, got)
 }
 
+// No next-up is committed (g.nextUpID == "") and the candidate has no id
+// either. Comparing the two bare strings would match and count a phantom
+// "next-up" drop in the funnel for a candidate that has nothing to do with
+// the schedule.
+func TestClassifyIgnoresEmptyYTIDWhenNoNextUpCommitted(t *testing.T) {
+	h := newHarness(t)
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+	require.Empty(t, g.nextUpID)
+
+	got, err := h.prog.classify(h.ctx, factsOf{YTID: "", DurationS: 200, DurationKnown: true}, g)
+	require.NoError(t, err)
+	require.Equal(t, dropNone, got)
+}
+
 // A failed request is invisible to HasPendingYTID, so without this the
 // programmer re-picks a geo-blocked upload every single tick.
 func TestClassifyRejectsRecentlyFailed(t *testing.T) {
