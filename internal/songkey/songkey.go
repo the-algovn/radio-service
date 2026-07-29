@@ -50,6 +50,12 @@ func fold(s string) string {
 	// đ does not decompose under NFD, so it needs an explicit mapping BEFORE
 	// the combining marks are stripped.
 	s = strings.NewReplacer("đ", "d", "Đ", "d").Replace(s)
+	// Stripping combining marks (Mn) also strips Vietnamese tone marks, so
+	// distinct words that differ only by tone — chờ, chợ, cho — collapse to
+	// the same key. That is accepted, not a bug: this key backs a non-unique
+	// index used as a soft dedup signal, so a false merge only costs variety
+	// (one song occasionally skipped as a near-duplicate). Preserving tones
+	// would let real duplicates slip through, which is worse.
 	res, _, err := transform.String(
 		transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC), s)
 	if err == nil {
