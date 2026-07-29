@@ -1,10 +1,12 @@
 // Package pcm is the raw-audio arithmetic behind item transitions: gain
-// ramps and saturating mixes over interleaved s16le samples.
+// ramps and saturating mixes over interleaved s16le samples, plus the
+// envelope scan (TailCues) that measures a track's tail cue points.
 //
-// Everything here is pure — no I/O, no clock, no allocation — which is why
-// it is its own package. internal/live's objective audio assertions are
-// //go:build integration and CI runs a bare `go test ./...`, so anything
-// that must be verified on every push cannot depend on ffmpeg.
+// It has no ffmpeg dependency — TailCues reads already-decoded s16le PCM
+// from an io.Reader — which is why it is its own package. internal/live's
+// objective audio assertions are //go:build integration and CI runs a bare
+// `go test ./...`, so anything that must be verified on every push cannot
+// depend on ffmpeg.
 package pcm
 
 import "encoding/binary"

@@ -37,10 +37,15 @@ const (
 	// used to find the decay run (see smoothLevels). Small on purpose: real
 	// per-window jitter lives on a 100-300ms scale, so a 5-tap (±100ms)
 	// median damps it without blurring a decline that plays out over many
-	// seconds into something else. Measured against real production audio:
-	// larger radii (1s+) started pulling in unrelated loud material from
-	// elsewhere in the track and reported tens to hundreds of seconds of
-	// "decay" — the fix for one failure mode is not "smooth more".
+	// seconds into something else. Measured against real production audio
+	// with a 578-ending sweep (both tracks truncated at 1-second intervals):
+	// degradation begins at radius 4 (200ms), which alone pulled in unrelated
+	// loud material from elsewhere in the track and reported 12.9s of false
+	// decay — the fix for one failure mode is not "smooth more". Radius 2 is
+	// the smallest value with adequate jitter margin. Note that the committed
+	// test suite only fails at radius 0 and at radius >= 9, so radii 3-8 pass
+	// every test while already producing bad numbers — green is not evidence
+	// this constant is safe to raise.
 	decaySmoothRadius = 2 // windows
 )
 

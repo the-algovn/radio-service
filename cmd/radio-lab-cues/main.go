@@ -47,8 +47,9 @@ func main() {
 	defer pool.Close()
 	lib := library.NewPGLibrary(pool)
 
-	// Copy this block from cmd/radio-lab/main.go:110-120 — same env keys,
-	// same defaults. Do not paraphrase them.
+	// These env keys and defaults intentionally mirror cmd/radio-lab, so the
+	// backfill reads the same bucket and database as the service that wrote
+	// the artifacts it is measuring.
 	store, err := artifact.NewS3Store(artifact.S3Config{
 		Endpoint:       config.Get("MINIO_ENDPOINT", "localhost:9000"),
 		PublicEndpoint: config.Get("MINIO_PUBLIC_ENDPOINT", config.Get("MINIO_ENDPOINT", "localhost:9000")),
@@ -154,9 +155,10 @@ func main() {
 func measureOne(ctx context.Context, logger *slog.Logger, lib library.Library,
 	store artifact.Store, tr library.Track) bool {
 
-	// MkdirTemp + explicit RemoveAll rather than defer: this runs in a loop
-	// over the whole library, and a deferred cleanup would hold every
-	// artifact on disk until main returned.
+	// The defer below is scoped to this function, not the outer loop over the
+	// whole library: main calls measureOne once per track, so exactly one
+	// artifact is on disk at a time instead of every artifact accumulating
+	// until main returned.
 	dir, err := os.MkdirTemp("", "cues-*")
 	if err != nil {
 		logger.ErrorContext(ctx, "tmp dir failed", "yt_id", tr.YTID, "err", err)
