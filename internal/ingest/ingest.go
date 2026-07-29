@@ -10,14 +10,24 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Candidate struct {
-	YTID         string
-	Title        string
-	Channel      string
-	DurationS    int64
+	YTID      string
+	Title     string
+	Channel   string
+	DurationS int64
+	// DurationKnown is false when yt-dlp reported no duration at all — a live
+	// stream, an upcoming premiere, or a deleted entry. It is NOT the same as
+	// a duration of zero, and callers must not treat it as "too short".
+	DurationKnown bool
+	// Live is a stream happening now or announced for later. Never a song.
+	Live bool
+	// ShortForm is a /shorts/ upload — capped at three minutes and almost
+	// never a full track.
+	ShortForm    bool
 	ViewCount    int64
 	ThumbnailURL string
 }
@@ -27,12 +37,16 @@ type Runner struct {
 }
 
 type flatEntry struct {
-	ID         string  `json:"id"`
-	Title      string  `json:"title"`
-	Channel    string  `json:"channel"`
-	Uploader   string  `json:"uploader"`
-	Duration   float64 `json:"duration"`
-	ViewCount  int64   `json:"view_count"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Channel  string `json:"channel"`
+	Uploader string `json:"uploader"`
+	// Pointer so an explicit null and an absent field are both distinguishable
+	// from a real zero. This is the whole point of the type.
+	Duration   *float64 `json:"duration"`
+	ViewCount  int64    `json:"view_count"`
+	LiveStatus string   `json:"live_status"`
+	URL        string   `json:"url"`
 	Thumbnails []struct {
 		URL string `json:"url"`
 	} `json:"thumbnails"`
@@ -48,10 +62,17 @@ func (r Runner) Search(ctx context.Context, query string, n int) ([]Candidate, e
 	if err != nil {
 		return nil, err
 	}
+	return candidatesFrom(out)
+}
+
+// candidatesFrom maps yt-dlp's flat-playlist JSON onto Candidates. Split out of
+// Search so the mapping — which is where the null-duration bug lived — is
+// testable against fixtures without a network.
+func candidatesFrom(raw []byte) ([]Candidate, error) {
 	var doc struct {
 		Entries []flatEntry `json:"entries"`
 	}
-	if err := json.Unmarshal(out, &doc); err != nil {
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse yt-dlp search output: %w", err)
 	}
 	var cs []Candidate
@@ -60,7 +81,14 @@ func (r Runner) Search(ctx context.Context, query string, n int) ([]Candidate, e
 		if ch == "" {
 			ch = e.Uploader
 		}
-		c := Candidate{YTID: e.ID, Title: e.Title, Channel: ch, DurationS: int64(e.Duration), ViewCount: e.ViewCount}
+		c := Candidate{
+			YTID: e.ID, Title: e.Title, Channel: ch, ViewCount: e.ViewCount,
+			Live:      e.LiveStatus == "is_live" || e.LiveStatus == "is_upcoming",
+			ShortForm: strings.Contains(e.URL, "/shorts/"),
+		}
+		if e.Duration != nil {
+			c.DurationS, c.DurationKnown = int64(*e.Duration), true
+		}
 		if len(e.Thumbnails) > 0 {
 			c.ThumbnailURL = e.Thumbnails[len(e.Thumbnails)-1].URL
 		}
