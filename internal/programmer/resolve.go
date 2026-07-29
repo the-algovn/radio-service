@@ -12,6 +12,13 @@ const (
 	// input tokens and so the per-decision cost.
 	poolCap = 12
 
+	// libraryQueryCap bounds what the library query may contribute, so a shelf
+	// that happens to match cannot consume the whole pool and starve discovery.
+	// Respins are exempt — they are explicitly named intent, already bounded at
+	// maxRespins. With a small library, discovery is the scarce resource; if the
+	// shelf ever grows large enough for that to be backwards, this is the knob.
+	libraryQueryCap = poolCap / 3
+
 	sourceYouTube = "youtube"
 	sourceLibrary = "library"
 )
@@ -96,15 +103,26 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 		if err != nil {
 			p.d.Logger.ErrorContext(ctx, "programmer: library list failed", "query", in.LibraryQuery, "err", err)
 		}
+		fromLibrary := 0
 		for _, tr := range trs {
+			if fromLibrary >= libraryQueryCap {
+				break
+			}
+			before := len(pool)
 			add(Candidate{
 				YTID: tr.YTID, Title: tr.Title, Channel: tr.Channel,
 				DurationS: int64(tr.DurationS), Source: sourceLibrary, Cached: true,
 			}, factsOfTrack(tr.YTID, int64(tr.DurationS)))
+			if len(pool) > before {
+				fromLibrary++
+			}
 		}
 	}
 
-	// 3. YouTube discovery, in ranked order.
+	// 3. YouTube discovery. Every query's results are gathered first and ranked
+	// ONCE, so a strong result from the last query is not crowded out by a weak
+	// one from the first — which is what per-query ranking used to do.
+	var found []ingest.Candidate
 	for _, q := range in.Searches {
 		cs, err := p.d.Search.Search(ctx, q, searchN)
 		if err != nil {
@@ -112,13 +130,17 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 			continue
 		}
 		rawSearch += len(cs)
-		for _, sc := range ingest.Rank(q, cs) {
-			_, cached, _ := p.d.Library.Get(ctx, sc.YTID)
-			add(Candidate{
-				YTID: sc.YTID, Title: sc.Title, Channel: sc.Channel,
-				DurationS: sc.DurationS, Source: sourceYouTube, Cached: cached,
-			}, factsFrom(sc.Candidate))
+		found = append(found, cs...)
+	}
+	for _, sc := range ingest.Rank(strings.Join(in.Searches, " "), found) {
+		if len(pool) >= poolCap {
+			break
 		}
+		_, cached, _ := p.d.Library.Get(ctx, sc.YTID)
+		add(Candidate{
+			YTID: sc.YTID, Title: sc.Title, Channel: sc.Channel,
+			DurationS: sc.DurationS, Source: sourceYouTube, Cached: cached,
+		}, factsFrom(sc.Candidate))
 	}
 
 	p.logFunnel(ctx, rawSearch, len(pool), drops)

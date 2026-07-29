@@ -178,3 +178,62 @@ func TestResolveUsesLibraryQuery(t *testing.T) {
 	require.Len(t, pool, 1)
 	require.Equal(t, "ac1", pool[0].YTID)
 }
+
+// A library query that fills poolCap starves discovery entirely — both YouTube
+// searches then contribute nothing, after paying their full wall-clock cost.
+// With a library under 50 tracks, discovery is the scarce resource.
+func TestResolveReservesSlotsForDiscovery(t *testing.T) {
+	h := newHarness(t)
+	for i := 0; i < poolCap+5; i++ {
+		require.NoError(t, h.lib.Add(h.ctx, library.Track{
+			YTID: fmt.Sprintf("lib%02d", i), Title: fmt.Sprintf("Acoustic %02d", i), DurationS: 200,
+		}))
+	}
+	h.search.byQuery["q"] = []ingest.Candidate{
+		{YTID: "yt1", Title: "YT One", DurationS: 200, DurationKnown: true},
+		{YTID: "yt2", Title: "YT Two", DurationS: 200, DurationKnown: true},
+	}
+
+	pool, err := h.prog.resolve(h.ctx, Intent{LibraryQuery: "acoustic", Searches: []string{"q"}})
+	require.NoError(t, err)
+
+	var fromYouTube, fromLibrary int
+	for _, c := range pool {
+		if c.Source == sourceYouTube {
+			fromYouTube++
+		} else {
+			fromLibrary++
+		}
+	}
+	require.LessOrEqual(t, fromLibrary, libraryQueryCap,
+		"the library query must not eat the whole pool")
+	require.Equal(t, 2, fromYouTube, "both discovered tracks must survive")
+}
+
+// Ranking must span every query, not restart per query — otherwise the first
+// query's worst result outranks the second query's best.
+func TestResolveRanksAcrossAllQueries(t *testing.T) {
+	h := newHarness(t)
+	var weak []ingest.Candidate
+	for i := 0; i < poolCap; i++ {
+		weak = append(weak, ingest.Candidate{
+			YTID: fmt.Sprintf("w%02d", i), Title: fmt.Sprintf("Bài Gì Đó (Remix) %02d", i),
+			Channel: "Random", DurationS: 200, DurationKnown: true,
+		})
+	}
+	h.search.byQuery["q1"] = weak
+	h.search.byQuery["q2"] = []ingest.Candidate{{
+		YTID: "strong", Title: "Bài Gì Đó", Channel: "Ca Sĩ - Topic",
+		DurationS: 200, DurationKnown: true,
+	}}
+
+	pool, err := h.prog.resolve(h.ctx, Intent{Searches: []string{"q1", "q2"}})
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(pool))
+	for _, c := range pool {
+		ids = append(ids, c.YTID)
+	}
+	require.Contains(t, ids, "strong",
+		"a Topic-channel result from the second query must not be crowded out by the first query's remixes")
+}
