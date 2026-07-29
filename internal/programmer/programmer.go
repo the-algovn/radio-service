@@ -349,6 +349,7 @@ func (p *Programmer) enqueueChoice(ctx context.Context, c Choice) bool {
 	if _, err := p.d.Requests.Create(ctx, request.Item{
 		Source: request.SourceAI, YTID: cand.YTID, Title: cand.Title, Channel: cand.Channel,
 		DurationS: cand.DurationS, Status: status, Reason: c.Reason,
+		ThumbnailURL: cand.ThumbnailURL,
 	}); err != nil {
 		p.d.Logger.ErrorContext(ctx, "programmer: enqueue failed", "err", err)
 		return false

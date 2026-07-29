@@ -237,3 +237,65 @@ func TestResolveRanksAcrossAllQueries(t *testing.T) {
 	require.Contains(t, ids, "strong",
 		"a Topic-channel result from the second query must not be crowded out by the first query's remixes")
 }
+
+// The ranker's verdict must reach the model. Otherwise a heavily-penalized
+// compilation is presented as indistinguishable from a Topic-channel master.
+func TestResolveCarriesRankVerdictIntoThePool(t *testing.T) {
+	h := newHarness(t)
+	h.search.byQuery["q"] = []ingest.Candidate{
+		{YTID: "junk", Title: "Bài Gì Đó (Tuyển Tập Remix)", Channel: "Kênh",
+			DurationS: 200, DurationKnown: true},
+		{YTID: "good", Title: "Bài Gì Đó", Channel: "Ca Sĩ - Topic",
+			DurationS: 200, DurationKnown: true},
+	}
+
+	pool, err := h.prog.resolve(h.ctx, Intent{Searches: []string{"q"}})
+	require.NoError(t, err)
+	require.Len(t, pool, 2)
+
+	byID := map[string]Candidate{}
+	for _, c := range pool {
+		byID[c.YTID] = c
+	}
+	require.Greater(t, byID["good"].Score, byID["junk"].Score)
+	require.NotEmpty(t, byID["junk"].Notes, "a penalized candidate must carry its notes")
+
+	// And the notes must survive marshalling into the phase-2 prompt.
+	poolJSON, err := json.Marshal(pool)
+	require.NoError(t, err)
+	require.Contains(t, string(poolJSON), "penalty:")
+}
+
+// Library candidates have no ranker verdict; their notes must simply be absent
+// rather than misleading the model with a zero score it might read as "bad".
+func TestResolveOmitsNotesForLibraryCandidates(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.lib.Add(h.ctx, library.Track{YTID: "lib", Title: "Lib", DurationS: 200}))
+
+	pool, err := h.prog.resolve(h.ctx, Intent{Respins: []string{"lib"}})
+	require.NoError(t, err)
+	require.Len(t, pool, 1)
+	require.Empty(t, pool[0].Notes)
+}
+
+// ingest.Search extracts a thumbnail and resolve.Candidate dropped it, so AI
+// picks queued with no artwork while listener requests had it.
+func TestResolveCarriesThumbnailIntoTheQueue(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.listeners.Beat(h.ctx, "s1"))
+	h.search.byQuery["q"] = []ingest.Candidate{{
+		YTID: "art", Title: "Art", Channel: "Ca Sĩ - Topic", DurationS: 200,
+		DurationKnown: true, ThumbnailURL: "https://i.ytimg.com/art.jpg",
+	}}
+	h.model.replies = []string{
+		`{"searches":["q"],"library_query":"","respins":[],"note":"n"}`,
+		`{"picks":[{"yt_id":"art","reason":"hợp lúc này"}]}`,
+	}
+
+	h.prog.RunOnce(h.ctx)
+
+	pending, err := h.requests.Pending(h.ctx)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "https://i.ytimg.com/art.jpg", pending[0].ThumbnailURL)
+}

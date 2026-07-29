@@ -30,7 +30,16 @@ type Candidate struct {
 	Channel   string `json:"channel"`
 	DurationS int64  `json:"duration_s"`
 	Source    string `json:"source"` // youtube | library
-	Cached    bool   `json:"-"`      // library hit → enqueue ready, not approved
+	// Score and Notes are the ranker's verdict, carried through so phase 2 can
+	// see that a candidate is a compilation or a karaoke version. They were
+	// computed and discarded before, which left the model choosing on title
+	// alone. Library candidates are unranked and carry neither.
+	Score int      `json:"score,omitempty"`
+	Notes []string `json:"notes,omitempty"`
+	// ThumbnailURL rides to the queue, not to the model — hence json:"-", which
+	// also keeps an attacker-supplied URL out of the phase-2 prompt.
+	ThumbnailURL string `json:"-"`
+	Cached       bool   `json:"-"` // library hit → enqueue ready, not approved
 }
 
 // resolve turns phase-1 intent into a pool of real tracks, with no LLM
@@ -140,6 +149,7 @@ func (p *Programmer) resolve(ctx context.Context, in Intent) ([]Candidate, error
 		add(Candidate{
 			YTID: sc.YTID, Title: sc.Title, Channel: sc.Channel,
 			DurationS: sc.DurationS, Source: sourceYouTube, Cached: cached,
+			Score: sc.Score, Notes: sc.Notes, ThumbnailURL: sc.ThumbnailURL,
 		}, factsFrom(sc.Candidate))
 	}
 

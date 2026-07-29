@@ -17,6 +17,9 @@ const maxPicks = 2
 const chooseContract = `Bạn PHẢI trả lời bằng đúng một JSON object, không markdown, theo schema:
 {"picks":[{"yt_id":"<yt_id lấy NGUYÊN VĂN từ candidates>","reason":"<vì sao bài NÀY hợp lúc này>"}]}
 Chỉ được chọn yt_id có trong <candidates>; tuyệt đối không tự nghĩ ra yt_id.
+Mỗi candidate có "score" và "notes" do bộ lọc chấm: score cao là bản gốc đáng phát,
+score âm kèm "penalty:..." là bản remix, karaoke, tuyển tập, hoặc KHÔNG PHẢI nhạc.
+Ưu tiên score cao; tránh candidate có penalty về định dạng (podcast, review, trailer...).
 Lý do phải nói về đúng bài đã chọn, viết ngắn, tự nhiên như lời dẫn.`
 
 // BuildChoosePrompts assembles phase 2. Both the brief and the candidate list
