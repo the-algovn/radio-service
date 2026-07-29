@@ -54,3 +54,24 @@ func TestBuildIntentPromptsDelimitsBrief(t *testing.T) {
 	require.Contains(t, user, `"local_time"`)
 	require.NotContains(t, system, "reason", "phase 1 must not ask for reasons")
 }
+
+// The contract must demand concrete songs. A mood query returns compilations
+// and hour-long mixes, all of which blow the duration ceiling and empty the pool.
+func TestIntentContractDemandsConcreteSongs(t *testing.T) {
+	system, _ := BuildIntentPrompts("PERSONA", "{}")
+
+	require.Contains(t, system, "nghệ sĩ")
+	require.Contains(t, system, "tên bài")
+	for _, banned := range []string{"tuyển tập", "liên khúc", "nonstop", "mixtape", "1 hour"} {
+		require.Contains(t, system, banned,
+			"the contract must name %q as forbidden", banned)
+	}
+}
+
+// The wire schema is deliberately unchanged: phase 1 still returns `searches`.
+func TestIntentSchemaUnchanged(t *testing.T) {
+	in, err := ParseIntent(`{"searches":["Sơn Tùng M-TP Nắng Ấm Xa Dần"],` +
+		`"library_query":"","respins":[],"note":"n"}`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Sơn Tùng M-TP Nắng Ấm Xa Dần"}, in.Searches)
+}

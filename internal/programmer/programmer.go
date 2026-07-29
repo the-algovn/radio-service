@@ -37,9 +37,12 @@ const (
 	maxTrackSeconds = 600 // spec §5: AI picks ≤ 10 min
 	minTrackSeconds = 60
 	briefPlays      = 10
-	searchN         = 10
-	maxReasonRunes  = 200
-	retryBackoff    = 2 * time.Second
+	// searchN is deliberately 20, not 10: ytsearch issues one innertube POST for
+	// the whole batch and only paginates beyond ~20, so doubling the depth costs
+	// no extra request.
+	searchN        = 20
+	maxReasonRunes = 200
+	retryBackoff   = 2 * time.Second
 )
 
 type Searcher interface {

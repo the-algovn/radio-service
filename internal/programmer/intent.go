@@ -15,13 +15,25 @@ const (
 // written here would describe a search string, and would then be attached to
 // whatever track the ranker happened to return. Reasons are authored in phase 2,
 // in the presence of the real track.
+//
+// Each search must name ONE concrete song. A mood-shaped query ("nhạc buồn đêm
+// khuya") returns a page of tuyển tập / liên khúc / nonstop uploads running 30
+// to 180 minutes — every one over the ten-minute ceiling, so the pool resolves
+// empty and the station falls back to re-spinning its own small library. An
+// artist-plus-title query returns the canonical upload and the "- Topic" audio
+// at the top, which is what the ranker is built to select.
 const intentContract = `Bạn PHẢI trả lời bằng đúng một JSON object, không markdown, theo schema:
-{"searches":["<truy vấn YouTube để tìm bài mới, tối đa hai truy vấn>"],
+{"searches":["<tên nghệ sĩ + tên bài hát CỤ THỂ, tối đa hai truy vấn>"],
  "library_query":"<từ khoá tìm trong kho nhạc có sẵn, rỗng nếu không cần>",
  "respins":["<yt_id lấy từ library.sample nếu muốn phát lại>"],
  "note":"<một câu về ý đồ sắp xếp ngay lúc này>"}
+Mỗi truy vấn trong "searches" PHẢI là MỘT bài hát cụ thể: tên nghệ sĩ kèm tên bài.
+Ví dụ đúng: "Sơn Tùng M-TP Nắng Ấm Xa Dần". Ví dụ SAI: "nhạc buồn đêm khuya".
+TUYỆT ĐỐI không dùng: "hay nhất", "tuyển tập", "liên khúc", "nonstop", "mixtape",
+"playlist", "1 hour", "tổng hợp" — những truy vấn đó chỉ trả về bản dài hàng giờ,
+đài không phát được.
 Ở bước này CHƯA chọn bài và CHƯA nêu lý do — chỉ nêu ý đồ.
-Chọn hướng hợp giờ và không khí đài; ưu tiên đa dạng, tránh bài vừa phát và bài đã có trong pending.
+Chọn bài hợp giờ và không khí đài; ưu tiên đa dạng, tránh bài vừa phát và bài đã có trong pending.
 Nếu không có gì cần thêm, trả về các mảng rỗng.`
 
 // BuildIntentPrompts assembles phase 1: persona bible plus the intent contract,
