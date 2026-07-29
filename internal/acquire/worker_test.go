@@ -102,6 +102,31 @@ func TestWorkerTooLongFailsImmediatelyNoRetry(t *testing.T) {
 	require.Len(t, prod.frames, 1)    // exactly one queue snapshot published
 }
 
+// A not-music error is the other permanent-failure arm, alongside too-long —
+// nothing exercised it before, so swapping reasonTooLong/reasonNotMusic or
+// dropping ErrNotMusic from the errors.Is check would have been silent. Same
+// contract as too-long: fail on the FIRST RunOnce, no BumpAttempts retries.
+func TestWorkerNotMusicFailsImmediatelyNoRetry(t *testing.T) {
+	reqs := request.NewMemStore()
+	ctx := context.Background()
+	_, err := reqs.Create(ctx, request.Item{Source: request.SourceListener, RequestedBy: "u1",
+		YTID: "yta", Title: "T", Channel: "C", DurationS: 240, Status: request.StatusApproved})
+	require.NoError(t, err)
+
+	prod := &memProducer{}
+	w := newWorker(reqs, func(context.Context, string, string, string) (library.Track, bool, error) {
+		return library.Track{}, false, fmt.Errorf("YouTube xếp loại: News & Politics: %w", ErrNotMusic)
+	}, prod)
+
+	w.RunOnce(ctx)
+	mine, err := reqs.ByUser(ctx, "u1", 1)
+	require.NoError(t, err)
+	require.Equal(t, request.StatusFailed, mine[0].Status)
+	require.Equal(t, "không phải nhạc, đài không phát được", mine[0].FailReason)
+	require.Zero(t, mine[0].Attempts) // no BumpAttempts retry cycle
+	require.Len(t, prod.frames, 1)    // exactly one queue snapshot published
+}
+
 func TestWorkerIdleWhenNothingApproved(t *testing.T) {
 	prod := &memProducer{}
 	w := newWorker(request.NewMemStore(), func(context.Context, string, string, string) (library.Track, bool, error) {
