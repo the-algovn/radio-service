@@ -33,7 +33,7 @@ TUYỆT ĐỐI không dùng: "hay nhất", "tuyển tập", "liên khúc", "nons
 "playlist", "1 hour", "tổng hợp" — những truy vấn đó chỉ trả về bản dài hàng giờ,
 đài không phát được.
 Ở bước này CHƯA chọn bài và CHƯA nêu lý do — chỉ nêu ý đồ.
-Chọn bài hợp giờ và không khí đài; ưu tiên đa dạng, tránh bài vừa phát và bài đã có trong pending.
+Nêu bài muốn tìm cho hợp giờ và không khí đài; ưu tiên đa dạng, tránh bài vừa phát và bài đã có trong pending.
 Nếu không có gì cần thêm, trả về các mảng rỗng.`
 
 // BuildIntentPrompts assembles phase 1: persona bible plus the intent contract,
