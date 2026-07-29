@@ -5,8 +5,11 @@
 --
 -- '' means NOT COMPUTED, and is not the same as a real key — matching the
 -- unmeasured-is-not-zero convention 00012 established for tail cues. Existing
--- rows start uncomputed and are filled as tracks are re-acquired, so this is a
--- quality improvement rather than a deploy prerequisite.
+-- rows start uncomputed and STAY that way: Acquire returns early on a cached
+-- library row, so a row already in the library is never re-acquired and never
+-- gets a key filled in. Backfilling them needs a separate one-off job, not
+-- written here; until then this is a quality improvement for newly acquired
+-- tracks, not a deploy prerequisite.
 --
 -- The index is deliberately NOT UNIQUE. Diacritic folding collapses Vietnamese
 -- words that differ only by tone (chờ / chợ / cho all fold to "cho"), so a false
