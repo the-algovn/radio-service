@@ -111,19 +111,21 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("store: %w", err)
 	}
-	artist := channel
+	// SongKey comes ONLY from real track metadata — never from channel/label,
+	// which are search-result text, not an (artist, title) pair. Folding a
+	// channel and a raw video title mis-keys most "Artist - Title" uploads onto
+	// the artist alone, over-merging every other song by that artist onto one
+	// key. songkey.Of already returns the "" sentinel when artist is "", so no
+	// metadata means no key, by construction.
+	var artist string
 	if len(meta.Artists) > 0 {
 		artist = meta.Artists[0]
-	}
-	name := label
-	if meta.Track != "" {
-		name = meta.Track
 	}
 	tr := library.Track{
 		YTID: ytID, Title: label, Channel: channel, DurationS: dur,
 		ArtifactID: art.ID, InputI: i, InputTP: tp, InputLRA: lra,
 		TailSilenceS: tailSilenceS, TailDecayS: tailDecayS,
-		SongKey: songkey.Of(artist, name),
+		SongKey: songkey.Of(artist, meta.Track),
 	}
 	// Unlike the old lab RPC, an Add failure here is an error: the worker's
 	// track MUST reach the library or the request can never air.

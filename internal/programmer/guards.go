@@ -5,7 +5,6 @@ import (
 
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/request"
-	"github.com/the-algovn/radio-service/internal/songkey"
 )
 
 // dropReason names why a candidate did not reach the pool. It replaces a bare
@@ -49,13 +48,17 @@ type factsOf struct {
 	ShortForm     bool
 }
 
-// factsFrom builds facts for a YouTube search result. SongKey is a
-// best-effort fold of the channel and title: search results carry no
-// artist/track metadata (it is not in the flat JSON), unlike a library row's
-// stored, acquire-time-computed key.
+// factsFrom builds facts for a YouTube search result. SongKey is left "" —
+// a search result carries no artist/track metadata, only a channel name and a
+// raw video title, and songkey.Of on that pair mis-keys most Vietnamese
+// "Artist - Title" uploads onto the artist alone. That folds every other song
+// by the same artist onto one key, so once one airs, dropRecentSong would
+// reject the rest of that artist's catalogue for the whole recency window.
+// High precision, lower recall: dropRecentSong only fires on tracks whose
+// upload carried real Content-ID track/artists metadata (see factsOfTrack).
 func factsFrom(c ingest.Candidate) factsOf {
 	return factsOf{
-		YTID: c.YTID, SongKey: songkey.Of(c.Channel, c.Title),
+		YTID: c.YTID,
 		DurationS: c.DurationS, DurationKnown: c.DurationKnown,
 		Live: c.Live, ShortForm: c.ShortForm,
 	}

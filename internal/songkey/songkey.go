@@ -46,10 +46,14 @@ func fold(s string) string {
 	// It corrupts the artist side the same way, reducing the collab
 	// "Karik - Only C" to "only-c".
 	//
-	// First-segment can still mis-key an "Artist - Title" upload onto the
-	// artist, but that is an under-merge — a duplicate slips through — which is
-	// the safe direction for a soft, non-unique signal. The separator regex
-	// requires surrounding whitespace, so "Sơn Tùng M-TP" is never split.
+	// First-segment mis-keys an "Artist - Title" upload onto the artist — that
+	// is an OVER-merge, not an under-merge: every other song by that artist
+	// then folds onto the same key, which is the dangerous direction for a
+	// dedup guard. Of is therefore only safe to call on a real (artist, title)
+	// pair from track metadata, never on a channel name and a raw video title —
+	// callers with only search-result text must leave the key uncomputed. The
+	// separator regex requires surrounding whitespace, so "Sơn Tùng M-TP" is
+	// never split.
 	if parts := separator.Split(s, -1); len(parts) > 1 {
 		s = strings.TrimSpace(parts[0])
 	}

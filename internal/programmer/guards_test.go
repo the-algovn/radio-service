@@ -200,3 +200,21 @@ func TestFactsFromCandidateCarriesEveryFlag(t *testing.T) {
 	require.True(t, f.Live)
 	require.True(t, f.ShortForm)
 }
+
+// The regression this guard exists for: a search result carries no
+// artist/track metadata, only a channel name and a raw video title.
+// songkey.Of on that pair mis-keys "Artist - Title" uploads onto the artist,
+// so these two unrelated Đen Vâu songs would fold to the same identity —
+// "den-vau-official/den" — and once one aired, dropRecentSong would reject
+// the other as a duplicate for the whole recency window. factsFrom must
+// leave SongKey "" so classify never sees that false identity.
+func TestFactsFromLeavesSongKeyEmpty(t *testing.T) {
+	f1 := factsFrom(ingest.Candidate{
+		YTID: "a", Channel: "Đen Vâu Official", Title: "Đen - Trốn Tìm ft. MTV Band (M/V)",
+	})
+	f2 := factsFrom(ingest.Candidate{
+		YTID: "b", Channel: "Đen Vâu Official", Title: "Đen - Mang Tiền Về Cho Mẹ ft. Nguyên Thảo (M/V)",
+	})
+	require.Empty(t, f1.SongKey)
+	require.Empty(t, f2.SongKey)
+}
