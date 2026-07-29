@@ -28,14 +28,18 @@ import (
 
 const (
 	tickEvery        = 60 * time.Second
-	queueDepthTarget = 3   // pending items (approved+ready, both sources)
-	recentWindow     = 50  // AI-pick no-recent-air filter (air-log entries)
-	maxTrackSeconds  = 600 // spec §5: AI picks ≤ 10 min
-	minTrackSeconds  = 60
-	briefPlays       = 10
-	searchN          = 10
-	maxReasonRunes   = 200
-	retryBackoff     = 2 * time.Second
+	queueDepthTarget = 3  // pending items (approved+ready, both sources)
+	recentWindow     = 50 // AI-pick no-recent-air filter (air-log entries)
+	// failedWindow is how many terminal requests are scanned for failures. A
+	// track that failed to download will fail again; without this the
+	// programmer re-picks it every tick forever.
+	failedWindow    = 50
+	maxTrackSeconds = 600 // spec §5: AI picks ≤ 10 min
+	minTrackSeconds = 60
+	briefPlays      = 10
+	searchN         = 10
+	maxReasonRunes  = 200
+	retryBackoff    = 2 * time.Second
 )
 
 type Searcher interface {

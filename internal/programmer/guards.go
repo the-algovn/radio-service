@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/the-algovn/radio-service/internal/ingest"
+	"github.com/the-algovn/radio-service/internal/request"
 )
 
 // dropReason names why a candidate did not reach the pool. It replaces a bare
@@ -21,6 +22,8 @@ const (
 	dropQueued    dropReason = "queued"
 	dropDupe      dropReason = "dupe"
 	dropPoolFull  dropReason = "pool-full"
+	dropNextUp    dropReason = "next-up"
+	dropFailed    dropReason = "recently-failed"
 	// dropReadFailed is a guard read that errored, NOT a real disqualification.
 	// It has its own reason because the funnel histogram is this task's whole
 	// point: labelling a Postgres outage as "queued" would misreport the one
@@ -56,7 +59,9 @@ func factsOfTrack(ytID string, durationS int64) factsOf {
 // candidate hit the database on its own, which cost up to 34 round-trips per
 // decision and made a transient DB error silently thin the pool.
 type guards struct {
-	recent map[string]bool
+	recent   map[string]bool
+	nextUpID string
+	failed   map[string]bool
 }
 
 func (p *Programmer) buildGuards(ctx context.Context) (guards, error) {
@@ -64,11 +69,23 @@ func (p *Programmer) buildGuards(ctx context.Context) (guards, error) {
 	if err != nil {
 		return guards{}, err
 	}
-	set := make(map[string]bool, len(recent))
+	g := guards{recent: make(map[string]bool, len(recent)), failed: map[string]bool{}}
 	for _, id := range recent {
-		set[id] = true
+		g.recent[id] = true
 	}
-	return guards{recent: set}, nil
+	// Non-fatal: a missing next-up or an unreadable terminal list degrades to
+	// today's behaviour rather than skipping the decision entirely.
+	if nu, found, err := p.d.Sched.GetNextUp(ctx); err == nil && found {
+		g.nextUpID = nu.YTID
+	}
+	if items, err := p.d.Requests.RecentTerminal(ctx, failedWindow); err == nil {
+		for _, it := range items {
+			if it.Status == request.StatusFailed {
+				g.failed[it.YTID] = true
+			}
+		}
+	}
+	return g, nil
 }
 
 // classify reports why a candidate must be skipped, or dropNone to keep it.
@@ -95,6 +112,12 @@ func (p *Programmer) classify(ctx context.Context, f factsOf, g guards) (dropRea
 	}
 	if g.recent[f.YTID] {
 		return dropRecent, nil
+	}
+	if f.YTID == g.nextUpID {
+		return dropNextUp, nil
+	}
+	if g.failed[f.YTID] {
+		return dropFailed, nil
 	}
 	queued, err := p.d.Requests.HasPendingYTID(ctx, f.YTID)
 	if err != nil {

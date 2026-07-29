@@ -9,6 +9,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
 func TestClassifyReasons(t *testing.T) {
@@ -93,6 +94,57 @@ func TestClassifyReturnsReadFailedNotQueuedOnGuardError(t *testing.T) {
 	got, err := h.prog.classify(h.ctx, factsOf{YTID: "x", DurationS: 200, DurationKnown: true}, g)
 	require.Error(t, err)
 	require.Equal(t, dropReadFailed, got)
+}
+
+// The committed next-up track is about to play. Queueing it again is the
+// highest-frequency real duplication in the system, and no guard saw it.
+func TestClassifyRejectsNextUp(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.sched.SetNextUp(h.ctx, schedule.NextUp{
+		YTID: "soon", Title: "Soon", Channel: "C",
+	}))
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+
+	got, err := h.prog.classify(h.ctx, factsOf{YTID: "soon", DurationS: 200, DurationKnown: true}, g)
+	require.NoError(t, err)
+	require.Equal(t, dropNextUp, got)
+}
+
+// A failed request is invisible to HasPendingYTID, so without this the
+// programmer re-picks a geo-blocked upload every single tick.
+func TestClassifyRejectsRecentlyFailed(t *testing.T) {
+	h := newHarness(t)
+	it, err := h.requests.Create(h.ctx, request.Item{
+		Source: request.SourceAI, YTID: "blocked", Title: "B",
+		DurationS: 200, Status: request.StatusApproved,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.requests.MarkFailed(h.ctx, it.ID, "geo"))
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+
+	got, err := h.prog.classify(h.ctx, factsOf{YTID: "blocked", DurationS: 200, DurationKnown: true}, g)
+	require.NoError(t, err)
+	require.Equal(t, dropFailed, got)
+}
+
+// An aired request must NOT be treated as failed — recency already governs it,
+// with its own window.
+func TestClassifyIgnoresAiredTerminalRequests(t *testing.T) {
+	h := newHarness(t)
+	it, err := h.requests.Create(h.ctx, request.Item{
+		Source: request.SourceAI, YTID: "played", Title: "P",
+		DurationS: 200, Status: request.StatusReady,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.requests.MarkAired(h.ctx, it.ID, h.clock.Now()))
+
+	g, err := h.prog.buildGuards(h.ctx)
+	require.NoError(t, err)
+	require.False(t, g.failed["played"])
 }
 
 func TestFactsFromCandidateCarriesEveryFlag(t *testing.T) {
