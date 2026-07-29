@@ -59,3 +59,51 @@ func TestRankDedupeOverlappingPenalties(t *testing.T) {
 	}
 	require.Equal(t, 1, penaltyCount, "expected exactly 1 penalty note, got %v", scored.Notes)
 }
+
+// "live" must not match inside Deliver/Olive, and "mix" must not match inside
+// mixtape via a bare substring test.
+func TestRankMatchesOnWordBoundaries(t *testing.T) {
+	got := Rank("deliver me", []Candidate{
+		c("d", "Deliver Me", "Ca Sĩ - Topic", 240, 500_000),
+	})
+	for _, n := range got[0].Notes {
+		require.NotContains(t, n, "penalty:live",
+			"'live' must not match inside 'Deliver': %v", got[0].Notes)
+	}
+}
+
+// An Official Trailer currently scores +20 from the "official" bonus and beats
+// a real song. Trailers are not music.
+func TestRankDoesNotRewardTrailersAsOfficial(t *testing.T) {
+	got := Rank("bài gì đó", []Candidate{
+		c("trailer", "Bài Gì Đó | Official Trailer", "Studio", 150, 900_000),
+		c("song", "Bài Gì Đó", "Ca Sĩ", 240, 400_000),
+	})
+	require.Equal(t, "song", got[0].YTID, "a real song must outrank an official trailer")
+}
+
+// The penalty list presupposed every result was already a song. Nothing caught
+// a podcast, an interview, or a review.
+func TestRankPenalizesNonMusicFormats(t *testing.T) {
+	for _, title := range []string{
+		"Podcast tập 42 — chuyện đêm khuya",
+		"Phỏng vấn độc quyền với ca sĩ",
+		"Reaction: nghe lần đầu",
+		"Review phim mới nhất",
+	} {
+		got := Rank("chuyện đêm khuya", []Candidate{
+			c("x", title, "Kênh Nào Đó", 240, 500_000),
+			c("song", "Chuyện Đêm Khuya", "Ca Sĩ - Topic", 240, 500_000),
+		})
+		require.Equal(t, "song", got[0].YTID, "a song must outrank %q", title)
+	}
+}
+
+// Vietnamese compilation vocabulary is what a mood query actually returns.
+func TestRankPenalizesVietnameseCompilations(t *testing.T) {
+	got := Rank("nhạc trữ tình", []Candidate{
+		c("comp", "Tuyển Tập Nhạc Trữ Tình Hay Nhất", "Kênh Nhạc", 400, 5_000_000),
+		c("song", "Nhạc Trữ Tình", "Ca Sĩ - Topic", 240, 500_000),
+	})
+	require.Equal(t, "song", got[0].YTID)
+}
