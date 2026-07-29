@@ -342,36 +342,16 @@ func (p *Programmer) enqueueChoice(ctx context.Context, c Choice) bool {
 	return true
 }
 
-// filtered reports whether ytID must be skipped: recently aired, already
-// queued, or out of duration bounds.
-func (p *Programmer) filtered(ctx context.Context, ytID string, durationS int64, recent map[string]bool) (bool, error) {
-	if durationS < minTrackSeconds || durationS > maxTrackSeconds {
-		return true, nil
-	}
-	if recent[ytID] {
-		return true, nil
-	}
-	queued, err := p.d.Requests.HasPendingYTID(ctx, ytID)
-	if err != nil {
-		return true, err
-	}
-	return queued, nil
-}
-
-// respin is tier 3: a deterministic library re-spin through the same filters.
+// respin is tier 3: a deterministic library re-spin through the same guards.
 // It is used by keyless mode, an empty candidate pool, and an exhausted repair.
 //
 // It sets NO reason on purpose. Since v2 the DJ speaks pick reasons on air, so
 // fabricating one here would put a lie in the DJ's mouth; an empty reason is
 // already the convention for shuffle plays.
 func (p *Programmer) respin(ctx context.Context) bool {
-	recent, err := p.d.Log.RecentYTIDs(ctx, recentWindow)
+	g, err := p.buildGuards(ctx)
 	if err != nil {
 		return false
-	}
-	recentSet := map[string]bool{}
-	for _, id := range recent {
-		recentSet[id] = true
 	}
 	ids, err := p.d.Library.AllIDs(ctx)
 	if err != nil || len(ids) == 0 {
@@ -383,7 +363,7 @@ func (p *Programmer) respin(ctx context.Context) bool {
 	if err != nil || !ok {
 		return false
 	}
-	if skip, _ := p.filtered(ctx, tr.YTID, int64(tr.DurationS), recentSet); skip {
+	if why, _ := p.classify(ctx, factsOfTrack(tr.YTID, int64(tr.DurationS)), g); why != dropNone {
 		return false
 	}
 	if _, err := p.d.Requests.Create(ctx, request.Item{
