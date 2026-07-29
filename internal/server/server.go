@@ -433,6 +433,13 @@ func (s *Server) DownloadTrack(ctx context.Context, req *radiolabv1.DownloadTrac
 	})
 	tr, cached, err := acq.Acquire(ctx, req.GetYtId(), req.GetTitle(), req.GetChannel())
 	if err != nil {
+		// ErrTooLong/ErrNotMusic are permanent: retrying the same yt_id cannot
+		// change the probed duration or the extracted category, so telling the
+		// console Unavailable ("retry later") would be a lie. Everything else
+		// (yt-dlp/ffmpeg/network failures) really is transient.
+		if errors.Is(err, acquire.ErrTooLong) || errors.Is(err, acquire.ErrNotMusic) {
+			return nil, status.Errorf(codes.FailedPrecondition, "acquire: %v", err)
+		}
 		return nil, status.Errorf(codes.Unavailable, "acquire: %v", err)
 	}
 	a, err := s.deps.Store.Get(ctx, tr.ArtifactID)

@@ -186,6 +186,51 @@ func TestDownloadTrackCacheMissRunsFullPipelineAndAddsToLibrary(t *testing.T) {
 	require.InDelta(t, 217.5, tr.DurationS, 0.01)
 }
 
+// A not-music rejection is permanent: retrying the same yt_id cannot change
+// the category YouTube assigned it. Mapping it to Unavailable would tell the
+// console "retry later" about a condition retrying cannot fix.
+func TestDownloadTrackNotMusicReturnsFailedPrecondition(t *testing.T) {
+	bin := fakeIngestBinDir(t)
+	// Same fake yt-dlp as fakeIngestBinDir, plus a sidecar info.json carrying a
+	// denylisted category — the shape acquire.Acquire's not-music gate rejects.
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "yt-dlp"), []byte(`#!/bin/sh
+set -e
+url="$1"
+shift
+outtpl=""
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-o" ]; then
+		outtpl="$2"
+		shift 2
+	else
+		shift
+	fi
+done
+ytid="${url##*v=}"
+dir="$(dirname "$outtpl")"
+printf 'fake-audio' > "$dir/$ytid.m4a"
+printf '{"categories":["News & Politics"]}' > "$dir/$ytid.info.json"
+`), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	lib := library.NewMemLibrary()
+	store := artifact.NewFakeStore()
+	s := New(Deps{
+		Store: store, Library: lib,
+		Ingest: &ingest.Runner{Bin: filepath.Join(bin, "yt-dlp")},
+		TmpDir: t.TempDir(),
+	})
+
+	_, err := s.DownloadTrack(context.Background(), &radiolabv1.DownloadTrackRequest{
+		YtId: "tintuc1", Title: "Tin Tức", Channel: "Kênh",
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	_, found, gerr := lib.Get(context.Background(), "tintuc1")
+	require.NoError(t, gerr)
+	require.False(t, found, "a rejected track must not reach the library")
+}
+
 func TestDownloadTrackCacheHitSkipsIngestAndReturnsCachedTrue(t *testing.T) {
 	bin := fakeIngestBinDir(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
