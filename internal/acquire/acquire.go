@@ -72,6 +72,14 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("download: %w", err)
 	}
+	// The extraction that resolved -f bestaudio already told us what this is.
+	// Checked immediately, before Probe/Loudnorm run their full-file ffmpeg
+	// passes over bytes that are about to be discarded anyway: a reject here
+	// still spent the download, but saves the decode. Still before
+	// Store.SaveFile — the bytes must never reach storage or the library.
+	if notMusic, why := meta.NotMusic(); notMusic {
+		return library.Track{}, false, fmt.Errorf("%s: %w", why, ErrNotMusic)
+	}
 	dur, err := a.d.Probe(ctx, p)
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("probe: %w", err)
@@ -82,12 +90,6 @@ func (a *Acquirer) Acquire(ctx context.Context, ytID, title, channel string) (li
 	i, tp, lra, err := a.d.Loudnorm(ctx, p)
 	if err != nil {
 		return library.Track{}, false, fmt.Errorf("loudnorm: %w", err)
-	}
-	// The extraction that resolved -f bestaudio already told us what this is.
-	// Reject before the blob is stored: the bytes are spent either way, but
-	// storage and a library row are not.
-	if notMusic, why := meta.NotMusic(); notMusic {
-		return library.Track{}, false, fmt.Errorf("%s: %w", why, ErrNotMusic)
 	}
 	// Unlike Probe and Loudnorm above, whose values the feeder cannot air
 	// without, a cue is an optimisation: its absence just costs a hard cut
