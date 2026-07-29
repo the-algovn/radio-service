@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/radio-lab ./cmd/radio-lab \
- && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/radio-lab-migrate ./cmd/radio-lab-migrate
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/radio-lab-migrate ./cmd/radio-lab-migrate \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/radio-lab-cues ./cmd/radio-lab-cues
 
 FROM debian:bookworm-slim AS runtime
 # ffmpeg from apt; yt-dlp as the standalone binary (a python zipapp) so it stays
@@ -17,7 +18,7 @@ RUN apt-get update \
  && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 RUN useradd -u 10001 -m app
 WORKDIR /app
-COPY --from=build /out/radio-lab /out/radio-lab-migrate /usr/local/bin/
+COPY --from=build /out/radio-lab /out/radio-lab-migrate /out/radio-lab-cues /usr/local/bin/
 COPY persona/ ./persona/
 # LAB_DATA_DIR is an emptyDir mount in prod; ensure the non-root user owns /app.
 RUN mkdir -p /app/lab-data && chown -R app:app /app
