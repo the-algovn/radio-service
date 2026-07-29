@@ -226,7 +226,15 @@ func (p *Programmer) decide(ctx context.Context, pending int) {
 		return
 	}
 
-	choices := p.chooseFrom(ctx, pers, string(choiceBriefJSON), pool, wantPicks(pending))
+	// Clamp to what the pool can actually satisfy. wantPicks only knows the
+	// queue depth, so against a thin pool it would instruct the model to choose
+	// more tracks than exist — which invites an invented yt_id, dropped at
+	// ParseChoice, at the cost of a billed repair turn.
+	want := wantPicks(pending)
+	if want > len(pool) {
+		want = len(pool)
+	}
+	choices := p.chooseFrom(ctx, pers, string(choiceBriefJSON), pool, want)
 	if len(choices) == 0 {
 		respinOnly()
 		return

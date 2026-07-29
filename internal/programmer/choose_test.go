@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/the-algovn/radio-service/internal/ingest"
 )
 
 func pool() []Candidate {
@@ -92,4 +94,24 @@ func TestRepairUserNamesTheViolation(t *testing.T) {
 	got := RepairUser("original", `{"picks":[]}`, "yt_id ghost is not in <candidates>")
 	require.Contains(t, got, "original")
 	require.Contains(t, got, "ghost")
+}
+
+// The wake gate guarantees pending <= 1, so wantPicks always asks for 2. Against
+// a one-candidate pool that instructs the model to "choose exactly 2" from a
+// list of 1 — which invites an invented second yt_id and can cost a repair turn.
+func TestDecideAsksForNoMoreThanThePoolHolds(t *testing.T) {
+	h := newHarness(t)
+	require.NoError(t, h.listeners.Beat(h.ctx, "s1"))
+	h.search.byQuery["q"] = []ingest.Candidate{
+		{YTID: "only", Title: "Only", DurationS: 200, DurationKnown: true},
+	}
+	h.model.replies = []string{
+		`{"searches":["q"],"library_query":"","respins":[],"note":"n"}`,
+		`{"picks":[{"yt_id":"only","reason":"hợp lúc này"}]}`,
+	}
+
+	h.prog.RunOnce(h.ctx)
+
+	require.Len(t, h.model.calls, 2, "intent then choose, with no repair turn")
+	require.Contains(t, h.model.calls[1], "Chọn đúng 1 bài")
 }
