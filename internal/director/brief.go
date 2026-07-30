@@ -10,12 +10,17 @@ package director
 // colour is not in here at all: it comes from model knowledge and the rules
 // require her to hedge it.
 type Brief struct {
-	Type        string     `json:"type"` // "seam"
-	LocalTime   string     `json:"local_time"`
-	Daypart     string     `json:"daypart"`
-	OnAirForMin int        `json:"on_air_for_min"`
-	Listeners   int        `json:"listeners"`
-	JustPlayed  BriefTrack `json:"just_played"`
+	Type        string `json:"type"` // "seam"
+	LocalTime   string `json:"local_time"`
+	Daypart     string `json:"daypart"`
+	OnAirForMin int    `json:"on_air_for_min"`
+	// Listeners is omitempty on purpose. RunOnce only reaches prepare when the
+	// listener count read SUCCEEDED and was greater than zero, so a zero here
+	// can only mean the second read failed — and shipping "listeners": 0 into a
+	// brief whose contract is "these facts are true, state them plainly" would
+	// have her announce an empty room that isn't empty.
+	Listeners  int        `json:"listeners,omitempty"`
+	JustPlayed BriefTrack `json:"just_played"`
 	// ComingUp is nil when nothing could be promised — PeekNext found
 	// planNext's unknowable lazy-shuffle arm. She then simply backsells,
 	// which is exactly the pre-seam behaviour.

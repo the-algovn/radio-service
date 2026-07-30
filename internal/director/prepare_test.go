@@ -2,6 +2,7 @@ package director
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
@@ -39,6 +40,15 @@ type errVoice struct{}
 
 func (errVoice) Synthesize(context.Context, string, string, float64) ([]byte, string, error) {
 	return nil, "", errors.New("tts down")
+}
+
+// errListeners fails Count, to exercise buildBrief's degradation of the
+// listener field.
+type errListeners struct{}
+
+func (errListeners) Beat(context.Context, string) error { return nil }
+func (errListeners) Count(context.Context) (int, error) {
+	return 0, errors.New("listeners down")
 }
 
 const goodRaw = `{"script":"Vừa rồi là một bản nhạc đêm dịu dàng, cảm ơn bạn đã cùng nghe.","summary":"backsell đêm","used_phrases":["cùng nghe"]}`
@@ -273,6 +283,28 @@ func TestBuildBriefCarriesComingUpProvenance(t *testing.T) {
 	require.Equal(t, request.SourceListener, b.ComingUp.Source)
 	require.Equal(t, "Ngọc", b.ComingUp.RequestedByName)
 	require.Equal(t, "vì trời mưa", b.ComingUp.Reason)
+}
+
+// RunOnce only reaches prepare when the listener count read SUCCEEDED and was
+// greater than zero, so by the time buildBrief runs, a zero can only mean the
+// SECOND read failed — there is no legitimate zero to preserve. A failed read
+// must therefore leave listeners out of the marshalled brief entirely, not
+// ship a false "listeners": 0 into a brief whose contract is "these facts are
+// true, state them plainly".
+func TestBuildBriefOmitsListenersOnReadFailure(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	f.dr.d.Listeners = errListeners{}
+	onAir := f.clk.Now().Add(-time.Hour)
+	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
+
+	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+	require.Zero(t, b.Listeners)
+
+	j, err := json.Marshal(b)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "listeners",
+		"a failed listener read must not ship a false zero as fact")
 }
 
 // recVoice records the last Synthesize arguments.

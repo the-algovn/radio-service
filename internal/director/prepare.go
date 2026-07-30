@@ -178,6 +178,8 @@ func (dr *Director) buildBrief(ctx context.Context, st station.Station,
 	}
 	if n, err := dr.d.Listeners.Count(ctx); err == nil {
 		b.Listeners = n
+	} else {
+		dr.d.Logger.WarnContext(ctx, "director: listener count read failed", "err", err)
 	}
 	if up != nil {
 		b.ComingUp = &BriefTrack{
