@@ -14,6 +14,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/voice"
@@ -43,6 +44,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 	var script, anchorYTID string
 	var anchorStartedAt time.Time
 	var out brain.Output
+	var promised *live.Upcoming
 
 	switch kind {
 	case live.ClipStationID:
@@ -65,7 +67,16 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 			dr.d.Logger.ErrorContext(ctx, "director: persona load failed", "err", err)
 			return live.Clip{}, false
 		}
-		briefJSON, err := json.Marshal(dr.buildBrief(ctx, st, entry, nil, dj.MaxChars))
+		// Peek BEFORE generating: the brief needs coming_up. Pin AFTER
+		// rendering (below) so a failed preparation never reorders the queue.
+		if dr.d.Peek != nil && dr.d.Sched != nil {
+			if up, found, perr := dr.d.Peek(ctx); perr != nil {
+				dr.d.Logger.WarnContext(ctx, "director: peek failed; backsell only", "err", perr)
+			} else if found {
+				promised = &up
+			}
+		}
+		briefJSON, err := json.Marshal(dr.buildBrief(ctx, st, entry, promised, dj.MaxChars))
 		if err != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
 			return live.Clip{}, false
@@ -111,6 +122,21 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 		dr.d.Logger.ErrorContext(ctx, "director: render failed", "kind", kind, "err", err)
 		_ = os.Remove(outPath)
 		return live.Clip{}, false
+	}
+
+	// The pin is the promise, and it goes LAST: everything above can fail, and
+	// a pin for a break that never airs would have reordered the queue for
+	// nothing. A pin that fails discards the clip — airing an unbacked promise
+	// is the single outcome this design exists to prevent.
+	if promised != nil && !promised.Committed {
+		if perr := dr.d.Sched.SetNextUp(ctx, schedule.NextUp{
+			YTID: promised.Track.YTID, Title: promised.Track.Title,
+			Channel: promised.Track.Channel, RequestID: promised.RequestID,
+		}); perr != nil {
+			dr.d.Logger.ErrorContext(ctx, "director: pin failed; discarding clip", "err", perr)
+			_ = os.Remove(outPath)
+			return live.Clip{}, false
+		}
 	}
 
 	if kind == live.ClipSeam {

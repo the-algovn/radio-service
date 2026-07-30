@@ -239,6 +239,10 @@ func main() {
 			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
 			DataDir:        djDir, BudgetUSD: budget,
 			Clock: live.RealClock(), Location: loc, Logger: logger,
+			Sched: sched,
+			Peek: func(ctx context.Context) (live.Upcoming, bool, error) {
+				return live.PeekNext(ctx, sched, requests, lib)
+			},
 		})
 		talk = dj
 		logger.InfoContext(ctx, "dj talk breaks enabled", "voice_fake", voiceFake, "model", defaultModel)

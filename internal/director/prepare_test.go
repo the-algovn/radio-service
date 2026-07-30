@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,24 +17,31 @@ import (
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
-// seqModel returns scripted raw outputs in sequence.
+// seqModel returns scripted raw outputs in sequence, recording the prompts it
+// was given and optionally failing outright.
 type seqModel struct {
-	raws  []string
-	calls int
+	raws                 []string
+	calls                int
+	err                  error  // non-nil → Generate fails
+	lastSystem, lastUser string // the prompts of the most recent call
 }
 
 func (m *seqModel) Name() string     { return "claude-test" }
 func (m *seqModel) Provider() string { return "fake" }
-func (m *seqModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
-	raw := m.raws[min(m.calls, len(m.raws)-1)]
+func (m *seqModel) Generate(_ context.Context, system, user string, _ *jsonschema.Schema) (string, error) {
+	m.lastSystem, m.lastUser = system, user
 	m.calls++
-	return raw, nil
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.raws[min(m.calls-1, len(m.raws)-1)], nil
 }
 
 type errVoice struct{}
@@ -359,4 +367,152 @@ func TestRunOnceSettingsChangeAffectsNextPrepare(t *testing.T) {
 	require.True(t, slotFilled(f.dr))
 	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", rec.voiceID, "next prepare uses the updated settings")
 	require.Equal(t, 1.2, rec.rate)
+}
+
+type fakePinner struct {
+	calls int
+	last  schedule.NextUp
+	err   error
+}
+
+func (p *fakePinner) SetNextUp(_ context.Context, n schedule.NextUp) error {
+	p.calls++
+	p.last = n
+	return p.err
+}
+
+// seamFixture is newPrepFixture wired for the pin: a recording pinner, a peek
+// each test sets after construction, and an anchor already in the air log so
+// prepare() gets past its Latest() read.
+type seamFixture struct {
+	*prepFixture
+	pin  *fakePinner
+	peek func(context.Context) (live.Upcoming, bool, error)
+}
+
+func newSeamFixture(t *testing.T, model *seqModel) *seamFixture {
+	t.Helper()
+	f := newPrepFixture(t, model)
+	sf := &seamFixture{prepFixture: f, pin: &fakePinner{}}
+	f.dr.d.Sched = sf.pin
+	f.dr.d.Peek = func(ctx context.Context) (live.Upcoming, bool, error) {
+		if sf.peek == nil {
+			return live.Upcoming{}, false, nil
+		}
+		return sf.peek(ctx)
+	}
+	require.NoError(t, f.log.Append(context.Background(), live.Entry{
+		YTID: "anchor", Title: "Bài vừa xong", Artist: "Ca sĩ",
+		StartedAt: f.clk.Now().Add(-4 * time.Minute), DurationS: 200}))
+	return sf
+}
+
+// Case 1: an ALREADY committed next-up is binding on its own — planNext reads
+// next-up first — so the director must not write. A redundant write is not
+// merely wasteful: it would be the only code path that could clobber a
+// commitment the feeder just made.
+func TestPreparePinSkippedWhenAlreadyCommitted(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{Track: library.Track{YTID: "yt1", Title: "T", Channel: "C"},
+			Committed: true}, true, nil
+	}
+
+	clip, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok)
+	require.NotEmpty(t, clip.Path)
+	require.Equal(t, 0, sf.pin.calls, "an existing commitment needs no pin")
+}
+
+// Case 2: the head of the ready queue is NOT stable (a listener request can
+// outrank a waiting AI pick, and Reorder can jump anything to the front), so
+// promising it requires a pin that carries the request id.
+func TestPreparePinsTheReadyQueueHeadWithItsRequestID(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{
+			Track:     library.Track{YTID: "yt2", Title: "Em Của Ngày Hôm Qua", Channel: "Sơn Tùng M-TP"},
+			RequestID: "req-7", Source: request.SourceListener, RequestedByName: "Ngọc",
+		}, true, nil
+	}
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok)
+	require.Equal(t, 1, sf.pin.calls)
+	require.Equal(t, schedule.NextUp{YTID: "yt2", Title: "Em Của Ngày Hôm Qua",
+		Channel: "Sơn Tùng M-TP", RequestID: "req-7"}, sf.pin.last)
+}
+
+// Case 3: nothing knowable — promise nothing, write nothing. Deliberately NOT
+// a self-rolled shuffle pin: the feeder's lookahead has already picked its own
+// random track, and a different pin would force it to discard an opened reader
+// and re-open inline at the seam — an audible stall after every break.
+func TestPrepareNoPromiseWhenPeekFindsNothing(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{}, false, nil
+	}
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok, "a backsell-only break still airs")
+	require.Equal(t, 0, sf.pin.calls)
+	require.NotContains(t, sf.model.lastUser, "coming_up")
+}
+
+// The pin must be the LAST step. A generation failure that had already
+// reordered the queue would move a listener's song for a break that never airs.
+func TestPrepareDoesNotPinWhenGenerationFails(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{Track: library.Track{YTID: "yt3"}, RequestID: "req-1"}, true, nil
+	}
+	sf.model.err = errors.New("boom")
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.False(t, ok)
+	require.Equal(t, 0, sf.pin.calls)
+}
+
+// An unbacked promise is the one thing §3 exists to prevent, so a pin failure
+// discards the clip rather than airing it.
+func TestPreparePinFailureDiscardsTheClip(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{Track: library.Track{YTID: "yt4"}, RequestID: "req-1"}, true, nil
+	}
+	sf.pin.err = errors.New("db down")
+
+	clip, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.False(t, ok)
+	require.Empty(t, clip.Path)
+	// and no orphaned pcm left behind
+	entries, err := os.ReadDir(sf.dr.d.DataDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.False(t, strings.HasSuffix(e.Name(), ".pcm"), "clip %s was left on disk", e.Name())
+	}
+}
+
+// A peek error is not fatal: she backsells.
+func TestPreparePeekErrorFallsBackToBacksellOnly(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{}, false, errors.New("read failed")
+	}
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok)
+	require.Equal(t, 0, sf.pin.calls)
+}
+
+// A station_id never promises anything and never pins.
+func TestPrepareStationIDDoesNotPin(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{Track: library.Track{YTID: "yt5"}, RequestID: "r"}, true, nil
+	}
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipStationID, testStation)
+	require.True(t, ok)
+	require.Equal(t, 0, sf.pin.calls)
 }

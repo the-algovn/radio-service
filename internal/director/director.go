@@ -11,6 +11,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
@@ -39,6 +40,20 @@ type Ledger interface {
 	SpentSince(ctx context.Context, since time.Time) (float64, error)
 }
 
+// PeekFunc proposes what airs next so the break can open it by name. nil, or
+// a false/error result, simply means she promises nothing.
+//
+// A peek is only a PROPOSAL. What makes it true is the pin (see prepare):
+// schedule.NextUp is the one thing planNext will not let the request queue
+// preempt. Never trust a peek without pinning — the ready-queue head is not
+// stable.
+type PeekFunc func(ctx context.Context) (live.Upcoming, bool, error)
+
+// Pinner commits the promised track. schedule.Store satisfies it.
+type Pinner interface {
+	SetNextUp(ctx context.Context, n schedule.NextUp) error
+}
+
 type Deps struct {
 	Model     brain.Model
 	Voice     voice.Provider
@@ -59,6 +74,9 @@ type Deps struct {
 	Clock    live.Clock
 	Location *time.Location
 	Logger   *slog.Logger
+
+	Peek  PeekFunc // nil → never promise the next track
+	Sched Pinner   // nil → never promise the next track
 }
 
 type memEntry struct {
