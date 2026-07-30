@@ -40,6 +40,7 @@ func TestPeekNextCommittedRequestCarriesProvenance(t *testing.T) {
 	require.True(t, found)
 	require.True(t, up.Committed)
 	require.Equal(t, req.ID, up.RequestID)
+	require.Equal(t, request.SourceListener, up.Source)
 	require.Equal(t, "Ngọc", up.RequestedByName)
 	require.Equal(t, "vì trời mưa", up.Reason)
 }
@@ -49,7 +50,7 @@ func TestPeekNextHeadOfReadyQueue(t *testing.T) {
 	sched, reqs, lib := schedule.NewMemStore(), request.NewMemStore(), library.NewMemLibrary()
 	require.NoError(t, lib.Add(ctx, library.Track{YTID: "yt3", Title: "T", Channel: "C"}))
 	req, err := reqs.Create(ctx, request.Item{Source: request.SourceAI,
-		YTID: "yt3", Reason: "hợp với đêm nay", Status: request.StatusReady})
+		DisplayName: "Ngọc", YTID: "yt3", Reason: "hợp với đêm nay", Status: request.StatusReady})
 	require.NoError(t, err)
 
 	up, found, err := PeekNext(ctx, sched, reqs, lib)
@@ -58,6 +59,8 @@ func TestPeekNextHeadOfReadyQueue(t *testing.T) {
 	require.Equal(t, req.ID, up.RequestID)
 	require.False(t, up.Committed, "nothing is committed yet — this needs a pin")
 	require.Equal(t, request.SourceAI, up.Source)
+	require.Equal(t, "Ngọc", up.RequestedByName)
+	require.Equal(t, "hợp với đêm nay", up.Reason)
 }
 
 func TestPeekNextNothingKnowable(t *testing.T) {
@@ -103,7 +106,7 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 		{"committed request", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
 			require.NoError(t, lib.Add(ctx, library.Track{YTID: "b", Title: "B", Channel: "C"}))
 			r, err := reqs.Create(ctx, request.Item{Source: request.SourceListener,
-				YTID: "b", Status: request.StatusReady})
+				DisplayName: "Ngọc", YTID: "b", Reason: "vì trời mưa", Status: request.StatusReady})
 			require.NoError(t, err)
 			require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
 				YTID: "b", Title: "B", Channel: "C", RequestID: r.ID}))
@@ -142,6 +145,9 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 			require.Equal(t, p.item.track.YTID, up.Track.YTID,
 				"PeekNext and planNext disagree — the DJ would name the wrong song")
 			require.Equal(t, p.item.requestID, up.RequestID)
+			require.Equal(t, p.item.source, up.Source)
+			require.Equal(t, p.item.requestedByName, up.RequestedByName)
+			require.Equal(t, p.item.reason, up.Reason)
 		})
 	}
 }
