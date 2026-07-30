@@ -2,6 +2,7 @@ package talkmem_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -73,6 +74,25 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		require.Equal(t, "đêm nay", got[0].Summary)
+	})
+
+	t.Run("limit <= 0 uses the shared default in every store", func(t *testing.T) {
+		s := newStore(t)
+		for i := 0; i < 10; i++ {
+			require.NoError(t, s.Append(ctx, talkmem.Entry{
+				Kind: "seam", Summary: fmt.Sprintf("s%d", i)}))
+			time.Sleep(2 * time.Millisecond)
+		}
+		// 8 is talkmem's unexported defaultLimit. Both backends must agree
+		// here: an unbounded read on one of them would silently blow the
+		// prompt's token budget wherever that backend happened to be wired.
+		for _, limit := range []int{0, -1} {
+			got, err := s.Recent(ctx, time.Time{}, limit)
+			require.NoError(t, err)
+			require.Len(t, got, 8, "limit %d must use the shared default, not go unbounded", limit)
+			require.Equal(t, "s9", got[len(got)-1].Summary,
+				"and must still keep the newest, oldest-first")
+		}
 	})
 
 	t.Run("phrases round-trip, including empty", func(t *testing.T) {

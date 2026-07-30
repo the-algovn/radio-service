@@ -25,13 +25,16 @@ func (m *MemStore) Append(_ context.Context, e Entry) error {
 func (m *MemStore) Recent(_ context.Context, since time.Time, limit int) ([]Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = defaultLimit
+	}
 	var got []Entry
 	for _, e := range m.entries {
 		if !e.CreatedAt.Before(since) {
 			got = append(got, e)
 		}
 	}
-	if limit > 0 && len(got) > limit {
+	if len(got) > limit {
 		got = got[len(got)-limit:] // newest limit, still oldest-first
 	}
 	return got, nil

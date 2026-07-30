@@ -41,7 +41,7 @@ func (s *PGStore) Append(ctx context.Context, e Entry) error {
 
 func (s *PGStore) Recent(ctx context.Context, since time.Time, limit int) ([]Entry, error) {
 	if limit <= 0 {
-		limit = 8
+		limit = defaultLimit
 	}
 	rows, err := db.New(s.pool).RecentTalkMemory(ctx, db.RecentTalkMemoryParams{
 		CreatedAt: since, Lim: int32(limit),

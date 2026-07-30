@@ -21,11 +21,20 @@ type Entry struct {
 	CreatedAt time.Time // set by the store on Append
 }
 
+// defaultLimit bounds Recent when the caller passes limit <= 0. BOTH stores
+// apply it, so the two backends cannot drift on the edge case — a shared
+// contract whose implementations disagree at the boundary is not a contract.
+const defaultLimit = 8
+
 type Store interface {
 	// Append records one break's memory. CreatedAt is assigned by the store.
 	Append(ctx context.Context, e Entry) error
 	// Recent returns entries created at or after since, OLDEST FIRST — the
 	// order she reads them as a narrative. When more than limit qualify, the
 	// NEWEST limit entries are returned (still oldest-first).
+	//
+	// limit <= 0 means defaultLimit, never "unbounded": these entries go
+	// straight into a prompt with a token budget, so an accidental zero must
+	// not become a full-table read.
 	Recent(ctx context.Context, since time.Time, limit int) ([]Entry, error)
 }
