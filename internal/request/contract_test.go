@@ -264,6 +264,41 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Len(t, rec, 2)
 		require.Equal(t, c.ID, rec[0].ID) // newest aired first
 	})
+
+	t.Run("get returns the item by id, with every field", func(t *testing.T) {
+		s := newStore(t)
+		made, err := s.Create(ctx, mk(request.SourceListener, "sub-9", "ytg", request.StatusReady))
+		require.NoError(t, err)
+
+		got, found, err := s.Get(ctx, made.ID)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, made.ID, got.ID)
+		require.Equal(t, request.SourceListener, got.Source)
+		require.Equal(t, "tên-sub-9", got.DisplayName)
+		require.Equal(t, "ytg", got.YTID)
+		require.Equal(t, "lý-do-ytg", got.Reason)
+		require.Equal(t, request.StatusReady, got.Status)
+	})
+
+	t.Run("get reports an unknown id as not found, not an error", func(t *testing.T) {
+		s := newStore(t)
+		_, found, err := s.Get(ctx, "00000000-0000-0000-0000-000000000000")
+		require.NoError(t, err)
+		require.False(t, found)
+	})
+
+	t.Run("get reflects a status change", func(t *testing.T) {
+		s := newStore(t)
+		made, err := s.Create(ctx, mk(request.SourceAI, "", "yth", request.StatusReady))
+		require.NoError(t, err)
+		require.NoError(t, s.MarkAired(ctx, made.ID, time.Now()))
+
+		got, found, err := s.Get(ctx, made.ID)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, request.StatusAired, got.Status)
+	})
 }
 
 func TestDayStart(t *testing.T) {

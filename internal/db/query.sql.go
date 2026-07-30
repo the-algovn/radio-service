@@ -349,6 +349,53 @@ func (q *Queries) GetNextUp(ctx context.Context) (GetNextUpRow, error) {
 	return i, err
 }
 
+const getRequest = `-- name: GetRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+FROM request WHERE id = $1
+`
+
+type GetRequestRow struct {
+	ID           string
+	Source       string
+	RequestedBy  string
+	DisplayName  string
+	YtID         string
+	Title        string
+	Channel      string
+	DurationS    int64
+	ThumbnailUrl string
+	Status       string
+	FailReason   string
+	Attempts     int32
+	CreatedAt    time.Time
+	AiredAt      *time.Time
+	Reason       string
+}
+
+func (q *Queries) GetRequest(ctx context.Context, id string) (GetRequestRow, error) {
+	row := q.db.QueryRow(ctx, getRequest, id)
+	var i GetRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.Source,
+		&i.RequestedBy,
+		&i.DisplayName,
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.DurationS,
+		&i.ThumbnailUrl,
+		&i.Status,
+		&i.FailReason,
+		&i.Attempts,
+		&i.CreatedAt,
+		&i.AiredAt,
+		&i.Reason,
+	)
+	return i, err
+}
+
 const getStationRow = `-- name: GetStationRow :one
 SELECT on_air, on_air_since, ai_enabled,
        dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars

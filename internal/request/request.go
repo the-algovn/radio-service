@@ -53,9 +53,18 @@ type Store interface {
 	// Channel, DurationS, ThumbnailURL, Reason, Status are read from it) and
 	// returns the stored item with ID and CreatedAt filled.
 	Create(ctx context.Context, it Item) (Item, error)
-	// NextReady returns what should air next: the oldest ready listener
-	// request, else the oldest ready AI pick. found=false when none.
+	// NextReady returns what should air next: the head of the ready queue
+	// under the order `position IS NULL, position, (source = 'ai'),
+	// created_at, id` — an operator-positioned item first, then listener
+	// requests ahead of AI picks, then oldest. found=false when none.
+	//
+	// NOTE: this head is NOT stable. A listener request that becomes ready
+	// outranks any waiting AI pick, and Reorder can position anything at the
+	// front. Anything that needs a stable answer must pin the track into
+	// schedule.NextUp instead (spec 2026-07-29-radio-dj-seam-breaks §3).
 	NextReady(ctx context.Context) (Item, bool, error)
+	// Get looks up one request by id. found=false (err nil) when unknown.
+	Get(ctx context.Context, id string) (Item, bool, error)
 	// OldestApproved returns the oldest approved item (any source) for the
 	// ingest worker. found=false when none.
 	OldestApproved(ctx context.Context) (Item, bool, error)

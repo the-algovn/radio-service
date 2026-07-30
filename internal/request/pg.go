@@ -63,6 +63,19 @@ func (s *PGStore) NextReady(ctx context.Context) (Item, bool, error) {
 		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), true, nil
 }
 
+func (s *PGStore) Get(ctx context.Context, id string) (Item, bool, error) {
+	r, err := db.New(s.pool).GetRequest(ctx, id)
+	if notFound(err) {
+		return Item{}, false, nil
+	}
+	if err != nil {
+		return Item{}, false, err
+	}
+	return itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName, r.YtID, r.Title,
+		r.Channel, r.DurationS, r.ThumbnailUrl, r.Status, r.FailReason,
+		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), true, nil
+}
+
 func (s *PGStore) OldestApproved(ctx context.Context) (Item, bool, error) {
 	r, err := db.New(s.pool).OldestApprovedRequest(ctx)
 	if notFound(err) {

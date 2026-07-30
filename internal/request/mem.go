@@ -81,6 +81,15 @@ func (m *MemStore) NextReady(_ context.Context) (Item, bool, error) {
 	return Item{}, false, nil
 }
 
+func (m *MemStore) Get(_ context.Context, id string) (Item, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if it := m.find(id); it != nil {
+		return *it, true, nil
+	}
+	return Item{}, false, nil
+}
+
 func (m *MemStore) OldestApproved(_ context.Context) (Item, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -258,3 +258,8 @@ LIMIT sqlc.arg(lim);
 
 -- name: PruneTalkMemory :exec
 DELETE FROM talk_memory WHERE created_at < $1;
+
+-- name: GetRequest :one
+SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+FROM request WHERE id = $1;
