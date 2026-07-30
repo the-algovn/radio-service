@@ -732,6 +732,51 @@ func TestPlanNextDoesNotConsumeTheCommittedNextUp(t *testing.T) {
 	require.Equal(t, "t1", got.YTID)
 }
 
+// THE ORDERING PROOF. commitNextUp clears next_up whenever Requests.Pending()
+// is non-empty (feeder.go:174-185), and a pinned `ready` request IS pending —
+// so commitNextUp is capable of destroying a pin. The reason that is safe is
+// pure ordering: no track STARTS between a mid-track pin and the seam that
+// follows it, so no commitNextUp runs in that window, and the seam's
+// planInline reads next_up first. That argument must be tested, not assumed:
+// if the director ever pins from somewhere other than mid-track, or the
+// feeder's loop order changes, the promise starts evaporating silently.
+func TestPinnedRequestSurvivesToTheSeam(t *testing.T) {
+	ctx := context.Background()
+	store, lib, reqs := newFixture(t, "yt1", "yt2")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched })
+
+	// A pending (ready) request — exactly the state that makes commitNextUp
+	// want to clear the commitment.
+	req, err := reqs.Create(ctx, request.Item{
+		Source: request.SourceListener, DisplayName: "Ngọc", YTID: "yt2",
+		Title: "t-yt2", Channel: "c-yt2", Status: request.StatusReady})
+	require.NoError(t, err)
+
+	// The director's pin, as it lands mid-track.
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt2", Title: "t-yt2", Channel: "c-yt2", RequestID: req.ID}))
+
+	// commitNextUp runs at every track start. Prove it does NOT run between
+	// the pin and the read: plan the seam directly and assert the pin is what
+	// comes back, with its provenance.
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "yt2", p.item.track.YTID, "the pin must survive to the seam")
+	require.Equal(t, req.ID, p.item.requestID)
+	require.Equal(t, "Ngọc", p.item.requestedByName)
+
+	// And prove the hazard is real rather than imaginary, so this test keeps
+	// its meaning: commitNextUp with this same pending request DOES clear it.
+	f.commitNextUp(ctx)
+	_, ok, err := sched.GetNextUp(ctx)
+	require.NoError(t, err)
+	require.False(t, ok,
+		"commitNextUp clears a pin; the design depends on it never running in the pin→seam window")
+}
+
 func TestPlanNextDoesNotMarkAVanishedRequestFailed(t *testing.T) {
 	store, lib, reqs := newFixture(t, "t1")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
