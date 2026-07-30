@@ -1,25 +1,40 @@
 package director
 
-// Brief is the data block for one backsell segment. It enters the prompt
-// ONLY inside brain.BuildPrompts' <brief> delimiter (data, not instructions);
-// director-specific instructions ride exclusively in talkRules, appended to
-// the persona in the system prompt.
+// Brief is the data block for one seam break. It enters the prompt ONLY inside
+// brain.BuildScriptPrompts' <brief> delimiter (data, not instructions);
+// segment instructions ride exclusively in brain.SeamRules.
+//
+// Everything here except ComingUp is either derived from the station's own
+// state or already aired, so it is TRUE and she may state it plainly. ComingUp
+// is a promise the director has PINNED (spec §3) — also true. Song and artist
+// colour is not in here at all: it comes from model knowledge and the rules
+// require her to hedge it.
 type Brief struct {
-	Type            string     `json:"type"` // "backsell"
-	LocalTime       string     `json:"local_time"`
-	Daypart         string     `json:"daypart"`
-	JustPlayed      BriefTrack `json:"just_played"`
-	QueueTeasers    []string   `json:"queue_teasers,omitempty"`
-	MemorySummaries []string   `json:"memory_summaries,omitempty"`
-	RecentPhrases   []string   `json:"recent_phrases,omitempty"`
-	MaxChars        int        `json:"max_chars"`
+	Type        string     `json:"type"` // "seam"
+	LocalTime   string     `json:"local_time"`
+	Daypart     string     `json:"daypart"`
+	OnAirForMin int        `json:"on_air_for_min"`
+	Listeners   int        `json:"listeners"`
+	JustPlayed  BriefTrack `json:"just_played"`
+	// ComingUp is nil when nothing could be promised — PeekNext found
+	// planNext's unknowable lazy-shuffle arm. She then simply backsells,
+	// which is exactly the pre-seam behaviour.
+	ComingUp *BriefTrack `json:"coming_up,omitempty"`
+	// Tonight is what has already aired THIS session, oldest first, so she
+	// can thread the night together. Session-scoped on purpose.
+	Tonight []BriefTrack `json:"tonight,omitempty"`
+	// Thread is her own self-summaries this session, oldest first — continuity
+	// she may build on and call back to.
+	Thread []string `json:"thread,omitempty"`
+	// RecentPhrases stays a don't-repeat blocklist, NOT material.
+	RecentPhrases []string `json:"recent_phrases,omitempty"`
+	MaxChars      int      `json:"max_chars"`
 }
 
-// BriefTrack is the track the break talks about — the one airing at prep
-// time, which will have just finished when the break airs. Source/Reason/
-// RequestedByName carry the v1.1 provenance vocabulary; RequestedByName is
-// the ONLY listener-originated text allowed here (never free text — the
-// call-in digest invariant stays untouched in v2).
+// BriefTrack is one track in the brief. Source/Reason/RequestedByName carry
+// the v1.1 provenance vocabulary; RequestedByName is the ONLY
+// listener-originated text allowed here (never free text — the call-in digest
+// invariant is untouched).
 type BriefTrack struct {
 	Title           string `json:"title"`
 	Artist          string `json:"artist,omitempty"`

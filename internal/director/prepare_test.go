@@ -11,11 +11,13 @@ import (
 	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/talkmem"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
@@ -45,6 +47,9 @@ const digitRaw = `{"script":"Bài này ra năm 2020 đó nha.","summary":"x","us
 // testDJ mirrors the old fixture Deps knobs for direct prepare() calls.
 var testDJ = station.DJSettings{VoiceID: "fake", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 450}
 
+// testStation carries testDJ for prepare()'s station.Station parameter.
+var testStation = station.Station{OnAir: true, AIEnabled: true, DJ: testDJ}
+
 // fakeRender writes 96000 bytes (0.5s) to outPath.
 func fakeRender(_ context.Context, _, outPath string) (float64, error) {
 	if err := os.WriteFile(outPath, make([]byte, 96000), 0o644); err != nil {
@@ -58,7 +63,7 @@ type prepFixture struct {
 	clk    *dirClock
 	ledger *spend.MemLedger
 	log    *live.MemAirLog
-	reqs   *request.MemStore
+	mem    *talkmem.MemStore
 	model  *seqModel
 }
 
@@ -67,7 +72,7 @@ func newPrepFixture(t *testing.T, model *seqModel) *prepFixture {
 	clk := newDirClock()
 	ledger := spend.NewMemLedger()
 	airLog := live.NewMemAirLog()
-	reqs := request.NewMemStore()
+	mem := talkmem.NewMemStore()
 	personaDir := t.TempDir()
 	require.NoError(t, persona.Save(personaDir, "# Tiểu Dương Dương\nGiọng ấm."))
 	store := station.NewMemStore()
@@ -77,12 +82,12 @@ func newPrepFixture(t *testing.T, model *seqModel) *prepFixture {
 	dr := New(Deps{
 		Model: model, Voice: voice.Fake{}, VoiceFake: true, Ledger: ledger,
 		Station: store, Listeners: live.NewMemListeners(time.Now),
-		AirLog: airLog, Requests: reqs,
+		AirLog: airLog, TalkMem: mem,
 		PersonaDir: personaDir, StationIDsPath: writeIDs(t, "đài thân mến\n"),
 		DataDir: t.TempDir(), BudgetUSD: 1.0,
 		Render: fakeRender, Clock: clk, Location: time.UTC,
 	})
-	return &prepFixture{dr: dr, clk: clk, ledger: ledger, log: airLog, reqs: reqs, model: model}
+	return &prepFixture{dr: dr, clk: clk, ledger: ledger, log: airLog, mem: mem, model: model}
 }
 
 func ledgerLabels(t *testing.T, l *spend.MemLedger) []string {
@@ -102,7 +107,7 @@ func TestPrepareSeamHappyPath(t *testing.T) {
 		StartedAt: time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC), Source: "ai", Reason: "hợp đêm"}
 	require.NoError(t, f.log.Append(context.Background(), anchor))
 
-	clip, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	clip, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.True(t, ok)
 	require.Equal(t, live.ClipSeam, clip.Kind)
 	require.Equal(t, "a", clip.AnchorYTID)
@@ -121,7 +126,7 @@ func TestPrepareSeamHappyPath(t *testing.T) {
 func TestPrepareSeamRetriesOnceOnViolations(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, goodRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.True(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	require.Equal(t, []string{"tts:director:seam"}, ledgerLabels(t, f.ledger),
@@ -131,7 +136,7 @@ func TestPrepareSeamRetriesOnceOnViolations(t *testing.T) {
 func TestPrepareSeamAbortsAfterSecondViolation(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, digitRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.False(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	require.Empty(t, ledgerLabels(t, f.ledger), "no llm spend recorded; the director no longer prices its own calls")
@@ -142,14 +147,14 @@ func TestPrepareSeamAbortsAfterSecondViolation(t *testing.T) {
 
 func TestPrepareSeamNoAirLogEntryQuietSkip(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.False(t, ok, "nothing airing → nothing to talk about")
 	require.Zero(t, f.model.calls)
 }
 
 func TestPrepareStationIDSkipsLLM(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID, testDJ)
+	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID, testStation)
 	require.True(t, ok)
 	require.Equal(t, live.ClipStationID, clip.Kind)
 	require.Equal(t, "", clip.AnchorYTID, "station_id has a zero anchor")
@@ -162,7 +167,7 @@ func TestPrepareTTSFailure(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Voice = errVoice{}
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.False(t, ok)
 	require.Empty(t, ledgerLabels(t, f.ledger), "no llm line: the director no longer prices the call; tts never ran")
 }
@@ -171,7 +176,7 @@ func TestPrepareRenderFailureCleansUp(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Render = func(_ context.Context, _, _ string) (float64, error) { return 0, errors.New("boom") }
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testStation)
 	require.False(t, ok)
 	entries, err := os.ReadDir(f.dr.d.DataDir)
 	require.NoError(t, err)
@@ -179,23 +184,95 @@ func TestPrepareRenderFailureCleansUp(t *testing.T) {
 }
 
 func TestBuildBriefContents(t *testing.T) {
+	ctx := context.Background()
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	for _, title := range []string{"C1", "C2", "C3", "C4"} {
-		_, err := f.reqs.Create(context.Background(), request.Item{
-			Source: request.SourceListener, YTID: "q-" + title, Title: title, Status: request.StatusReady})
-		require.NoError(t, err)
-	}
-	f.dr.pushRing("chuyện mưa", []string{"bạn nghe đài"})
+	require.NoError(t, f.dr.d.Listeners.Beat(ctx, "s1"))
+	onAir := f.clk.Now().Add(-90 * time.Minute)
+	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
 	just := live.Entry{Title: "Bài A", Artist: "Ca sĩ", Source: "listener", RequestedByName: "Minh"}
-	b := f.dr.buildBrief(context.Background(), just, 450)
-	require.Equal(t, "backsell", b.Type)
+
+	b := f.dr.buildBrief(ctx, st, just, nil, 450)
+	require.Equal(t, "seam", b.Type)
 	require.Equal(t, "Bài A", b.JustPlayed.Title)
 	require.Equal(t, "Minh", b.JustPlayed.RequestedByName)
-	require.Len(t, b.QueueTeasers, 3, "teasers capped at 3")
-	require.Equal(t, []string{"chuyện mưa"}, b.MemorySummaries)
-	require.Equal(t, []string{"bạn nghe đài"}, b.RecentPhrases)
+	require.Equal(t, 90, b.OnAirForMin)
+	require.Equal(t, 1, b.Listeners)
 	require.Equal(t, 450, b.MaxChars)
 	require.NotEmpty(t, b.Daypart)
+	require.Nil(t, b.ComingUp, "up was nil — nothing to promise")
+}
+
+// tonight must be scoped to THIS broadcast session. The truth rail tells her
+// to state brief facts plainly, so an unscoped read would have her calling a
+// song from a broadcast two days ago part of tonight.
+func TestBuildBriefScopesTonightToTheSession(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir := f.clk.Now().Add(-2 * time.Hour)
+
+	for _, e := range []live.Entry{
+		{YTID: "old", Title: "đêm trước", Artist: "C",
+			StartedAt: f.clk.Now().Add(-40 * time.Hour), DurationS: 60},
+		{YTID: "early", Title: "đêm nay sớm", Artist: "B",
+			StartedAt: f.clk.Now().Add(-90 * time.Minute), DurationS: 60},
+		{YTID: "late", Title: "đêm nay muộn", Artist: "A",
+			StartedAt: f.clk.Now().Add(-10 * time.Minute), DurationS: 60},
+	} {
+		require.NoError(t, f.log.Append(ctx, e))
+	}
+
+	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
+	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+
+	var titles []string
+	for _, tr := range b.Tonight {
+		titles = append(titles, tr.Title)
+	}
+	require.Equal(t, []string{"đêm nay sớm", "đêm nay muộn"}, titles,
+		"oldest first, and the previous broadcast excluded")
+	require.Equal(t, 120, b.OnAirForMin)
+	require.Nil(t, b.ComingUp)
+}
+
+func TestBuildBriefIncludesTheThreadOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir := f.clk.Now().Add(-time.Hour)
+
+	require.NoError(t, f.mem.Append(ctx, talkmem.Entry{Kind: live.ClipSeam,
+		Summary: "kể về mưa", Phrases: []string{"khuya rồi"}}))
+	require.NoError(t, f.mem.Append(ctx, talkmem.Entry{Kind: live.ClipSeam,
+		Summary: "nhắc bạn Ngọc"}))
+
+	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
+	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+
+	require.Equal(t, []string{"kể về mưa", "nhắc bạn Ngọc"}, b.Thread)
+	require.Equal(t, []string{"khuya rồi"}, b.RecentPhrases)
+}
+
+func TestBuildBriefCarriesComingUpProvenance(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	onAir := f.clk.Now().Add(-time.Hour)
+
+	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
+	up := &live.Upcoming{
+		Track:           library.Track{Title: "Em Của Ngày Hôm Qua", Channel: "Sơn Tùng M-TP"},
+		RequestID:       "req-1",
+		Source:          request.SourceListener,
+		RequestedByName: "Ngọc",
+		Reason:          "vì trời mưa",
+	}
+
+	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, up, 1500)
+
+	require.NotNil(t, b.ComingUp)
+	require.Equal(t, "Em Của Ngày Hôm Qua", b.ComingUp.Title)
+	require.Equal(t, "Sơn Tùng M-TP", b.ComingUp.Artist)
+	require.Equal(t, request.SourceListener, b.ComingUp.Source)
+	require.Equal(t, "Ngọc", b.ComingUp.RequestedByName)
+	require.Equal(t, "vì trời mưa", b.ComingUp.Reason)
 }
 
 // recVoice records the last Synthesize arguments.

@@ -35,8 +35,8 @@ func normalizeDJ(dj station.DJSettings) station.DJSettings {
 // prepare runs one whole clip-preparation attempt: script → TTS → render.
 // Every failure is a quiet skip (logged, temp files removed, spend already
 // ledgered stays ledgered) — the air never waits on this path.
-func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSettings) (live.Clip, bool) {
-	dj = normalizeDJ(dj)
+func (dr *Director) prepare(ctx context.Context, kind string, st station.Station) (live.Clip, bool) {
+	dj := normalizeDJ(st.DJ)
 	ctx, cancel := context.WithTimeout(ctx, prepDeadline)
 	defer cancel()
 
@@ -65,7 +65,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 			dr.d.Logger.ErrorContext(ctx, "director: persona load failed", "err", err)
 			return live.Clip{}, false
 		}
-		briefJSON, err := json.Marshal(dr.buildBrief(ctx, entry, dj.MaxChars))
+		briefJSON, err := json.Marshal(dr.buildBrief(ctx, st, entry, nil, dj.MaxChars))
 		if err != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
 			return live.Clip{}, false
@@ -150,29 +150,65 @@ func (dr *Director) generateValid(ctx context.Context, system, user string, maxC
 	}
 }
 
-// buildBrief assembles the backsell data block from the currently-airing
-// entry (the freshness anchor), queue teasers, and the show-memory ring.
-func (dr *Director) buildBrief(ctx context.Context, just live.Entry, maxChars int) Brief {
+const (
+	tonightCap = 6
+	threadCap  = 8
+)
+
+// buildBrief assembles the seam-break data block. up is nil when nothing could
+// be promised. Every read here is best-effort: a failure degrades one FIELD,
+// never the break — music covering the air because show memory was unreadable
+// would be a bad trade.
+func (dr *Director) buildBrief(ctx context.Context, st station.Station,
+	just live.Entry, up *live.Upcoming, maxChars int) Brief {
+
 	now := dr.d.Clock.Now().In(dr.d.Location)
 	b := Brief{
-		Type: "backsell", LocalTime: now.Format("Monday 15:04"), Daypart: daypart(now.Hour()),
+		Type: live.ClipSeam, LocalTime: now.Format("Monday 15:04"),
+		Daypart: daypart(now.Hour()),
 		JustPlayed: BriefTrack{Title: just.Title, Artist: just.Artist, Source: just.Source,
 			RequestedByName: just.RequestedByName, Reason: just.Reason},
 		MaxChars: maxChars,
 	}
-	if pending, err := dr.d.Requests.Pending(ctx); err == nil {
-		for _, it := range pending {
-			if len(b.QueueTeasers) >= teaserCap {
-				break
-			}
-			b.QueueTeasers = append(b.QueueTeasers, it.Title)
+
+	var sessionStart time.Time
+	if st.OnAirSince != nil {
+		sessionStart = *st.OnAirSince
+		b.OnAirForMin = int(dr.d.Clock.Now().Sub(sessionStart).Minutes())
+	}
+	if n, err := dr.d.Listeners.Count(ctx); err == nil {
+		b.Listeners = n
+	}
+	if up != nil {
+		b.ComingUp = &BriefTrack{
+			Title: up.Track.Title, Artist: up.Track.Channel, Source: up.Source,
+			RequestedByName: up.RequestedByName, Reason: up.Reason,
 		}
 	}
-	dr.mu.Lock()
-	for _, m := range dr.ring {
-		b.MemorySummaries = append(b.MemorySummaries, m.summary)
-		b.RecentPhrases = append(b.RecentPhrases, m.phrases...)
+
+	// AirHistory returns FINISHED tracks only, newest first, so the still-airing
+	// anchor excludes itself and no extra filter is needed for it.
+	if hist, err := dr.d.AirLog.History(ctx, tonightCap); err == nil {
+		for i := len(hist) - 1; i >= 0; i-- { // reverse to oldest-first
+			e := hist[i]
+			if !sessionStart.IsZero() && e.StartedAt.Before(sessionStart) {
+				continue // a previous broadcast is not "tonight"
+			}
+			b.Tonight = append(b.Tonight, BriefTrack{Title: e.Title, Artist: e.Artist})
+		}
+	} else {
+		dr.d.Logger.WarnContext(ctx, "director: air history read failed", "err", err)
 	}
-	dr.mu.Unlock()
+
+	if dr.d.TalkMem != nil {
+		if mem, err := dr.d.TalkMem.Recent(ctx, sessionStart, threadCap); err == nil {
+			for _, m := range mem {
+				b.Thread = append(b.Thread, m.Summary)
+				b.RecentPhrases = append(b.RecentPhrases, m.Phrases...)
+			}
+		} else {
+			dr.d.Logger.WarnContext(ctx, "director: show memory read failed", "err", err)
+		}
+	}
 	return b
 }

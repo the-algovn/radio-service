@@ -13,6 +13,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/talkmem"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
@@ -24,7 +25,6 @@ const (
 	// carry their own 25s HTTP timeouts); a timeout is an ordinary failure.
 	prepDeadline = 60 * time.Second
 	ringCap      = 5
-	teaserCap    = 3
 	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
 	// lines. The live max_chars setting governs LLM seam scripts only
 	// (spec §4) — station-ID lines are pre-written and validated once at load.
@@ -47,7 +47,7 @@ type Deps struct {
 	Station   station.Store
 	Listeners live.Listeners
 	AirLog    live.AirLog
-	Requests  request.Store // queue teasers for the brief
+	TalkMem   talkmem.Store // persisted show memory; nil disables the thread
 
 	PersonaDir     string
 	StationIDsPath string
@@ -249,7 +249,7 @@ func (dr *Director) RunOnce(ctx context.Context) {
 		return
 	}
 
-	clip, ok := dr.prepare(ctx, kind, st.DJ)
+	clip, ok := dr.prepare(ctx, kind, st)
 	if !ok {
 		return
 	}

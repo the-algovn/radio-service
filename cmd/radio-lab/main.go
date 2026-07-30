@@ -43,6 +43,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/server"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/talkmem"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
@@ -232,7 +233,8 @@ func main() {
 		dj = director.New(director.Deps{
 			Model: models[defaultModel], Voice: voiceProv, VoiceFake: voiceFake,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
-			AirLog: airLog, Requests: requests,
+			AirLog:         airLog,
+			TalkMem:        talkmem.NewPGStore(pool, 7*24*time.Hour),
 			PersonaDir:     config.Get("PERSONA_DIR", "persona"),
 			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
 			DataDir:        djDir, BudgetUSD: budget,
