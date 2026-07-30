@@ -22,12 +22,13 @@ func (s *PGStore) GetNextUp(ctx context.Context) (NextUp, bool, error) {
 	if row.YtID == "" {
 		return NextUp{}, false, nil
 	}
-	return NextUp{YTID: row.YtID, Title: row.Title, Channel: row.Channel}, true, nil
+	return NextUp{YTID: row.YtID, Title: row.Title, Channel: row.Channel,
+		RequestID: row.RequestID}, true, nil
 }
 
 func (s *PGStore) SetNextUp(ctx context.Context, n NextUp) error {
 	return db.New(s.pool).SetNextUp(ctx, db.SetNextUpParams{
-		YtID: n.YTID, Title: n.Title, Channel: n.Channel,
+		YtID: n.YTID, Title: n.Title, Channel: n.Channel, RequestID: n.RequestID,
 	})
 }
 

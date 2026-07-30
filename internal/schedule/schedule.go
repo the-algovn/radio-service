@@ -7,14 +7,22 @@ package schedule
 
 import "context"
 
-// NextUp is the committed next track. It is always a shuffle pick (library
-// re-spin); listener/AI picks live in the request queue and need no
-// commitment. Display fields only — the feeder re-fetches the full track by
-// YTID when it airs.
+// NextUp is the committed next track — the one thing planNext will not let
+// anything preempt (feeder.go:243-266), which is what makes it the DJ's
+// promise mechanism (spec 2026-07-29-radio-dj-seam-breaks §3).
+//
+// RequestID is set when the committed track is a REQUEST pinned by the
+// director; "" means a shuffle pick (a library re-spin), which is all
+// commitNextUp ever writes. A pinned request must carry its id so planNext
+// can rebuild the request's provenance and mark it aired — without it the
+// track would air unattributed and the request would never leave the queue.
+//
+// Display fields only — the feeder re-fetches the full track by YTID.
 type NextUp struct {
-	YTID    string
-	Title   string
-	Channel string
+	YTID      string
+	Title     string
+	Channel   string
+	RequestID string
 }
 
 type Store interface {

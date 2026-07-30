@@ -48,4 +48,28 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, err)
 		require.False(t, ok)
 	})
+
+	t.Run("request id round-trips and clears", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.SetNextUp(ctx, schedule.NextUp{
+			YTID: "abc", Title: "t", Channel: "c", RequestID: "req-7"}))
+		got, ok, err := s.GetNextUp(ctx)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, "req-7", got.RequestID)
+
+		require.NoError(t, s.ClearNextUp(ctx))
+		_, ok, err = s.GetNextUp(ctx)
+		require.NoError(t, err)
+		require.False(t, ok)
+	})
+
+	t.Run("a shuffle pin leaves request id empty", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.SetNextUp(ctx, schedule.NextUp{YTID: "a", Title: "1"}))
+		got, ok, err := s.GetNextUp(ctx)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, "", got.RequestID)
+	})
 }
