@@ -748,25 +748,37 @@ func TestPinnedRequestSurvivesToTheSeam(t *testing.T) {
 	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
 		func(d *FeederDeps) { d.Sched = sched })
 
-	// A pending (ready) request — exactly the state that makes commitNextUp
-	// want to clear the commitment.
-	req, err := reqs.Create(ctx, request.Item{
+	// An OLDER ready request. Its presence is what makes this test
+	// discriminating: it is what NextReady would return, so if the next-up arm
+	// were removed entirely, planNext would answer yt1 and the assertions
+	// below would fail. Without it the test passes for the wrong reason — the
+	// request arm builds an identical airItem for the same single request.
+	older, err := reqs.Create(ctx, request.Item{
+		Source: request.SourceListener, DisplayName: "Ai đó", YTID: "yt1",
+		Title: "t-yt1", Channel: "c-yt1", Status: request.StatusReady})
+	require.NoError(t, err)
+
+	// The director's pin, as it lands mid-track — naming a DIFFERENT track.
+	promised, err := reqs.Create(ctx, request.Item{
 		Source: request.SourceListener, DisplayName: "Ngọc", YTID: "yt2",
 		Title: "t-yt2", Channel: "c-yt2", Status: request.StatusReady})
 	require.NoError(t, err)
-
-	// The director's pin, as it lands mid-track.
 	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
-		YTID: "yt2", Title: "t-yt2", Channel: "c-yt2", RequestID: req.ID}))
+		YTID: "yt2", Title: "t-yt2", Channel: "c-yt2", RequestID: promised.ID}))
 
 	// commitNextUp runs at every track start. Prove it does NOT run between
 	// the pin and the read: plan the seam directly and assert the pin is what
 	// comes back, with its provenance.
 	p, err := f.planNext(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "yt2", p.item.track.YTID, "the pin must survive to the seam")
-	require.Equal(t, req.ID, p.item.requestID)
+	require.Equal(t, "yt2", p.item.track.YTID,
+		"the pin must outrank the older ready request at the head of the queue")
+	require.Equal(t, promised.ID, p.item.requestID)
+	require.NotEqual(t, older.ID, p.item.requestID)
 	require.Equal(t, "Ngọc", p.item.requestedByName)
+	require.True(t, p.consumedNextUp,
+		"and it must arrive through the next-up arm, not the request arm — this is "+
+			"the discriminator, since both arms build an identical airItem")
 
 	// And prove the hazard is real rather than imaginary, so this test keeps
 	// its meaning: commitNextUp with this same pending request DOES clear it.
