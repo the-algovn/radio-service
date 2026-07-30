@@ -82,7 +82,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
 			return live.Clip{}, false
 		}
-		system, user := brain.BuildPrompts(pers+talkRules, string(briefJSON))
+		system, user := brain.BuildScriptPrompts(pers, string(briefJSON))
 		var ok bool
 		out, ok = dr.generateValid(ctx, system, user, dj.MaxChars)
 		if !ok {

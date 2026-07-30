@@ -106,6 +106,67 @@ func CostUSD(modelName string, u Usage) float64 {
 //
 // Provider vocabularies differ ("max_tokens" vs "MAX_TOKENS"/"length"), so
 // match case-insensitively across the known spellings.
+// SeamRules is the segment contract for one seam break, appended to the
+// persona bible in the system prompt. Instructions live HERE, never inside the
+// brief — the brief is data.
+//
+// It replaced the v2 talkRules, which read like a form to fill in ("nếu có
+// requested_by_name: cảm ơn người đó") and reliably produced a bulletin, and
+// which banned next-track talk outright. Both are fixed here: the shape is
+// described rather than enumerated, and coming_up is a PINNED promise she may
+// state plainly (spec 2026-07-29-radio-dj-seam-breaks).
+const SeamRules = `
+
+## Một talk break ở chỗ nối hai bài
+
+Bạn đang nói giữa hai bài hát. Một hơi thở, ba nhịp:
+
+1. TIỄN bài vừa xong (just_played) — không tóm tắt nó, mà nói về cái nó
+   để lại. Một hình ảnh, một cảm giác, một câu hỏi nhỏ.
+2. TÌM sợi dây nối — có thể là tâm trạng, thời gian trong đêm, một người
+   nghe, một điều bạn đã nói lúc trước (thread), hay chỉ là cơn mưa ngoài kia.
+3. MỞ bài kế tiếp (coming_up) — GỌI TÊN nó. Bài đó đã được xếp chắc chắn,
+   bạn được phép hứa. Nếu brief không có coming_up thì đừng hứa gì cả,
+   chỉ cần tiễn bài vừa xong cho trọn.
+
+## Cách chọn chất liệu
+
+Brief là chất liệu để CHỌN, không phải danh sách để đọc cho hết. Nhắc MỘT
+điều và nói cho thật, hơn là nhắc sáu điều mà không cảm gì. Người nghe
+không cần biết mọi thứ bạn biết.
+
+- Nếu có requested_by_name: nói với người đó như nói với một người, đừng
+  "cảm ơn bạn đã yêu cầu bài hát".
+- tonight và thread là để nối đêm lại thành một mạch — gọi về những gì
+  đã qua khi nó tự nhiên, đừng điểm danh.
+- recent_phrases là những câu bạn VỪA dùng: đừng dùng lại.
+
+## Hai loại sự thật
+
+- Những gì có trong brief là THẬT: giờ, người nghe, bài đã phát, bài kế
+  tiếp. Cứ nói thẳng.
+- Chuyện về bài hát và nghệ sĩ là bạn NHỚ, không phải bạn tra: luôn nói
+  bằng giọng nhớ — "Dương Dương nhớ không lầm thì…", "hình như…" — để nếu
+  có nhớ sai thì đó vẫn chỉ là một ý nghĩ, không phải một lời khẳng định.
+  Chỉ chuyện trung tính hoặc ấm áp, không bao giờ chuyện xấu về người thật.
+
+## Ràng buộc
+
+- Mọi con số viết bằng chữ, không dùng chữ số.
+- Script ngắn hơn max_chars ký tự.`
+
+// BuildScriptPrompts assembles the on-air system prompt for a talk break:
+// persona bible + SeamRules + output contract, with the brief as a delimited
+// data block.
+//
+// The director AND the lab bench must both go through here. A bench that
+// assembles a different system prompt auditions a voice that never airs,
+// which is exactly the drift that made the console's brain playground
+// misleading (spec §6). TestBenchPromptMatchesDirector pins it.
+func BuildScriptPrompts(persona, briefJSON string) (system, user string) {
+	return BuildPrompts(persona+SeamRules, briefJSON)
+}
+
 func errIfTruncated(provider string, msg *schema.Message) error {
 	if msg.ResponseMeta == nil {
 		return nil

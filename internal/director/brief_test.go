@@ -37,11 +37,6 @@ func TestDaypartMapping(t *testing.T) {
 	}
 }
 
-func TestTalkRulesForbidPromisingNext(t *testing.T) {
-	require.Contains(t, talkRules, "sắp tới")
-	require.Contains(t, talkRules, "KHÔNG hứa")
-}
-
 func TestBriefMarshalsComingUpOnlyWhenPresent(t *testing.T) {
 	b := Brief{Type: "seam", JustPlayed: BriefTrack{Title: "A"}, MaxChars: 1500}
 	j, err := json.Marshal(b)

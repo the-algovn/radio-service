@@ -65,15 +65,3 @@ func daypart(hour int) string {
 		return "đêm"
 	}
 }
-
-// talkRules is appended to the persona bible in the system prompt for
-// backsell generation — the segment-specific rules the persona file doesn't
-// carry. Instructions live here, never inside the brief.
-const talkRules = `
-
-## Luật talk break
-- Đây là một talk break NGẮN giữa hai bài hát: nói về bài VỪA PHÁT xong (just_played).
-- KHÔNG hứa hẹn bài "tiếp theo". Nếu nhắc queue_teasers, chỉ nói "sắp tới" chung chung.
-- Nếu just_played có requested_by_name: cảm ơn người đó đã yêu cầu bài. Nếu có reason: có thể nhắc lại lý do chọn bài một cách tự nhiên.
-- Đừng lặp lại ý trong memory_summaries hay câu trong recent_phrases.
-- Mọi con số viết bằng chữ. Script ngắn hơn max_chars ký tự.`
