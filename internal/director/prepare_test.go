@@ -62,6 +62,11 @@ func (errListeners) Count(context.Context) (int, error) {
 const goodRaw = `{"script":"Vừa rồi là một bản nhạc đêm dịu dàng, cảm ơn bạn đã cùng nghe.","summary":"backsell đêm","used_phrases":["cùng nghe"]}`
 const digitRaw = `{"script":"Bài này ra năm 2020 đó nha.","summary":"x","used_phrases":[]}`
 
+// memoryRaw carries a distinctive summary and phrase so the show-memory
+// assertions cannot pass by accident. The script reuses goodRaw's text, which
+// is already digit-free and inside testDJ's 450-rune cap.
+const memoryRaw = `{"script":"Vừa rồi là một bản nhạc đêm dịu dàng, cảm ơn bạn đã cùng nghe.","summary":"kể chuyện cơn mưa Sài Gòn","used_phrases":["bạn nghe đài thân mến"]}`
+
 // testDJ mirrors the old fixture Deps knobs for direct prepare() calls.
 var testDJ = station.DJSettings{VoiceID: "fake", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 450}
 
@@ -136,9 +141,9 @@ func TestPrepareSeamHappyPath(t *testing.T) {
 	require.Equal(t, []string{"tts:director:seam"}, ledgerLabels(t, f.ledger), "LLM spend is now priced by the Eino callback, not the director")
 	lines, _ := f.ledger.All(context.Background())
 	require.Zero(t, lines[0].CostUSD, "VoiceFake zeroes tts cost")
-	f.dr.mu.Lock()
-	require.Len(t, f.dr.ring, 1, "seam summary recorded")
-	f.dr.mu.Unlock()
+	got, err := f.dr.d.TalkMem.Recent(context.Background(), time.Time{}, 8)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "seam summary recorded")
 }
 
 func TestPrepareSeamRetriesOnceOnViolations(t *testing.T) {
@@ -158,9 +163,9 @@ func TestPrepareSeamAbortsAfterSecondViolation(t *testing.T) {
 	require.False(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	require.Empty(t, ledgerLabels(t, f.ledger), "no llm spend recorded; the director no longer prices its own calls")
-	f.dr.mu.Lock()
-	require.Empty(t, f.dr.ring)
-	f.dr.mu.Unlock()
+	got, err := f.dr.d.TalkMem.Recent(context.Background(), time.Time{}, 8)
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
 
 func TestPrepareSeamNoAirLogEntryQuietSkip(t *testing.T) {
@@ -520,4 +525,52 @@ func TestPrepareStationIDDoesNotPin(t *testing.T) {
 	_, ok := sf.dr.prepare(context.Background(), live.ClipStationID, testStation)
 	require.True(t, ok)
 	require.Equal(t, 0, sf.pin.calls)
+}
+
+func TestPrepareRecordsShowMemory(t *testing.T) {
+	ctx := context.Background()
+	sf := newSeamFixture(t, &seqModel{raws: []string{memoryRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) { return live.Upcoming{}, false, nil }
+
+	_, ok := sf.dr.prepare(ctx, live.ClipSeam, testStation)
+	require.True(t, ok)
+
+	got, err := sf.dr.d.TalkMem.Recent(ctx, time.Time{}, 8)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, live.ClipSeam, got[0].Kind)
+	require.Equal(t, "kể chuyện cơn mưa Sài Gòn", got[0].Summary)
+	require.Equal(t, []string{"bạn nghe đài thân mến"}, got[0].Phrases)
+}
+
+// A station_id is pre-written, not authored — it must not enter show memory.
+func TestPrepareStationIDDoesNotRecordShowMemory(t *testing.T) {
+	ctx := context.Background()
+	sf := newSeamFixture(t, &seqModel{raws: []string{memoryRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) { return live.Upcoming{}, false, nil }
+
+	_, ok := sf.dr.prepare(ctx, live.ClipStationID, testStation)
+	require.True(t, ok)
+
+	got, err := sf.dr.d.TalkMem.Recent(ctx, time.Time{}, 8)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+// Memory enriches; it never gates. A write failure must not lose the break —
+// it has already been rendered and paid for.
+func TestPrepareSurvivesShowMemoryWriteFailure(t *testing.T) {
+	sf := newSeamFixture(t, &seqModel{raws: []string{memoryRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) { return live.Upcoming{}, false, nil }
+	sf.dr.d.TalkMem = failingTalkMem{}
+
+	_, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok)
+}
+
+type failingTalkMem struct{}
+
+func (failingTalkMem) Append(context.Context, talkmem.Entry) error { return errors.New("db down") }
+func (failingTalkMem) Recent(context.Context, time.Time, int) ([]talkmem.Entry, error) {
+	return nil, errors.New("db down")
 }

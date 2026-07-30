@@ -17,6 +17,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/talkmem"
 	"github.com/the-algovn/radio-service/internal/voice"
 )
 
@@ -139,8 +140,14 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 		}
 	}
 
-	if kind == live.ClipSeam {
-		dr.pushRing(out.Summary, out.UsedPhrases)
+	if kind == live.ClipSeam && dr.d.TalkMem != nil {
+		// Best-effort: the clip is rendered and paid for, so a memory write
+		// failure must not lose the break.
+		if merr := dr.d.TalkMem.Append(ctx, talkmem.Entry{
+			Kind: kind, Summary: out.Summary, Phrases: out.UsedPhrases,
+		}); merr != nil {
+			dr.d.Logger.ErrorContext(ctx, "director: show memory append failed", "err", merr)
+		}
 	}
 	dr.d.Logger.InfoContext(ctx, "talk clip prepared", "kind", kind, "duration_s", durS, "script", script)
 	return live.Clip{Path: outPath, DurationS: durS, Script: script, Kind: kind,

@@ -25,7 +25,6 @@ const (
 	// prepDeadline bounds one whole prepare attempt (the provider clients
 	// carry their own 25s HTTP timeouts); a timeout is an ordinary failure.
 	prepDeadline = 60 * time.Second
-	ringCap      = 5
 	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
 	// lines. The live max_chars setting governs LLM seam scripts only
 	// (spec §4) — station-ID lines are pre-written and validated once at load.
@@ -79,11 +78,6 @@ type Deps struct {
 	Sched Pinner   // nil → never promise the next track
 }
 
-type memEntry struct {
-	summary string
-	phrases []string
-}
-
 // Director prepares talk breaks ahead of air and hands them to the feeder
 // through the live.TalkSource seam. One goroutine (Run) prepares; the feeder
 // goroutine calls Take/TrackFinished; everything shared sits under mu.
@@ -97,7 +91,6 @@ type Director struct {
 	finishedSinceSeam int
 	lastStationID     time.Time
 	wasOnAir          bool
-	ring              []memEntry // last 5 seam summaries+phrases
 }
 
 func New(d Deps) *Director {
@@ -193,16 +186,6 @@ func (dr *Director) cancelPendingLocked(reason string) {
 	_ = os.Remove(dr.slot.Path)
 	dr.d.Logger.Info("pending talk clip cancelled", "reason", reason, "kind", dr.slot.Kind)
 	dr.slot = nil
-}
-
-// pushRing records one seam's show memory (station_id never touches it).
-func (dr *Director) pushRing(summary string, phrases []string) {
-	dr.mu.Lock()
-	defer dr.mu.Unlock()
-	dr.ring = append(dr.ring, memEntry{summary: summary, phrases: phrases})
-	if len(dr.ring) > ringCap {
-		dr.ring = dr.ring[len(dr.ring)-ringCap:]
-	}
 }
 
 // Run ticks the wake loop until ctx cancellation (programmer-shaped).

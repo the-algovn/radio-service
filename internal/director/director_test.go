@@ -187,16 +187,6 @@ func TestCancelPendingDeletesClip(t *testing.T) {
 	require.Nil(t, dr.slot)
 }
 
-func TestRingCapsAtFive(t *testing.T) {
-	dr, _ := newCoreDirector(t)
-	for i := 0; i < 7; i++ {
-		dr.pushRing("tóm tắt", []string{"câu"})
-	}
-	dr.mu.Lock()
-	defer dr.mu.Unlock()
-	require.Len(t, dr.ring, 5)
-}
-
 func onAir(t *testing.T, f *prepFixture) {
 	t.Helper()
 	_, err := f.dr.d.Station.GoOnAir(context.Background())
