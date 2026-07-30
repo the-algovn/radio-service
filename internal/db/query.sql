@@ -195,13 +195,15 @@ UPDATE request SET status = 'failed', fail_reason = $2
 WHERE id = $1 AND status IN ('approved', 'ready');
 
 -- name: GetNextUp :one
-SELECT yt_id, title, channel FROM next_up WHERE id = TRUE;
+SELECT yt_id, title, channel, request_id FROM next_up WHERE id = TRUE;
 
 -- name: SetNextUp :exec
-UPDATE next_up SET yt_id = $1, title = $2, channel = $3, updated_at = now() WHERE id = TRUE;
+UPDATE next_up SET yt_id = $1, title = $2, channel = $3, request_id = $4,
+       updated_at = now() WHERE id = TRUE;
 
 -- name: ClearNextUp :exec
-UPDATE next_up SET yt_id = '', title = '', channel = '', updated_at = now() WHERE id = TRUE;
+UPDATE next_up SET yt_id = '', title = '', channel = '', request_id = '',
+       updated_at = now() WHERE id = TRUE;
 
 -- name: InsertLLMCall :exec
 INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
@@ -242,3 +244,17 @@ ORDER BY cost_usd DESC;
 
 -- name: PruneLLMCalls :exec
 DELETE FROM llm_call WHERE ts < sqlc.arg(before);
+
+-- name: InsertTalkMemory :exec
+INSERT INTO talk_memory (kind, summary, phrases) VALUES ($1, $2, $3);
+
+-- name: RecentTalkMemory :many
+-- Newest first; the caller reverses to get the narrative order.
+SELECT id, kind, summary, phrases, created_at
+FROM talk_memory
+WHERE created_at >= sqlc.arg(created_at)
+ORDER BY created_at DESC
+LIMIT sqlc.arg(lim);
+
+-- name: PruneTalkMemory :exec
+DELETE FROM talk_memory WHERE created_at < $1;

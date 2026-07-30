@@ -160,7 +160,8 @@ func (q *Queries) BumpRequestAttempts(ctx context.Context, arg BumpRequestAttemp
 }
 
 const clearNextUp = `-- name: ClearNextUp :exec
-UPDATE next_up SET yt_id = '', title = '', channel = '', updated_at = now() WHERE id = TRUE
+UPDATE next_up SET yt_id = '', title = '', channel = '', request_id = '',
+       updated_at = now() WHERE id = TRUE
 `
 
 func (q *Queries) ClearNextUp(ctx context.Context) error {
@@ -326,19 +327,25 @@ func (q *Queries) DeleteTrack(ctx context.Context, ytID string) (string, error) 
 }
 
 const getNextUp = `-- name: GetNextUp :one
-SELECT yt_id, title, channel FROM next_up WHERE id = TRUE
+SELECT yt_id, title, channel, request_id FROM next_up WHERE id = TRUE
 `
 
 type GetNextUpRow struct {
-	YtID    string
-	Title   string
-	Channel string
+	YtID      string
+	Title     string
+	Channel   string
+	RequestID string
 }
 
 func (q *Queries) GetNextUp(ctx context.Context) (GetNextUpRow, error) {
 	row := q.db.QueryRow(ctx, getNextUp)
 	var i GetNextUpRow
-	err := row.Scan(&i.YtID, &i.Title, &i.Channel)
+	err := row.Scan(
+		&i.YtID,
+		&i.Title,
+		&i.Channel,
+		&i.RequestID,
+	)
 	return i, err
 }
 
@@ -482,6 +489,21 @@ func (q *Queries) InsertLedgerLine(ctx context.Context, arg InsertLedgerLinePara
 		arg.OutTokens,
 		arg.CostUsd,
 	)
+	return err
+}
+
+const insertTalkMemory = `-- name: InsertTalkMemory :exec
+INSERT INTO talk_memory (kind, summary, phrases) VALUES ($1, $2, $3)
+`
+
+type InsertTalkMemoryParams struct {
+	Kind    string
+	Summary string
+	Phrases []string
+}
+
+func (q *Queries) InsertTalkMemory(ctx context.Context, arg InsertTalkMemoryParams) error {
+	_, err := q.db.Exec(ctx, insertTalkMemory, arg.Kind, arg.Summary, arg.Phrases)
 	return err
 }
 
@@ -1039,6 +1061,15 @@ func (q *Queries) PruneListeners(ctx context.Context) error {
 	return err
 }
 
+const pruneTalkMemory = `-- name: PruneTalkMemory :exec
+DELETE FROM talk_memory WHERE created_at < $1
+`
+
+func (q *Queries) PruneTalkMemory(ctx context.Context, createdAt time.Time) error {
+	_, err := q.db.Exec(ctx, pruneTalkMemory, createdAt)
+	return err
+}
+
 const recentAirLogYTIDs = `-- name: RecentAirLogYTIDs :many
 SELECT yt_id FROM air_log ORDER BY started_at DESC, id DESC LIMIT $1
 `
@@ -1056,6 +1087,46 @@ func (q *Queries) RecentAirLogYTIDs(ctx context.Context, limit int32) ([]string,
 			return nil, err
 		}
 		items = append(items, yt_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recentTalkMemory = `-- name: RecentTalkMemory :many
+SELECT id, kind, summary, phrases, created_at
+FROM talk_memory
+WHERE created_at >= $1
+ORDER BY created_at DESC
+LIMIT $2
+`
+
+type RecentTalkMemoryParams struct {
+	CreatedAt time.Time
+	Lim       int32
+}
+
+// Newest first; the caller reverses to get the narrative order.
+func (q *Queries) RecentTalkMemory(ctx context.Context, arg RecentTalkMemoryParams) ([]TalkMemory, error) {
+	rows, err := q.db.Query(ctx, recentTalkMemory, arg.CreatedAt, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TalkMemory{}
+	for rows.Next() {
+		var i TalkMemory
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Summary,
+			&i.Phrases,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1192,17 +1263,24 @@ func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) 
 }
 
 const setNextUp = `-- name: SetNextUp :exec
-UPDATE next_up SET yt_id = $1, title = $2, channel = $3, updated_at = now() WHERE id = TRUE
+UPDATE next_up SET yt_id = $1, title = $2, channel = $3, request_id = $4,
+       updated_at = now() WHERE id = TRUE
 `
 
 type SetNextUpParams struct {
-	YtID    string
-	Title   string
-	Channel string
+	YtID      string
+	Title     string
+	Channel   string
+	RequestID string
 }
 
 func (q *Queries) SetNextUp(ctx context.Context, arg SetNextUpParams) error {
-	_, err := q.db.Exec(ctx, setNextUp, arg.YtID, arg.Title, arg.Channel)
+	_, err := q.db.Exec(ctx, setNextUp,
+		arg.YtID,
+		arg.Title,
+		arg.Channel,
+		arg.RequestID,
+	)
 	return err
 }
 

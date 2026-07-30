@@ -57,6 +57,7 @@ type NextUp struct {
 	Title     string
 	Channel   string
 	UpdatedAt time.Time
+	RequestID string
 }
 
 type RadioListener struct {
@@ -94,6 +95,14 @@ type Station struct {
 	DjBreakEvery   int32
 	DjStationIDMin int32
 	DjMaxChars     int32
+}
+
+type TalkMemory struct {
+	ID        int64
+	Kind      string
+	Summary   string
+	Phrases   []string
+	CreatedAt time.Time
 }
 
 type Track struct {
