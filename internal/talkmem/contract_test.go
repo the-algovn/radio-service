@@ -50,15 +50,26 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Equal(t, "bốn", got[1].Summary)
 	})
 
-	t.Run("since excludes older sessions", func(t *testing.T) {
+	t.Run("since excludes older sessions, inclusive of its boundary", func(t *testing.T) {
 		s := newStore(t)
 		require.NoError(t, s.Append(ctx, talkmem.Entry{Kind: "seam", Summary: "đêm trước"}))
-		time.Sleep(5 * time.Millisecond)
-		cut := time.Now()
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 		require.NoError(t, s.Append(ctx, talkmem.Entry{Kind: "seam", Summary: "đêm nay"}))
 
-		got, err := s.Recent(ctx, cut, 8)
+		// Derive the cut from the STORE's OWN timestamps — never from
+		// time.Now(). PGStore's created_at comes from Postgres, which under
+		// podman runs on the VM's clock; that clock has been observed ~0.7s
+		// AHEAD of the host, so a host-side cut lands before both rows and
+		// selects both, failing a correct implementation. Reading the stored
+		// values back keeps this portable under any clock skew, and asserting
+		// on the boundary row proves `since` is inclusive.
+		all, err := s.Recent(ctx, time.Time{}, 8)
+		require.NoError(t, err)
+		require.Len(t, all, 2)
+		require.True(t, all[1].CreatedAt.After(all[0].CreatedAt),
+			"the store must give two successive appends distinct timestamps")
+
+		got, err := s.Recent(ctx, all[1].CreatedAt, 8)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		require.Equal(t, "đêm nay", got[0].Summary)
