@@ -96,42 +96,42 @@ func ledgerLabels(t *testing.T, l *spend.MemLedger) []string {
 	return out
 }
 
-func TestPrepareBacksellHappyPath(t *testing.T) {
+func TestPrepareSeamHappyPath(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	anchor := live.Entry{YTID: "a", Title: "Bài A", Artist: "Ca sĩ",
 		StartedAt: time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC), Source: "ai", Reason: "hợp đêm"}
 	require.NoError(t, f.log.Append(context.Background(), anchor))
 
-	clip, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	clip, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.True(t, ok)
-	require.Equal(t, live.ClipBacksell, clip.Kind)
+	require.Equal(t, live.ClipSeam, clip.Kind)
 	require.Equal(t, "a", clip.AnchorYTID)
 	require.Equal(t, anchor.StartedAt, clip.AnchorStartedAt)
 	require.InDelta(t, 0.5, clip.DurationS, 0.001)
 	_, err := os.Stat(clip.Path)
 	require.NoError(t, err, "rendered clip file exists")
-	require.Equal(t, []string{"tts:director:backsell"}, ledgerLabels(t, f.ledger), "LLM spend is now priced by the Eino callback, not the director")
+	require.Equal(t, []string{"tts:director:seam"}, ledgerLabels(t, f.ledger), "LLM spend is now priced by the Eino callback, not the director")
 	lines, _ := f.ledger.All(context.Background())
 	require.Zero(t, lines[0].CostUSD, "VoiceFake zeroes tts cost")
 	f.dr.mu.Lock()
-	require.Len(t, f.dr.ring, 1, "backsell summary recorded")
+	require.Len(t, f.dr.ring, 1, "seam summary recorded")
 	f.dr.mu.Unlock()
 }
 
-func TestPrepareBacksellRetriesOnceOnViolations(t *testing.T) {
+func TestPrepareSeamRetriesOnceOnViolations(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, goodRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.True(t, ok)
 	require.Equal(t, 2, f.model.calls)
-	require.Equal(t, []string{"tts:director:backsell"}, ledgerLabels(t, f.ledger),
+	require.Equal(t, []string{"tts:director:seam"}, ledgerLabels(t, f.ledger),
 		"no llm line: the director no longer prices either attempt itself")
 }
 
-func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
+func TestPrepareSeamAbortsAfterSecondViolation(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{digitRaw, digitRaw}})
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.False(t, ok)
 	require.Equal(t, 2, f.model.calls)
 	require.Empty(t, ledgerLabels(t, f.ledger), "no llm spend recorded; the director no longer prices its own calls")
@@ -140,9 +140,9 @@ func TestPrepareBacksellAbortsAfterSecondViolation(t *testing.T) {
 	f.dr.mu.Unlock()
 }
 
-func TestPrepareBacksellNoAirLogEntryQuietSkip(t *testing.T) {
+func TestPrepareSeamNoAirLogEntryQuietSkip(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.False(t, ok, "nothing airing → nothing to talk about")
 	require.Zero(t, f.model.calls)
 }
@@ -162,7 +162,7 @@ func TestPrepareTTSFailure(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Voice = errVoice{}
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.False(t, ok)
 	require.Empty(t, ledgerLabels(t, f.ledger), "no llm line: the director no longer prices the call; tts never ran")
 }
@@ -171,7 +171,7 @@ func TestPrepareRenderFailureCleansUp(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	f.dr.d.Render = func(_ context.Context, _, _ string) (float64, error) { return 0, errors.New("boom") }
 	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
-	_, ok := f.dr.prepare(context.Background(), live.ClipBacksell, testDJ)
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, testDJ)
 	require.False(t, ok)
 	entries, err := os.ReadDir(f.dr.d.DataDir)
 	require.NoError(t, err)

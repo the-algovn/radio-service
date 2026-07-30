@@ -174,7 +174,8 @@ SELECT count(*) FROM llm_call
 WHERE ($1::text = ''
        OR label = $1
        OR ($1::text = 'script:' AND label LIKE 'script:%')
-       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%'))
+       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
+       OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
 `
 
@@ -620,7 +621,8 @@ FROM llm_call
 WHERE ($1::text = ''
        OR label = $1
        OR ($1::text = 'script:' AND label LIKE 'script:%')
-       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%'))
+       OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
+       OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
 ORDER BY ts DESC
 LIMIT $4 OFFSET $3
@@ -633,7 +635,8 @@ type ListLLMCallsParams struct {
 	Lim         int32
 }
 
-// label_filter: "" = all; "script:" = all script:* call-sites (prefix); "programmer:" = all programmer:* call-sites (prefix); else exact match.
+// label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
+// matches that whole call-site group by prefix; anything else is an exact match.
 func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]LlmCall, error) {
 	rows, err := q.db.Query(ctx, listLLMCalls,
 		arg.LabelFilter,

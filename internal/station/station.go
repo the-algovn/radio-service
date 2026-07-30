@@ -12,7 +12,7 @@ import (
 
 // DJSettings are the DJ delivery knobs (spec 2026-07-23-dj-voice-settings).
 // StationIDMin is MINUTES between station IDs; 0 disables. BreakEvery 0
-// disables backsells. Persisted on the station row; the director re-reads
+// disables seam breaks. Persisted on the station row; the director re-reads
 // them every tick.
 type DJSettings struct {
 	VoiceID      string

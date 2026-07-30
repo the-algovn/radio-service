@@ -51,7 +51,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 			return live.Clip{}, false
 		}
 		script = line
-	default: // live.ClipBacksell
+	default: // live.ClipSeam
 		entry, found, err := dr.d.AirLog.Latest(ctx)
 		if err != nil || !found {
 			if err != nil {
@@ -113,7 +113,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 		return live.Clip{}, false
 	}
 
-	if kind == live.ClipBacksell {
+	if kind == live.ClipSeam {
 		dr.pushRing(out.Summary, out.UsedPhrases)
 	}
 	dr.d.Logger.InfoContext(ctx, "talk clip prepared", "kind", kind, "duration_s", durS, "script", script)
@@ -126,7 +126,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, dj station.DJSetti
 // appended. Cost and the spend ledger are handled by the Eino audit callback,
 // so this loop no longer prices anything itself.
 func (dr *Director) generateValid(ctx context.Context, system, user string, maxChars int) (brain.Output, bool) {
-	ctx = audit.WithLabel(ctx, "director:backsell")
+	ctx = audit.WithLabel(ctx, "director:seam")
 	for attempt := 0; ; attempt++ {
 		raw, err := dr.d.Model.Generate(ctx, system, user, brain.ScriptSchema)
 		if err != nil {

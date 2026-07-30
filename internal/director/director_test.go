@@ -66,18 +66,18 @@ func TestTakeEmptySlot(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestTakeFreshBacksellResetsCounter(t *testing.T) {
+func TestTakeFreshSeamResetsCounter(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
-	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a", AnchorStartedAt: anchor})
 	c, ok := dr.Take(live.Entry{YTID: "a", StartedAt: anchor})
 	require.True(t, ok)
 	require.Equal(t, p, c.Path)
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot)
-	require.Equal(t, 0, dr.finishedSinceBacksell, "hand-off resets the backsell counter")
+	require.Equal(t, 0, dr.finishedSinceSeam, "hand-off resets the seam counter")
 }
 
 // TestTakeFreshAcrossPrecisionLoss covers the CRITICAL fix: the anchor
@@ -89,14 +89,14 @@ func TestTakeFreshAcrossPrecisionLoss(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	ts := time.Date(2026, 7, 22, 21, 0, 0, 123456789, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
-	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: ts.Truncate(time.Microsecond)})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a", AnchorStartedAt: ts.Truncate(time.Microsecond)})
 	c, ok := dr.Take(live.Entry{YTID: "a", StartedAt: ts})
 	require.True(t, ok)
 	require.Equal(t, p, c.Path)
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot)
-	require.Equal(t, 0, dr.finishedSinceBacksell, "hand-off resets the backsell counter")
+	require.Equal(t, 0, dr.finishedSinceSeam, "hand-off resets the seam counter")
 }
 
 // TestTakeStaleSameYTIDDifferentAiring covers the other half of the OR: same
@@ -107,7 +107,7 @@ func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
-	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a", AnchorStartedAt: anchor})
 	_, ok := dr.Take(live.Entry{YTID: "a", StartedAt: anchor.Add(2 * time.Minute)})
 	require.False(t, ok)
 	_, err := os.Stat(p)
@@ -115,14 +115,14 @@ func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot, "slot cleared — no livelock on the slot-empty gate")
-	require.Equal(t, 1, dr.finishedSinceBacksell, "stale discard does NOT reset the counter")
+	require.Equal(t, 1, dr.finishedSinceSeam, "stale discard does NOT reset the counter")
 }
 
-func TestTakeStaleBacksellDeletesAndClears(t *testing.T) {
+func TestTakeStaleSeamDeletesAndClears(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	anchor := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
 	dr.TrackFinished(live.Entry{YTID: "x"})
-	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a", AnchorStartedAt: anchor})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a", AnchorStartedAt: anchor})
 	_, ok := dr.Take(live.Entry{YTID: "b", StartedAt: anchor.Add(time.Minute)})
 	require.False(t, ok)
 	_, err := os.Stat(p)
@@ -130,7 +130,7 @@ func TestTakeStaleBacksellDeletesAndClears(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot, "slot cleared — no livelock on the slot-empty gate")
-	require.Equal(t, 1, dr.finishedSinceBacksell, "stale discard does NOT reset the counter")
+	require.Equal(t, 1, dr.finishedSinceSeam, "stale discard does NOT reset the counter")
 }
 
 func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
@@ -151,7 +151,7 @@ func TestDueKindArithmetic(t *testing.T) {
 	dr.mu.Unlock()
 	dr.TrackFinished(live.Entry{YTID: "a"})
 	dr.mu.Lock()
-	require.Equal(t, live.ClipBacksell, dr.dueKindLocked(clk.Now(), dj), "1 finished + current = 2 >= 2")
+	require.Equal(t, live.ClipSeam, dr.dueKindLocked(clk.Now(), dj), "1 finished + current = 2 >= 2")
 	dr.mu.Unlock()
 }
 
@@ -161,10 +161,10 @@ func TestDueKindStationIDWinsAndBreakEveryZeroDisables(t *testing.T) {
 	dr.mu.Lock()
 	dr.lastStationID = clk.Now()
 	dr.mu.Unlock()
-	dr.TrackFinished(live.Entry{YTID: "a"}) // backsell due
+	dr.TrackFinished(live.Entry{YTID: "a"}) // seam due
 	clk.advance(61 * time.Minute)           // station id also due
 	dr.mu.Lock()
-	require.Equal(t, live.ClipStationID, dr.dueKindLocked(clk.Now(), dj), "station_id wins; backsell carries over")
+	require.Equal(t, live.ClipStationID, dr.dueKindLocked(clk.Now(), dj), "station_id wins; seam carries over")
 	dr.mu.Unlock()
 
 	off, _ := newCoreDirector(t)
@@ -176,7 +176,7 @@ func TestDueKindStationIDWinsAndBreakEveryZeroDisables(t *testing.T) {
 
 func TestCancelPendingDeletesClip(t *testing.T) {
 	dr, _ := newCoreDirector(t)
-	p := slotClip(t, dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a"})
+	p := slotClip(t, dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a"})
 	dr.mu.Lock()
 	dr.cancelPendingLocked("test")
 	dr.mu.Unlock()
@@ -224,7 +224,7 @@ func TestRunOnceOffAirNoPrep(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	withListener(t, f)
 	seedAirLog(t, f)
-	f.dr.TrackFinished(live.Entry{YTID: "a"}) // backsell due
+	f.dr.TrackFinished(live.Entry{YTID: "a"}) // seam due
 	f.dr.RunOnce(context.Background())
 	require.False(t, slotFilled(f.dr))
 	require.Zero(t, f.model.calls)
@@ -271,7 +271,7 @@ func TestRunOnceBudgetReachedNoPrep(t *testing.T) {
 func TestRunOncePauseCancelsPendingClip(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	onAir(t, f)
-	p := slotClip(t, f.dr, live.Clip{Kind: live.ClipBacksell, AnchorYTID: "a"})
+	p := slotClip(t, f.dr, live.Clip{Kind: live.ClipSeam, AnchorYTID: "a"})
 	_, err := f.dr.d.Station.SetAIEnabled(context.Background(), false)
 	require.NoError(t, err)
 	f.dr.RunOnce(context.Background())

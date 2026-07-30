@@ -11,7 +11,7 @@ import (
 type Rec struct {
 	ID        int64
 	TS        time.Time
-	Label     string // director:backsell | programmer:pick | script:<type> | callin
+	Label     string // director:seam | director:station_id | programmer:pick | script:<type> | callin
 	Model     string // full model id
 	Provider  string // anthropic | gemini | fake
 	System    string

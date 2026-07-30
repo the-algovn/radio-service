@@ -662,7 +662,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		} else {
 			// Talk break first — take-if-ready, never waits (v2). Placed
 			// before the boundary below so a due break airs at the seam
-			// between tracks; lastFinished carries the backsell freshness
+			// between tracks; lastFinished carries the seam clip's freshness
 			// anchor. It runs ahead of takePrefetch on purpose: a clip is
 			// already on disk, so airing one costs no fetch, and the lookahead
 			// it leaves in flight is simply taken at the seam after it.
@@ -858,7 +858,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		}
 		// One music item finished (EOF, operator skip, or crash-cap skip) —
 		// it was announced and air-logged, so it counts on the format clock
-		// and becomes the backsell freshness anchor. Talk clips never reach
+		// and becomes the seam clip's freshness anchor. Talk clips never reach
 		// here (airClip's branch continues the loop above); failed-open
 		// tracks continue before this point and were never announced.
 		if f.d.Talk != nil {

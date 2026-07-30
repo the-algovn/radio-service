@@ -17,9 +17,9 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 
 	seed := func(s audit.Store) {
-		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "director:backsell", Model: "gemini-2.5-flash", Provider: "gemini", System: "sys1", User: "u1", Output: "o1", InTokens: 100, OutTokens: 40, CostUSD: 0.001}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "director:seam", Model: "gemini-2.5-flash", Provider: "gemini", System: "sys1", User: "u1", Output: "o1", InTokens: 100, OutTokens: 40, CostUSD: 0.001}))
 		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(time.Minute), Label: "programmer:pick", Model: "gemini-2.5-flash", Provider: "gemini", System: "sys2", User: "u2", Output: "", InTokens: 200, OutTokens: 0, CostUSD: 0.002, Error: "boom"}))
-		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(2 * time.Minute), Label: "director:backsell", Model: "claude-x", Provider: "anthropic", System: "sys3", User: "u3", Output: "o3", InTokens: 300, OutTokens: 60, CostUSD: 0.004}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(2 * time.Minute), Label: "director:seam", Model: "claude-x", Provider: "anthropic", System: "sys3", User: "u3", Output: "o3", InTokens: 300, OutTokens: 60, CostUSD: 0.004}))
 	}
 
 	t.Run("list newest-first with paging + total", func(t *testing.T) {
@@ -28,7 +28,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		all, err := s.List(ctx, audit.Filter{}, 10, 0)
 		require.NoError(t, err)
 		require.Len(t, all, 3)
-		require.Equal(t, "director:backsell", all[0].Label) // newest (base+2m) first
+		require.Equal(t, "director:seam", all[0].Label) // newest (base+2m) first
 		require.Equal(t, "o3", all[0].Output)
 		require.NotZero(t, all[0].ID)
 		total, err := s.Count(ctx, audit.Filter{})
@@ -43,10 +43,10 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 	t.Run("filter by label", func(t *testing.T) {
 		s := newStore(t)
 		seed(s)
-		got, err := s.List(ctx, audit.Filter{Label: "director:backsell"}, 10, 0)
+		got, err := s.List(ctx, audit.Filter{Label: "director:seam"}, 10, 0)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
-		n, err := s.Count(ctx, audit.Filter{Label: "director:backsell"})
+		n, err := s.Count(ctx, audit.Filter{Label: "director:seam"})
 		require.NoError(t, err)
 		require.Equal(t, int64(2), n)
 	})
@@ -83,11 +83,11 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "programmer:intent", Model: "m", Provider: "fake"}))
 		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(time.Minute), Label: "programmer:choose", Model: "m", Provider: "fake"}))
 		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(2 * time.Minute), Label: "programmer:repair", Model: "m", Provider: "fake"}))
-		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(3 * time.Minute), Label: "director:backsell", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(3 * time.Minute), Label: "director:seam", Model: "m", Provider: "fake"}))
 
 		byPrefix, err := s.List(ctx, audit.Filter{Label: "programmer:"}, 10, 0)
 		require.NoError(t, err)
-		require.Len(t, byPrefix, 3) // all three programmer:* rows, not director:backsell
+		require.Len(t, byPrefix, 3) // all three programmer:* rows, not director:seam
 		n, err := s.Count(ctx, audit.Filter{Label: "programmer:"})
 		require.NoError(t, err)
 		require.Equal(t, int64(3), n)
@@ -95,6 +95,34 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		exact, err := s.List(ctx, audit.Filter{Label: "programmer:choose"}, 10, 0)
 		require.NoError(t, err)
 		require.Len(t, exact, 1)
+	})
+
+	t.Run("director: is a prefix filter", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "director:seam", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(time.Minute), Label: "director:station_id", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(2 * time.Minute), Label: "programmer:pick", Model: "m", Provider: "fake"}))
+
+		got, err := s.List(ctx, audit.Filter{Label: "director:"}, 50, 0)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.ElementsMatch(t, []string{"director:seam", "director:station_id"},
+			[]string{got[0].Label, got[1].Label})
+
+		n, err := s.Count(ctx, audit.Filter{Label: "director:"})
+		require.NoError(t, err)
+		require.EqualValues(t, 2, n)
+	})
+
+	t.Run("an exact director label still matches only itself", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base, Label: "director:seam", Model: "m", Provider: "fake"}))
+		require.NoError(t, s.Record(ctx, audit.Rec{TS: base.Add(time.Minute), Label: "director:station_id", Model: "m", Provider: "fake"}))
+
+		got, err := s.List(ctx, audit.Filter{Label: "director:seam"}, 50, 0)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "director:seam", got[0].Label)
 	})
 
 	t.Run("stats group by label+model since", func(t *testing.T) {

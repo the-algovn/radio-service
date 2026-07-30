@@ -16,7 +16,7 @@ type startKey struct{}
 type modelKey struct{}
 
 // WithLabel tags ctx with the call-site label the callback records. Set it at
-// each call site immediately before Generate (e.g. "director:backsell").
+// each call site immediately before Generate (e.g. "director:seam").
 // It survives the move to Eino because callbacks carry no notion of call
 // site — RunInfo identifies the component (type/name), not where it was
 // invoked from.

@@ -26,7 +26,7 @@ const (
 	ringCap      = 5
 	teaserCap    = 3
 	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
-	// lines. The live max_chars setting governs LLM backsell scripts only
+	// lines. The live max_chars setting governs LLM seam scripts only
 	// (spec §4) — station-ID lines are pre-written and validated once at load.
 	stationIDMaxChars = 450
 )
@@ -74,12 +74,12 @@ type Director struct {
 	ids *stationIDs
 	seq atomic.Int64 // clip filename counter (deterministic in tests)
 
-	mu                    sync.Mutex
-	slot                  *live.Clip
-	finishedSinceBacksell int
-	lastStationID         time.Time
-	wasOnAir              bool
-	ring                  []memEntry // last 5 backsell summaries+phrases
+	mu                sync.Mutex
+	slot              *live.Clip
+	finishedSinceSeam int
+	lastStationID     time.Time
+	wasOnAir          bool
+	ring              []memEntry // last 5 seam summaries+phrases
 }
 
 func New(d Deps) *Director {
@@ -100,11 +100,11 @@ func New(d Deps) *Director {
 func (dr *Director) TrackFinished(_ live.Entry) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
-	dr.finishedSinceBacksell++
+	dr.finishedSinceSeam++
 }
 
 // Take hands over the prepared clip, if any. Never blocks. Staleness is
-// owned here: a backsell whose anchor is not the entry that just finished is
+// owned here: a seam whose anchor is not the entry that just finished is
 // deleted and cleared before returning ok=false (the slot-empty wake gate
 // must never livelock). station_id clips are always fresh. A successful
 // hand-off resets the matching format-clock counter — a stale discard does
@@ -116,17 +116,17 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		return live.Clip{}, false
 	}
 	c := *dr.slot
-	if c.Kind == live.ClipBacksell && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
+	if c.Kind == live.ClipSeam && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
 		dr.slot = nil
 		_ = os.Remove(c.Path)
-		dr.d.Logger.Info("stale backsell discarded", "anchor_ytid", c.AnchorYTID, "finished_ytid", justFinished.YTID)
+		dr.d.Logger.Info("stale seam discarded", "anchor_ytid", c.AnchorYTID, "finished_ytid", justFinished.YTID)
 		return live.Clip{}, false
 	}
 	dr.slot = nil
 	if c.Kind == live.ClipStationID {
 		dr.lastStationID = dr.d.Clock.Now()
 	} else {
-		dr.finishedSinceBacksell = 0
+		dr.finishedSinceSeam = 0
 	}
 	return c, true
 }
@@ -138,7 +138,7 @@ const anchorFreshTolerance = time.Second
 // just finished. StartedAt is compared with a 1s tolerance: the anchor
 // round-trips through Postgres TIMESTAMPTZ (microsecond precision) while the
 // feeder's entry carries the sample clock's nanoseconds — exact equality
-// would discard every backsell on a PG-backed deployment. Two airings of the
+// would discard every seam on a PG-backed deployment. Two airings of the
 // same track are separated by at least a track length, so 1s is safe.
 func anchorFresh(anchorYTID string, anchorStartedAt time.Time, justFinished live.Entry) bool {
 	if anchorYTID != justFinished.YTID {
@@ -152,7 +152,7 @@ func anchorFresh(anchorYTID string, anchorStartedAt time.Time, justFinished live
 }
 
 // dueKindLocked picks the due segment kind ("" = none). Caller holds mu.
-// station_id wins when both are due; the backsell counter carries over and
+// station_id wins when both are due; the seam counter carries over and
 // stays due. The +1 counts the currently-airing track — the one the break
 // will describe — so the default cadence is truly every BreakEvery tracks.
 func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
@@ -160,8 +160,8 @@ func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
 		now.Sub(dr.lastStationID) >= time.Duration(dj.StationIDMin)*time.Minute {
 		return live.ClipStationID
 	}
-	if dj.BreakEvery > 0 && dr.finishedSinceBacksell+1 >= dj.BreakEvery {
-		return live.ClipBacksell
+	if dj.BreakEvery > 0 && dr.finishedSinceSeam+1 >= dj.BreakEvery {
+		return live.ClipSeam
 	}
 	return ""
 }
@@ -177,7 +177,7 @@ func (dr *Director) cancelPendingLocked(reason string) {
 	dr.slot = nil
 }
 
-// pushRing records one backsell's show memory (station_id never touches it).
+// pushRing records one seam's show memory (station_id never touches it).
 func (dr *Director) pushRing(summary string, phrases []string) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()

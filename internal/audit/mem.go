@@ -30,7 +30,7 @@ func (m *MemStore) Record(_ context.Context, r Rec) error {
 func (m *MemStore) match(r Rec, f Filter) bool {
 	switch {
 	case f.Label == "": // all
-	case f.Label == "script:", f.Label == "programmer:": // prefix: all <group>:* call-sites
+	case f.Label == "script:", f.Label == "programmer:", f.Label == "director:": // prefix: all <group>:* call-sites
 		if !strings.HasPrefix(r.Label, f.Label) {
 			return false
 		}
