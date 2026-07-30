@@ -97,22 +97,44 @@ type requestQueueItemJSON struct {
 	Reason          string `json:"reason,omitempty"`
 }
 
-// RequestQueuePayload is the radio.queue SSE frame: an optional committed
-// next-up (a source-"" shuffle pick) first, then the pending request queue in
-// air order (listener FIFO, then AI FIFO), camelCase raw JSON.
+// RequestQueuePayload is the radio.queue SSE frame: the committed next-up
+// first, then the pending request queue in air order (listener FIFO, then AI
+// FIFO), camelCase raw JSON.
+//
+// The next-up is USUALLY a shuffle pick, which is absent from the pending
+// list. But the director pins a REQUEST when it promises one on air (spec
+// 2026-07-29-radio-dj-seam-breaks §3), and a pinned request is still `ready`
+// — so it is in items too. It is emitted once, from the pending row so it
+// keeps its thumbnail, source, requester and reason, and skipped in the loop.
 func RequestQueuePayload(items []request.Item, next *schedule.NextUp) []byte {
 	out := make([]requestQueueItemJSON, 0, len(items)+1)
 	if next != nil {
-		out = append(out, requestQueueItemJSON{Title: next.Title, Artist: next.Channel})
+		e := requestQueueItemJSON{Title: next.Title, Artist: next.Channel}
+		if next.RequestID != "" {
+			for _, it := range items {
+				if it.ID == next.RequestID {
+					e = itemJSON(it)
+					break
+				}
+			}
+		}
+		out = append(out, e)
 	}
 	for _, it := range items {
-		out = append(out, requestQueueItemJSON{
-			Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
-			Source: it.Source, RequestedByName: it.DisplayName, Reason: it.Reason,
-		})
+		if next != nil && next.RequestID != "" && it.ID == next.RequestID {
+			continue // already emitted as the next-up, attributed
+		}
+		out = append(out, itemJSON(it))
 	}
 	b, _ := json.Marshal(out)
 	return b
+}
+
+func itemJSON(it request.Item) requestQueueItemJSON {
+	return requestQueueItemJSON{
+		Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
+		Source: it.Source, RequestedByName: it.DisplayName, Reason: it.Reason,
+	}
 }
 
 // PublishQueueSnapshot reads the pending queue plus any committed next-up and

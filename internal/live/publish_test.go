@@ -89,3 +89,39 @@ func TestRequestQueuePayloadReason(t *testing.T) {
 	}, nil))
 	require.NotContains(t, got, "reason")
 }
+
+// A pinned request is still `ready`, so it is in Pending() too. Before this,
+// RequestQueuePayload prepended the next-up as a bare {title, artist} row and
+// then appended the whole pending list, so the song the DJ had just promised
+// appeared twice on the public SPA — the visible copy stripped of its
+// thumbnail, source and requester.
+func TestRequestQueuePayloadPinnedRequestAppearsOnceAttributed(t *testing.T) {
+	items := []request.Item{
+		{ID: "req-1", Title: "A", Channel: "ch-a", Source: request.SourceListener,
+			DisplayName: "Ngọc", ThumbnailURL: "https://img/a", Reason: "vì trời mưa"},
+		{ID: "req-2", Title: "B", Channel: "ch-b", Source: request.SourceAI},
+	}
+	next := &schedule.NextUp{YTID: "yt1", Title: "A", Channel: "ch-a", RequestID: "req-1"}
+
+	got := string(RequestQueuePayload(items, next))
+
+	require.Equal(t, 1, strings.Count(got, `"title":"A"`),
+		"the pinned request must appear exactly once")
+	require.JSONEq(t, `[
+      {"title":"A","artist":"ch-a","thumbnailUrl":"https://img/a","hasDedication":false,
+       "source":"listener","requestedByName":"Ngọc","reason":"vì trời mưa"},
+      {"title":"B","artist":"ch-b","hasDedication":false,"source":"ai"}
+    ]`, got)
+}
+
+// A shuffle next-up has no request id and is not in the pending list, so it
+// still leads the frame as a bare row — unchanged behaviour.
+func TestRequestQueuePayloadShuffleNextUpUnchanged(t *testing.T) {
+	items := []request.Item{{ID: "req-9", Title: "B", Channel: "ch-b", Source: request.SourceAI}}
+	next := &schedule.NextUp{YTID: "yt9", Title: "Z", Channel: "ch-z"}
+
+	require.JSONEq(t, `[
+      {"title":"Z","artist":"ch-z","hasDedication":false,"source":""},
+      {"title":"B","artist":"ch-b","hasDedication":false,"source":"ai"}
+    ]`, string(RequestQueuePayload(items, next)))
+}
