@@ -166,11 +166,29 @@ func main() {
 			defaultModel = "anthropic"
 		}
 	}
+	// The director writes prose; the programmer makes structured choices. One
+	// model is not right for both, so build a second Anthropic client at the
+	// script model. It is registered under "script" (Models is keyed by
+	// provider) so the lab bench — and so the console's brain playground —
+	// auditions exactly what airs.
+	//
+	// Absent key still degrades to fake rather than blocking startup; only a
+	// constructor failure is fatal, matching the blocks above.
+	scriptModel := ""
+	if k := config.Get("ANTHROPIC_API_KEY", ""); k != "" {
+		m, err := brain.NewClaude(ctx, k, config.Get("RADIO_SCRIPT_MODEL", "claude-sonnet-5"))
+		if err != nil {
+			logger.ErrorContext(ctx, "config", "err", "script model init failed", "detail", err)
+			os.Exit(1)
+		}
+		models["script"] = m
+		scriptModel = "script"
+	}
 	runner := &ingest.Runner{}
 	srv := server.New(server.Deps{
 		Ledger: ledger, Audit: auditStore, Library: lib,
 		Store: store, Voice: voiceProv, VoiceFake: voiceFake,
-		Models: models, DefaultModel: defaultModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
+		Models: models, DefaultModel: defaultModel, ScriptModel: scriptModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
 		FixturesDir:     config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
 		Ingest:          runner, TmpDir: tmpDir,
@@ -231,7 +249,7 @@ func main() {
 		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
 		// edited from the console, re-read by the director every tick.
 		dj = director.New(director.Deps{
-			Model: models[defaultModel], Voice: voiceProv, VoiceFake: voiceFake,
+			Model: scriptOrDefault(models, scriptModel, defaultModel), Voice: voiceProv, VoiceFake: voiceFake,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
 			AirLog:         airLog,
 			TalkMem:        talkmem.NewPGStore(pool, 7*24*time.Hour),
@@ -245,7 +263,8 @@ func main() {
 			},
 		})
 		talk = dj
-		logger.InfoContext(ctx, "dj talk breaks enabled", "voice_fake", voiceFake, "model", defaultModel)
+		logger.InfoContext(ctx, "dj talk breaks enabled", "voice_fake", voiceFake,
+			"model", scriptOrDefault(models, scriptModel, defaultModel).Name())
 	}
 
 	feeder := live.NewFeeder(live.FeederDeps{
@@ -337,4 +356,13 @@ func main() {
 		logger.ErrorContext(ctx, "serve failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// scriptOrDefault returns the dedicated script model when one was built,
+// otherwise whatever the default provider is (fake in a keyless dev run).
+func scriptOrDefault(models map[string]brain.Model, script, def string) brain.Model {
+	if m, ok := models[script]; ok {
+		return m
+	}
+	return models[def]
 }

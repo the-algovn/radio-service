@@ -32,13 +32,17 @@ import (
 )
 
 type Deps struct {
-	Ledger          spend.Ledger
-	Audit           audit.Store
-	Store           artifact.Store
-	Voice           voice.Provider
-	VoiceFake       bool
-	Models          map[string]brain.Model // keys: gemini | anthropic | fake
-	DefaultModel    string                 // key into Models
+	Ledger       spend.Ledger
+	Audit        audit.Store
+	Store        artifact.Store
+	Voice        voice.Provider
+	VoiceFake    bool
+	Models       map[string]brain.Model // keys: gemini | anthropic | fake
+	DefaultModel string                 // key into Models
+	// ScriptModel names the Models key the DJ's director uses. GenerateScript
+	// defaults to it so the console bench auditions the voice that airs;
+	// "" falls back to DefaultModel.
+	ScriptModel     string
 	PersonaDir      string
 	PersonaReadonly bool
 	FixturesDir     string
@@ -228,6 +232,9 @@ func providerName(fake bool, real string) string {
 }
 
 func (s *Server) modelFor(name string) (brain.Model, bool) {
+	if name == "" {
+		name = s.deps.ScriptModel
+	}
 	if name == "" {
 		name = s.DefaultModelName()
 	}

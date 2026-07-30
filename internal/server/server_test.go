@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
@@ -338,4 +339,60 @@ func TestDeleteTrackNotFound(t *testing.T) {
 	s := New(Deps{Library: library.NewMemLibrary()})
 	_, err := s.DeleteTrack(context.Background(), &radiolabv1.DeleteTrackRequest{YtId: "missing"})
 	require.Equal(t, codes.NotFound, status.Code(err))
+}
+
+// namedModel is a Model whose Name() identifies which entry of Deps.Models was
+// selected. brain.NewFake cannot serve here: it is a value type in an
+// interface (so require.Same rejects it) and every instance reports Name()
+// == "fake".
+type namedModel struct{ name string }
+
+func (m namedModel) Name() string     { return m.name }
+func (m namedModel) Provider() string { return "fake" }
+func (m namedModel) Generate(context.Context, string, string, *jsonschema.Schema) (string, error) {
+	return `{"script":"chào bạn nghe đài","summary":"s","used_phrases":[]}`, nil
+}
+
+// The bench must render through the model that AIRS. Models is keyed by
+// PROVIDER, so a script model registered under its own key is the only way
+// GenerateScript can reach it — otherwise the bench keeps auditioning the
+// programmer's Haiku while Sonnet goes out live.
+func TestModelForPrefersTheScriptModel(t *testing.T) {
+	s := New(Deps{
+		Models: map[string]brain.Model{
+			"anthropic": namedModel{name: "haiku"},
+			"script":    namedModel{name: "sonnet"},
+		},
+		DefaultModel: "anthropic",
+		ScriptModel:  "script",
+	})
+
+	got, ok := s.modelFor("")
+	require.True(t, ok)
+	require.Equal(t, "sonnet", got.Name())
+}
+
+func TestModelForHonoursAnExplicitChoice(t *testing.T) {
+	s := New(Deps{
+		Models: map[string]brain.Model{
+			"anthropic": namedModel{name: "haiku"},
+			"script":    namedModel{name: "sonnet"},
+		},
+		DefaultModel: "anthropic", ScriptModel: "script",
+	})
+
+	got, ok := s.modelFor("anthropic")
+	require.True(t, ok)
+	require.Equal(t, "haiku", got.Name())
+}
+
+func TestModelForFallsBackToDefaultWithoutAScriptModel(t *testing.T) {
+	s := New(Deps{
+		Models:       map[string]brain.Model{"fake": namedModel{name: "only"}},
+		DefaultModel: "fake",
+	})
+
+	got, ok := s.modelFor("")
+	require.True(t, ok)
+	require.Equal(t, "only", got.Name())
 }
