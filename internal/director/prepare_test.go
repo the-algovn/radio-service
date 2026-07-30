@@ -441,6 +441,11 @@ func TestPreparePinsTheReadyQueueHeadWithItsRequestID(t *testing.T) {
 	require.Equal(t, 1, sf.pin.calls)
 	require.Equal(t, schedule.NextUp{YTID: "yt2", Title: "Em Của Ngày Hôm Qua",
 		Channel: "Sơn Tùng M-TP", RequestID: "req-7"}, sf.pin.last)
+	// The promise must reach the PROMPT, not just the schedule. Without this,
+	// every test here still passes if prepare kept handing buildBrief a nil
+	// `up` — the whole point of the peek would be unasserted.
+	require.Contains(t, sf.model.lastUser, "Em Của Ngày Hôm Qua",
+		"coming_up must reach the model")
 }
 
 // Case 3: nothing knowable — promise nothing, write nothing. Deliberately NOT
