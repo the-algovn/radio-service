@@ -114,6 +114,23 @@ func TestRequestQueuePayloadPinnedRequestAppearsOnceAttributed(t *testing.T) {
     ]`, got)
 }
 
+// A pin whose request is no longer pending. This is reachable in production,
+// not hypothetical: PublishQueueSnapshot reads Pending() and GetNextUp() as two
+// separate queries, so the promised request can air — leaving `ready` — in
+// between. The frame must degrade to the bare next-up row rather than dropping
+// it, panicking, or skipping an unrelated pending item.
+func TestRequestQueuePayloadUnmatchedRequestIDDegradesToBareRow(t *testing.T) {
+	items := []request.Item{
+		{ID: "req-2", Title: "B", Channel: "ch-b", Source: request.SourceAI},
+	}
+	next := &schedule.NextUp{YTID: "yt1", Title: "A", Channel: "ch-a", RequestID: "req-gone"}
+
+	require.JSONEq(t, `[
+      {"title":"A","artist":"ch-a","hasDedication":false,"source":""},
+      {"title":"B","artist":"ch-b","hasDedication":false,"source":"ai"}
+    ]`, string(RequestQueuePayload(items, next)))
+}
+
 // A shuffle next-up has no request id and is not in the pending list, so it
 // still leads the frame as a bare row — unchanged behaviour.
 func TestRequestQueuePayloadShuffleNextUpUnchanged(t *testing.T) {
