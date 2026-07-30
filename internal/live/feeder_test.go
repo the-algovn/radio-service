@@ -1715,3 +1715,104 @@ func TestAtMostOneTalkBreakPerSeam(t *testing.T) {
 			"two consecutive dj frames at %d,%d: %q, %q", i-1, i, frames[i-1], frames[i])
 	}
 }
+
+// A pinned REQUEST must air with its provenance intact. Without the request_id
+// round-trip, planNext's next-up branch produced a bare airItem: the air log
+// lost the requester's name, MarkAired never ran, and the request stayed
+// `ready` — so it aired again later.
+func TestPlanNextPinnedRequestKeepsProvenance(t *testing.T) {
+	ctx := context.Background()
+	store, lib, reqs := newFixture(t, "yt1")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched })
+
+	req, err := reqs.Create(ctx, request.Item{
+		Source: request.SourceListener, DisplayName: "Ngọc", YTID: "yt1",
+		Title: "t-yt1", Channel: "c-yt1", Reason: "vì trời mưa",
+		Status: request.StatusReady,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt1", Title: "t-yt1", Channel: "c-yt1", RequestID: req.ID}))
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.False(t, p.skip)
+	require.True(t, p.consumedNextUp)
+	require.Equal(t, "yt1", p.item.track.YTID)
+	require.Equal(t, req.ID, p.item.requestID)
+	require.Equal(t, request.SourceListener, p.item.source)
+	require.Equal(t, "Ngọc", p.item.requestedByName)
+	require.Equal(t, "vì trời mưa", p.item.reason)
+}
+
+// A shuffle pin (no request id) must behave exactly as before this change.
+func TestPlanNextShufflePinUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store, lib, reqs := newFixture(t, "yt2")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched })
+
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt2", Title: "t-yt2", Channel: "c-yt2"}))
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "yt2", p.item.track.YTID)
+	require.Equal(t, "", p.item.requestID)
+	require.Equal(t, "", p.item.source)
+	require.True(t, p.consumedNextUp)
+}
+
+// The straddled-seam case: prepare() can outlive a boundary, so a pin may land
+// after the promised request has already aired. The status check is what stops
+// next_up from replaying a track back to back.
+func TestPlanNextPinnedRequestAlreadyAiredIsDiscarded(t *testing.T) {
+	ctx := context.Background()
+	store, lib, reqs := newFixture(t, "yt3")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched })
+
+	req, err := reqs.Create(ctx, request.Item{
+		Source: request.SourceAI, YTID: "yt3", Title: "t-yt3", Channel: "c-yt3",
+		Status: request.StatusReady})
+	require.NoError(t, err)
+	require.NoError(t, reqs.MarkAired(ctx, req.ID, time.Now()))
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt3", Title: "t-yt3", Channel: "c-yt3", RequestID: req.ID}))
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.True(t, p.skip, "an already-aired pin must not air again")
+	require.True(t, p.consumedNextUp, "and the commitment must be consumed so it cannot wedge")
+	require.Equal(t, "", p.failRequestID, "the request is not FAILED — it aired fine")
+}
+
+// A cancelled request behind a pin is likewise unusable.
+func TestPlanNextPinnedRequestMissingIsDiscarded(t *testing.T) {
+	ctx := context.Background()
+	store, lib, reqs := newFixture(t, "yt4")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched })
+
+	// A well-formed UUID that names no row — NOT a garbage string. PGStore
+	// would have Postgres reject a malformed id outright rather than report
+	// not-found, so a garbage value here would encode behaviour the real
+	// store does not have.
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt4", Title: "t-yt4", Channel: "c-yt4",
+		RequestID: "00000000-0000-0000-0000-000000000000"}))
+
+	p, err := f.planNext(ctx)
+	require.NoError(t, err)
+	require.True(t, p.skip)
+	require.True(t, p.consumedNextUp)
+}

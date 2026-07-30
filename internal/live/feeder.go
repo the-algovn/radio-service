@@ -262,7 +262,28 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 		if !exists {
 			return plan{skip: true, consumedNextUp: true}, nil
 		}
-		return plan{item: airItem{track: track}, consumedNextUp: true}, nil
+		it := airItem{track: track}
+		if nu.RequestID != "" {
+			// A pinned REQUEST (the DJ promised it on air — spec
+			// 2026-07-29-radio-dj-seam-breaks §3). Rebuild the same airItem
+			// the request path builds below, or the track airs unattributed
+			// and the request never leaves the queue.
+			req, found, rerr := f.d.Requests.Get(ctx, nu.RequestID)
+			if rerr != nil {
+				return plan{consumedNextUp: true}, rerr
+			}
+			// Unusable commitments: cancelled, failed, or ALREADY AIRED —
+			// the last one happens when the director's prepare straddled a
+			// seam, and without this check next_up would replay a track back
+			// to back. Consume and let the queue decide; this is not a
+			// request FAILURE, so failRequestID stays empty.
+			if !found || req.Status != request.StatusReady {
+				return plan{skip: true, consumedNextUp: true}, nil
+			}
+			it = airItem{track: track, requestID: req.ID, source: req.Source,
+				requestedByName: req.DisplayName, reason: req.Reason}
+		}
+		return plan{item: it, consumedNextUp: true}, nil
 	}
 
 	req, found, err := f.d.Requests.NextReady(ctx)
