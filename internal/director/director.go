@@ -15,7 +15,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
-	"github.com/the-algovn/radio-service/internal/voice"
+	"github.com/the-algovn/radio-service/internal/ttsclient"
 )
 
 const (
@@ -55,8 +55,7 @@ type Pinner interface {
 
 type Deps struct {
 	Model     brain.Model
-	Voice     voice.Provider
-	VoiceFake bool // zero the tts ledger cost, mirroring server.SynthesizeVoice
+	Voice     ttsclient.Speaker
 	Ledger    Ledger
 	Station   station.Store
 	Listeners live.Listeners

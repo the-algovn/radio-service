@@ -15,7 +15,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	github.com/the-algovn/gopkg v0.1.0
-	github.com/the-algovn/protos/gen/go v0.18.0
+	github.com/the-algovn/protos/gen/go v0.19.0
 	github.com/twmb/franz-go v1.21.5
 	golang.org/x/text v0.37.0
 	google.golang.org/genai v1.36.0

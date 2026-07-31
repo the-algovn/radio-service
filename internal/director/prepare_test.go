@@ -2,6 +2,7 @@ package director
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,8 +22,34 @@ import (
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
-	"github.com/the-algovn/radio-service/internal/voice"
 )
+
+// fakeSpeaker returns 1s of 8kHz silence as a valid WAV -- keyless dev mode.
+// The byte layout is copied verbatim from the deleted internal/voice.Fake:
+// render.go's silenceFloorLUFS path measures -inf LUFS on exactly these
+// bytes, so an equivalent-looking WAV with a different header would not
+// exercise the same plain-decode branch.
+type fakeSpeaker struct{}
+
+func (fakeSpeaker) Synthesize(_ context.Context, _, _ string, _ float64) ([]byte, string, float64, string, error) {
+	const sampleRate, seconds = 8000, 1
+	n := sampleRate * seconds * 2 // 16-bit mono
+	buf := make([]byte, 44+n)
+	copy(buf[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(36+n))
+	copy(buf[8:12], "WAVE")
+	copy(buf[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(buf[16:20], 16)
+	binary.LittleEndian.PutUint16(buf[20:22], 1) // PCM
+	binary.LittleEndian.PutUint16(buf[22:24], 1) // mono
+	binary.LittleEndian.PutUint32(buf[24:28], sampleRate)
+	binary.LittleEndian.PutUint32(buf[28:32], sampleRate*2)
+	binary.LittleEndian.PutUint16(buf[32:34], 2)
+	binary.LittleEndian.PutUint16(buf[34:36], 16)
+	copy(buf[36:40], "data")
+	binary.LittleEndian.PutUint32(buf[40:44], uint32(n))
+	return buf, "wav", 0, "fake", nil
+}
 
 // seqModel returns scripted raw outputs in sequence, recording the prompts it
 // was given and optionally failing outright.
@@ -46,8 +73,8 @@ func (m *seqModel) Generate(_ context.Context, system, user string, _ *jsonschem
 
 type errVoice struct{}
 
-func (errVoice) Synthesize(context.Context, string, string, float64) ([]byte, string, error) {
-	return nil, "", errors.New("tts down")
+func (errVoice) Synthesize(context.Context, string, string, float64) ([]byte, string, float64, string, error) {
+	return nil, "", 0, "", errors.New("tts down")
 }
 
 // errListeners fails Count, to exercise buildBrief's degradation of the
@@ -103,7 +130,7 @@ func newPrepFixture(t *testing.T, model *seqModel) *prepFixture {
 		VoiceID: "fake", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 450})
 	require.NoError(t, err)
 	dr := New(Deps{
-		Model: model, Voice: voice.Fake{}, VoiceFake: true, Ledger: ledger,
+		Model: model, Voice: fakeSpeaker{}, Ledger: ledger,
 		Station: store, Listeners: live.NewMemListeners(time.Now),
 		AirLog: airLog, TalkMem: mem,
 		PersonaDir: personaDir, StationIDsPath: writeIDs(t, "đài thân mến\n"),
@@ -140,7 +167,7 @@ func TestPrepareSeamHappyPath(t *testing.T) {
 	require.NoError(t, err, "rendered clip file exists")
 	require.Equal(t, []string{"tts:director:seam"}, ledgerLabels(t, f.ledger), "LLM spend is now priced by the Eino callback, not the director")
 	lines, _ := f.ledger.All(context.Background())
-	require.Zero(t, lines[0].CostUSD, "VoiceFake zeroes tts cost")
+	require.Zero(t, lines[0].CostUSD, "the fake speaker reports zero cost directly")
 	got, err := f.dr.d.TalkMem.Recent(context.Background(), time.Time{}, 8)
 	require.NoError(t, err)
 	require.Len(t, got, 1, "seam summary recorded")
@@ -327,11 +354,11 @@ type recVoice struct {
 	rate    float64
 }
 
-func (r *recVoice) Synthesize(_ context.Context, _ string, voiceID string, rate float64) ([]byte, string, error) {
+func (r *recVoice) Synthesize(_ context.Context, _ string, voiceID string, rate float64) ([]byte, string, float64, string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.voiceID, r.rate = voiceID, rate
-	return []byte("mp3"), "mp3", nil
+	return []byte("mp3"), "mp3", 0, "google", nil
 }
 
 // The whole point of the DB move: a settings change applies to the NEXT

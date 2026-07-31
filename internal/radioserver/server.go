@@ -16,13 +16,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
-	"github.com/the-algovn/radio-service/internal/voice"
 )
 
 const (
@@ -87,6 +87,7 @@ type Deps struct {
 	Skipper   Skipper
 	Ledger    Ledger
 	BudgetUSD float64
+	TTS       ttsv1.TTSServiceClient // voice catalog membership for UpdateDJSettings
 }
 
 type Server struct {
@@ -124,16 +125,21 @@ func djSettingsProto(dj station.DJSettings) *radiov1.DJSettings {
 		MaxChars: int32(dj.MaxChars)}
 }
 
-// voiceKnown reports catalog membership. "fake" is deliberately NOT accepted:
-// it is preview-only — persisting it would poison the row for the day the
-// real TTS key lands (spec §6).
-func voiceKnown(id string) bool {
-	for _, v := range voice.Voices() {
-		if v.ID == id {
-			return true
+// voiceKnown reports catalog membership by asking the shared tts-service.
+// "fake" is deliberately NOT accepted: the shared catalog never lists it,
+// and persisting it would poison the row for the day a real backend key is
+// missing (spec §6).
+func (s *Server) voiceKnown(ctx context.Context, id string) (bool, error) {
+	resp, err := s.deps.TTS.ListVoices(ctx, &ttsv1.ListVoicesRequest{})
+	if err != nil {
+		return false, err
+	}
+	for _, v := range resp.GetVoices() {
+		if v.GetId() == id {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (s *Server) GetStation(ctx context.Context, _ *radiov1.GetStationRequest) (*radiov1.GetStationResponse, error) {
@@ -473,7 +479,11 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	if in == nil {
 		return nil, status.Error(codes.InvalidArgument, "settings are required")
 	}
-	if !voiceKnown(in.GetVoiceId()) {
+	known, err := s.voiceKnown(ctx, in.GetVoiceId())
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "voice catalog: %v", err)
+	}
+	if !known {
 		return nil, status.Error(codes.InvalidArgument, "unknown voice_id")
 	}
 	if r := in.GetSpeakingRate(); r < djMinRate || r > djMaxRate {

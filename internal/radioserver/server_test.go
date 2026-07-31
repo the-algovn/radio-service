@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
@@ -20,6 +22,22 @@ import (
 type fakeLedger struct{ spent float64 }
 
 func (f *fakeLedger) SpentSince(context.Context, time.Time) (float64, error) { return f.spent, nil }
+
+// fakeTTS is a minimal ttsv1.TTSServiceClient double standing in for the
+// shared tts-service's catalog in voiceKnown's tests -- the real catalog
+// lives in a different service, out of reach in a unit test.
+type fakeTTS struct{}
+
+func (fakeTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not used by these tests")
+}
+
+func (fakeTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.CallOption) (*ttsv1.ListVoicesResponse, error) {
+	return &ttsv1.ListVoicesResponse{Voices: []*ttsv1.Voice{
+		{Id: "vi-VN-Neural2-A", Label: "Neural2 A", Tier: "neural2"},
+		{Id: "vi-VN-Chirp3-HD-Aoede", Label: "Chirp3 HD Aoede", Tier: "chirp3-hd"},
+	}}, nil
+}
 
 func newTestServer(t *testing.T, ytIDs ...string) *Server {
 	t.Helper()
@@ -34,6 +52,7 @@ func newTestServer(t *testing.T, ytIDs ...string) *Server {
 		Requests: request.NewMemStore(), Library: lib, Location: time.FixedZone("ICT", 7*3600),
 		Listeners: live.NewMemListeners(time.Now),
 		Now:       time.Now, Skipper: &fakeSkipper{}, Ledger: &fakeLedger{spent: 0.25}, BudgetUSD: 1.0,
+		TTS: fakeTTS{},
 	})
 }
 

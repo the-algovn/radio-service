@@ -12,6 +12,7 @@ import (
 	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
@@ -19,10 +20,23 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/spend"
-	"github.com/the-algovn/radio-service/internal/voice"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// fakeTTS is a minimal ttsv1.TTSServiceClient double: SynthesizeVoice's
+// keyless-dev path (no real tts-service) returns a canned silent-take
+// response as if the shared service had reported fake-mode itself.
+type fakeTTS struct{}
+
+func (fakeTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
+	return &ttsv1.SynthesizeResponse{Audio: []byte("wav-bytes"), Provider: "fake", CostUsd: 0}, nil
+}
+
+func (fakeTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.CallOption) (*ttsv1.ListVoicesResponse, error) {
+	return &ttsv1.ListVoicesResponse{}, nil
+}
 
 func TestGetLedger(t *testing.T) {
 	led := spend.NewMemLedger()
@@ -38,7 +52,7 @@ func TestGetLedger(t *testing.T) {
 func TestSynthesizeVoiceFakeSavesTakeAndLedgerLine(t *testing.T) {
 	led := spend.NewMemLedger()
 	store := artifact.NewFakeStore()
-	s := New(Deps{Ledger: led, Store: store, Voice: voice.Fake{}, VoiceFake: true})
+	s := New(Deps{Ledger: led, Store: store, TTS: fakeTTS{}})
 	resp, err := s.SynthesizeVoice(context.Background(), &radiolabv1.SynthesizeVoiceRequest{Text: "xin chào", VoiceId: "fake", Label: "t1"})
 	require.NoError(t, err)
 	require.True(t, resp.GetFake())

@@ -55,8 +55,8 @@ func TestFFRenderToneToMinus16(t *testing.T) {
 	require.InDelta(t, -16.0, measureRawLUFS(t, out), 1.5)
 }
 
-// Silence (the voice.Fake path) takes the plain-decode branch and still
-// yields a valid air-format file.
+// Silence (the fake TTS speaker's path) takes the plain-decode branch and
+// still yields a valid air-format file.
 func TestFFRenderSilencePlainDecodes(t *testing.T) {
 	requireFFmpeg(t)
 	dir := t.TempDir()

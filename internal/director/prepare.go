@@ -18,7 +18,6 @@ import (
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
-	"github.com/the-algovn/radio-service/internal/voice"
 )
 
 // normalizeDJ is the last line of defense against hand-edited DB rows; the
@@ -91,17 +90,12 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 		script = out.Script
 	}
 
-	data, ext, err := dr.d.Voice.Synthesize(ctx, script, dj.VoiceID, dj.Rate)
+	data, ext, cost, provider, err := dr.d.Voice.Synthesize(ctx, script, dj.VoiceID, dj.Rate)
 	if err != nil {
 		dr.d.Logger.ErrorContext(ctx, "director: tts failed", "kind", kind, "err", err)
 		return live.Clip{}, false
 	}
 	chars := utf8.RuneCountInString(script)
-	cost := voice.CostUSD(dj.VoiceID, chars)
-	provider := "google"
-	if dr.d.VoiceFake {
-		cost, provider = 0, "fake"
-	}
 	if lerr := dr.d.Ledger.Append(ctx, spend.Line{
 		TS: time.Now(), Kind: "tts", Provider: provider, Label: "director:" + kind,
 		Chars: chars, CostUSD: cost,

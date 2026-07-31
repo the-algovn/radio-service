@@ -1,5 +1,5 @@
 // Package director is the v2 talk-break pipeline: a prepare-ahead goroutine
-// that scripts (brain), voices (voice) and renders short DJ segments, then
+// that scripts (brain), voices (ttsclient) and renders short DJ segments, then
 // hands finished clips to the live feeder through the live.TalkSource seam.
 // Spec: the-algovn/specs docs/superpowers/specs/
 // 2026-07-22-radio-v2-dj-talk-breaks-design.md.
@@ -23,8 +23,8 @@ type RenderFunc func(ctx context.Context, inPath, outPath string) (durationS flo
 const (
 	bytesPerSecond = 192000 // s16le 48kHz stereo — the live feed contract
 	// silenceFloorLUFS: below this measured integrated loudness the input is
-	// effectively silence (voice.Fake's 1s WAV of digital silence measures
-	// -inf — ffmpeg's loudnorm JSON prints "-inf" for input_i, which
+	// effectively silence (the fake TTS speaker's 1s WAV of digital silence
+	// measures -inf — ffmpeg's loudnorm JSON prints "-inf" for input_i, which
 	// strconv.ParseFloat parses as -Inf); linear loudnorm against an
 	// -inf/-70 measurement is undefined, so plain-decode instead.
 	silenceFloorLUFS = -50.0

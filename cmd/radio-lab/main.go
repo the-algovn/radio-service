@@ -21,12 +21,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/the-algovn/gopkg/obs"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/audit"
@@ -44,7 +46,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
-	"github.com/the-algovn/radio-service/internal/voice"
+	"github.com/the-algovn/radio-service/internal/ttsclient"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=<sha>".
@@ -133,11 +135,18 @@ func main() {
 		time.Sleep(time.Second)
 	}
 
-	var voiceProv voice.Provider = voice.Fake{}
-	voiceFake := true
-	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
-		voiceProv, voiceFake = voice.NewGoogle(k), false
+	ttsAddr := config.Get("TTS_ADDR", "tts-service.tts-service.svc.cluster.local:9490")
+	ttsConn, err := grpc.NewClient(ttsAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(obs.ClientHandler()),
+	)
+	if err != nil {
+		logger.ErrorContext(ctx, "tts dial failed", "addr", ttsAddr, "err", err)
+		os.Exit(1)
 	}
+	defer ttsConn.Close()
+	ttsClient := ttsv1.NewTTSServiceClient(ttsConn)
+	voiceProv := ttsclient.New(ttsClient)
 	clk := live.RealClock()
 
 	// One Eino callback records every LLM call to the audit store and appends
@@ -187,7 +196,7 @@ func main() {
 	runner := &ingest.Runner{}
 	srv := server.New(server.Deps{
 		Ledger: ledger, Audit: auditStore, Library: lib,
-		Store: store, Voice: voiceProv, VoiceFake: voiceFake,
+		Store: store, TTS: ttsClient,
 		Models: models, DefaultModel: defaultModel, ScriptModel: scriptModel, PersonaDir: config.Get("PERSONA_DIR", "persona"),
 		PersonaReadonly: config.GetBool("PERSONA_READONLY", false),
 		FixturesDir:     config.Get("FIXTURES_DIR", "internal/callin/testdata/fixtures"),
@@ -249,7 +258,7 @@ func main() {
 		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
 		// edited from the console, re-read by the director every tick.
 		dj = director.New(director.Deps{
-			Model: scriptOrDefault(models, scriptModel, defaultModel), Voice: voiceProv, VoiceFake: voiceFake,
+			Model: scriptOrDefault(models, scriptModel, defaultModel), Voice: voiceProv,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
 			AirLog:         airLog,
 			TalkMem:        talkmem.NewPGStore(pool, 7*24*time.Hour),
@@ -263,7 +272,7 @@ func main() {
 			},
 		})
 		talk = dj
-		logger.InfoContext(ctx, "dj talk breaks enabled", "voice_fake", voiceFake,
+		logger.InfoContext(ctx, "dj talk breaks enabled", "tts_addr", ttsAddr,
 			"model", scriptOrDefault(models, scriptModel, defaultModel).Name())
 	}
 
@@ -343,6 +352,7 @@ func main() {
 		Skipper:   feeder,
 		Ledger:    ledger,
 		BudgetUSD: budget,
+		TTS:       ttsClient,
 	}))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
+	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/radio-service/internal/acquire"
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/audit"
@@ -25,7 +26,6 @@ import (
 	"github.com/the-algovn/radio-service/internal/persona"
 	"github.com/the-algovn/radio-service/internal/render"
 	"github.com/the-algovn/radio-service/internal/spend"
-	"github.com/the-algovn/radio-service/internal/voice"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -35,8 +35,7 @@ type Deps struct {
 	Ledger       spend.Ledger
 	Audit        audit.Store
 	Store        artifact.Store
-	Voice        voice.Provider
-	VoiceFake    bool
+	TTS          ttsv1.TTSServiceClient
 	Models       map[string]brain.Model // keys: gemini | anthropic | fake
 	DefaultModel string                 // key into Models
 	// ScriptModel names the Models key the DJ's director uses. GenerateScript
@@ -176,13 +175,14 @@ func (s *Server) PresignArtifact(ctx context.Context, req *radiolabv1.PresignArt
 	return &radiolabv1.PresignArtifactResponse{Url: url}, nil
 }
 
-func (s *Server) ListVoices(context.Context, *radiolabv1.ListVoicesRequest) (*radiolabv1.ListVoicesResponse, error) {
-	resp := &radiolabv1.ListVoicesResponse{}
-	for _, v := range voice.Voices() {
-		resp.Voices = append(resp.Voices, &radiolabv1.Voice{Id: v.ID, Label: v.Label, Tier: v.Tier})
+func (s *Server) ListVoices(ctx context.Context, _ *radiolabv1.ListVoicesRequest) (*radiolabv1.ListVoicesResponse, error) {
+	tresp, err := s.deps.TTS.ListVoices(ctx, &ttsv1.ListVoicesRequest{})
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "tts: %v", err)
 	}
-	if s.deps.VoiceFake {
-		resp.Voices = append(resp.Voices, &radiolabv1.Voice{Id: "fake", Label: "Fake (no key)", Tier: "fake"})
+	resp := &radiolabv1.ListVoicesResponse{}
+	for _, v := range tresp.GetVoices() {
+		resp.Voices = append(resp.Voices, &radiolabv1.Voice{Id: v.GetId(), Label: v.GetLabel(), Tier: v.GetTier()})
 	}
 	return resp, nil
 }
@@ -191,7 +191,10 @@ func (s *Server) SynthesizeVoice(ctx context.Context, req *radiolabv1.Synthesize
 	if req.GetText() == "" || req.GetVoiceId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "text and voice_id are required")
 	}
-	data, ext, err := s.deps.Voice.Synthesize(ctx, req.GetText(), req.GetVoiceId(), req.GetSpeakingRate())
+	tresp, err := s.deps.TTS.Synthesize(ctx, &ttsv1.SynthesizeRequest{
+		Text: req.GetText(), VoiceId: req.GetVoiceId(), SpeakingRate: req.GetSpeakingRate(),
+		Format: ttsv1.AudioFormat_AUDIO_FORMAT_MP3, Label: req.GetLabel(),
+	})
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "tts: %v", err)
 	}
@@ -199,17 +202,14 @@ func (s *Server) SynthesizeVoice(ctx context.Context, req *radiolabv1.Synthesize
 	if label == "" {
 		label = req.GetVoiceId()
 	}
-	a, err := s.deps.Store.Save(ctx, "take", ext, label, data, map[string]string{"voice": req.GetVoiceId(), "text": req.GetText()})
+	a, err := s.deps.Store.Save(ctx, "take", "mp3", label, tresp.GetAudio(), map[string]string{"voice": req.GetVoiceId(), "text": req.GetText()})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "save take: %v", err)
 	}
 	chars := utf8.RuneCountInString(req.GetText())
-	cost := voice.CostUSD(req.GetVoiceId(), chars)
-	if s.deps.VoiceFake {
-		cost = 0
-	}
-	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "tts", Provider: providerName(s.deps.VoiceFake, "google"), Label: label, Chars: chars, CostUSD: cost})
-	return &radiolabv1.SynthesizeVoiceResponse{Artifact: s.artifactToProto(ctx, a), CostUsd: cost, Fake: s.deps.VoiceFake}, nil
+	fake := tresp.GetProvider() == "fake"
+	s.ledger(ctx, spend.Line{TS: time.Now(), Kind: "tts", Provider: tresp.GetProvider(), Label: label, Chars: chars, CostUSD: tresp.GetCostUsd()})
+	return &radiolabv1.SynthesizeVoiceResponse{Artifact: s.artifactToProto(ctx, a), CostUsd: tresp.GetCostUsd(), Fake: fake}, nil
 }
 
 func (s *Server) ListArtifacts(ctx context.Context, req *radiolabv1.ListArtifactsRequest) (*radiolabv1.ListArtifactsResponse, error) {
@@ -222,13 +222,6 @@ func (s *Server) ListArtifacts(ctx context.Context, req *radiolabv1.ListArtifact
 		resp.Artifacts = append(resp.Artifacts, s.artifactToProto(ctx, a))
 	}
 	return resp, nil
-}
-
-func providerName(fake bool, real string) string {
-	if fake {
-		return "fake"
-	}
-	return real
 }
 
 func (s *Server) modelFor(name string) (brain.Model, bool) {
