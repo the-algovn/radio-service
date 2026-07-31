@@ -503,7 +503,7 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	// codes.Unavailable tts-service must not block edits to the other DJ
 	// fields, including the one an operator most wants when TTS itself is
 	// broken (break_every: 0, to stop the DJ attempting breaks).
-	if in.GetVoiceId() != cur.DJ.VoiceID {
+	if canonicalVoiceID(in.GetVoiceId()) != canonicalVoiceID(cur.DJ.VoiceID) {
 		known, err := s.voiceKnown(ctx, in.GetVoiceId())
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "voice catalog: %v", err)

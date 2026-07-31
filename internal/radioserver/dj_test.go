@@ -119,3 +119,23 @@ func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged(t *testin
 	})
 	require.Equal(t, codes.Unavailable, status.Code(err))
 }
+
+// TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceOnlyRenamespaced
+// guards the voice_id change-detection gate itself, not just voiceKnown: the
+// persisted default is bare ("vi-VN-Neural2-A", per the 00010 migration),
+// but ListVoices now returns namespaced ids, so the console populates its
+// voice field as "google:vi-VN-Neural2-A". Resubmitting that same voice in
+// namespaced form must not read as a change -- a raw string comparison would
+// wrongly consult the catalog and, with tts-service down, block edits to
+// break_every even though the voice never actually changed.
+func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceOnlyRenamespaced(t *testing.T) {
+	s := newTestServerWithTTS(t, erroringTTS{})
+	ctx := context.Background()
+
+	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
+		Settings: &radiov1.DJSettings{VoiceId: "google:vi-VN-Neural2-A", SpeakingRate: 1.0,
+			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), resp.GetSettings().GetBreakEvery())
+}
