@@ -20,9 +20,9 @@ func TestUpdateDJSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "vi-VN-Neural2-A", st.GetDj().GetVoiceId())
 	require.Equal(t, 1.0, st.GetDj().GetSpeakingRate())
-	require.Equal(t, int32(1), st.GetDj().GetBreakEvery())
+	require.Equal(t, int32(2), st.GetDj().GetBreakEvery())
 	require.Equal(t, int32(60), st.GetDj().GetStationIdMin())
-	require.Equal(t, int32(1024), st.GetDj().GetMaxChars())
+	require.Equal(t, int32(1500), st.GetDj().GetMaxChars())
 
 	// Update to a different voice (proves a real change off the default).
 	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{

@@ -22,11 +22,12 @@ type DJSettings struct {
 	MaxChars     int
 }
 
-// DefaultDJSettings mirrors the 00010 migration column defaults (the
-// current prod env values).
+// DefaultDJSettings mirrors the 00014 migration column defaults (the current
+// prod values). Keep the two in step: station.NewMemStore seeds from here, so
+// a drift makes MemStore and PGStore disagree about a fresh station.
 func DefaultDJSettings() DJSettings {
 	return DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.0,
-		BreakEvery: 1, StationIDMin: 60, MaxChars: 1024}
+		BreakEvery: 2, StationIDMin: 60, MaxChars: 1500}
 }
 
 type Station struct {
