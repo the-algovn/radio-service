@@ -245,8 +245,8 @@ func (s *Server) modelFor(name string) (brain.Model, bool) {
 func (s *Server) DefaultModelName() string { return s.deps.DefaultModel }
 
 func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScriptRequest) (*radiolabv1.GenerateScriptResponse, error) {
-	if req.GetBrief() == nil {
-		return nil, status.Error(codes.InvalidArgument, "brief is required")
+	if req.GetBriefJson() == "" && req.GetBrief() == nil {
+		return nil, status.Error(codes.InvalidArgument, "brief_json or brief is required")
 	}
 	m, ok := s.modelFor(req.GetModel())
 	if !ok {
@@ -259,12 +259,16 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 			return nil, status.Errorf(codes.FailedPrecondition, "load persona: %v", err)
 		}
 	}
-	briefJSON, err := protojson.Marshal(req.GetBrief())
+
+	briefJSON, briefType, maxChars, err := benchBrief(req)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "marshal brief: %v", err)
+		return nil, err
 	}
-	system, user := brain.BuildPrompts(pers, string(briefJSON))
-	ctx = audit.WithLabel(ctx, "script:"+req.GetBrief().GetType())
+
+	// The SAME assembly the director uses. A bench that builds its own prompt
+	// auditions a voice that never airs (spec §6).
+	system, user := brain.BuildScriptPrompts(pers, briefJSON)
+	ctx = audit.WithLabel(ctx, "script:"+briefType)
 	raw, err := m.Generate(ctx, system, user, brain.ScriptSchema)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "model: %v", err)
@@ -273,15 +277,47 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v (raw: %.200s)", err, raw)
 	}
-	maxChars := int(req.GetBrief().GetMaxChars())
-	if maxChars == 0 {
-		maxChars = 800
-	}
 	return &radiolabv1.GenerateScriptResponse{
 		Script: out.Script, Summary: out.Summary, UsedPhrases: out.UsedPhrases,
 		Violations: brain.Validate(out.Script, maxChars),
 		Fake:       m.Name() == "fake", Model: m.Name(),
 	}, nil
+}
+
+// benchBrief normalises the request's brief into the JSON that reaches the
+// prompt. brief_json is re-marshalled from a parsed object rather than
+// forwarded as-is, so malformed input is a rejected request instead of
+// arbitrary text landing inside the <brief> delimiter.
+func benchBrief(req *radiolabv1.GenerateScriptRequest) (briefJSON, briefType string, maxChars int, err error) {
+	if raw := req.GetBriefJson(); raw != "" {
+		var obj map[string]any
+		if uerr := json.Unmarshal([]byte(raw), &obj); uerr != nil {
+			return "", "", 0, status.Errorf(codes.InvalidArgument,
+				"brief_json is not a JSON object: %v", uerr)
+		}
+		b, merr := json.Marshal(obj)
+		if merr != nil {
+			return "", "", 0, status.Errorf(codes.Internal, "re-marshal brief: %v", merr)
+		}
+		briefType, _ = obj["type"].(string)
+		if n, okn := obj["max_chars"].(float64); okn {
+			maxChars = int(n)
+		}
+		if maxChars <= 0 {
+			maxChars = 800
+		}
+		return string(b), briefType, maxChars, nil
+	}
+	// Deprecated typed path, kept so an un-bumped console still works.
+	b, merr := protojson.Marshal(req.GetBrief())
+	if merr != nil {
+		return "", "", 0, status.Errorf(codes.Internal, "marshal brief: %v", merr)
+	}
+	maxChars = int(req.GetBrief().GetMaxChars())
+	if maxChars <= 0 {
+		maxChars = 800
+	}
+	return string(b), req.GetBrief().GetType(), maxChars, nil
 }
 
 func (s *Server) GetPersona(context.Context, *radiolabv1.GetPersonaRequest) (*radiolabv1.GetPersonaResponse, error) {

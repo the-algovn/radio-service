@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	radiolabv1 "github.com/the-algovn/protos/gen/go/algovn/radiolab/v1"
 	"github.com/the-algovn/radio-service/internal/artifact"
+	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
@@ -447,4 +448,76 @@ func TestParseCallInExplicitModelStillHonoured(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, resp.GetFake(), "an explicitly named model must still be honoured, not overridden by the default pin")
+}
+
+// THE point of the bench: byte-identical system prompt. Prompt parity is what
+// makes an audition mean anything.
+func TestBenchPromptMatchesDirector(t *testing.T) {
+	const persona = "Bạn là Tiểu Dương Dương.\n"
+	// Keys are alphabetical (just_played, max_chars, type): benchBrief
+	// round-trips brief_json through map[string]any, and encoding/json sorts
+	// map keys on marshal, so only an already-sorted literal survives the
+	// round-trip byte-for-byte against this test's unprocessed wantUser.
+	brief := `{"just_played":{"title":"A"},"max_chars":1500,"type":"seam"}`
+
+	wantSystem, wantUser := brain.BuildScriptPrompts(persona, brief)
+
+	spy := &promptSpyModel{}
+	s := New(Deps{Models: map[string]brain.Model{"script": spy},
+		DefaultModel: "script", ScriptModel: "script"})
+
+	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		BriefJson: brief, PersonaOverride: persona,
+	})
+	require.NoError(t, err)
+	require.Equal(t, wantSystem, spy.system)
+	require.Equal(t, wantUser, spy.user)
+}
+
+func TestGenerateScriptRejectsMalformedBriefJSON(t *testing.T) {
+	s := New(Deps{Models: map[string]brain.Model{"script": brain.NewFake("{}")},
+		DefaultModel: "script", ScriptModel: "script"})
+
+	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		BriefJson: `{"type":`, PersonaOverride: "p",
+	})
+	require.Error(t, err)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestGenerateScriptLabelsTheAuditRowFromTheBriefType(t *testing.T) {
+	spy := &promptSpyModel{}
+	s := New(Deps{Models: map[string]brain.Model{"script": spy},
+		DefaultModel: "script", ScriptModel: "script"})
+
+	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		BriefJson: `{"type":"seam","max_chars":1500}`, PersonaOverride: "p",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "script:seam", spy.label)
+}
+
+func TestGenerateScriptStillAcceptsTheDeprecatedTypedBrief(t *testing.T) {
+	spy := &promptSpyModel{}
+	s := New(Deps{Models: map[string]brain.Model{"script": spy},
+		DefaultModel: "script", ScriptModel: "script"})
+
+	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		Brief: &radiolabv1.Brief{Type: "seam", MaxChars: 1500}, PersonaOverride: "p",
+	})
+	require.NoError(t, err)
+	require.Contains(t, spy.user, `"type":"seam"`)
+}
+
+// promptSpyModel records what it was asked, and returns a valid script.
+type promptSpyModel struct {
+	system, user, label string
+}
+
+func (m *promptSpyModel) Name() string     { return "spy" }
+func (m *promptSpyModel) Provider() string { return "fake" }
+func (m *promptSpyModel) Generate(ctx context.Context, system, user string, _ *jsonschema.Schema) (string, error) {
+	m.system, m.user = system, user
+	m.label = audit.LabelFrom(ctx)
+	return `{"script":"chào bạn nghe đài","summary":"s","used_phrases":[]}`, nil
 }
