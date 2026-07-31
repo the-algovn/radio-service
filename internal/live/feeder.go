@@ -178,6 +178,13 @@ func (f *Feeder) commitNextUp(ctx context.Context) {
 		return
 	}
 	if len(pending) > 0 {
+		// A cleared commitment that carried a RequestID was a promise the DJ
+		// already spoke on air — the only observability this has (spec
+		// 2026-07-29-radio-dj-seam-breaks §3, "one residual way to lie").
+		if nu, ok, gerr := f.d.Sched.GetNextUp(ctx); gerr == nil && ok && nu.RequestID != "" {
+			f.d.Logger.InfoContext(ctx, "next-up pin cleared by pending requests",
+				"request_id", nu.RequestID, "yt_id", nu.YTID)
+		}
 		if cerr := f.d.Sched.ClearNextUp(ctx); cerr != nil {
 			f.d.Logger.ErrorContext(ctx, "commit next-up: clear failed", "err", cerr)
 		}
@@ -328,6 +335,11 @@ func (f *Feeder) commitNext(ctx context.Context, p plan) (airItem, bool, bool, e
 	if p.consumedNextUp {
 		if err := f.d.Sched.ClearNextUp(ctx); err != nil {
 			return airItem{}, false, false, err
+		}
+		// The promise is honoured: this is the DJ's pin actually airing.
+		if p.item.requestID != "" {
+			f.d.Logger.InfoContext(ctx, "next-up pin consumed",
+				"request_id", p.item.requestID, "yt_id", p.item.track.YTID)
 		}
 	}
 	if p.failRequestID != "" {
