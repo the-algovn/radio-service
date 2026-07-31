@@ -39,6 +39,30 @@ func (fakeTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.Cal
 	}}, nil
 }
 
+// erroringTTS simulates the shared tts-service being unreachable, for tests
+// proving UpdateDJSettings doesn't hard-depend on a healthy catalog check
+// when voice_id isn't actually changing.
+type erroringTTS struct{}
+
+func (erroringTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not used by these tests")
+}
+
+func (erroringTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.CallOption) (*ttsv1.ListVoicesResponse, error) {
+	return nil, status.Error(codes.Unavailable, "tts-service down")
+}
+
+func newTestServerWithTTS(t *testing.T, tts ttsv1.TTSServiceClient) *Server {
+	t.Helper()
+	return New(Deps{
+		Store: station.NewMemStore(), Log: live.NewMemAirLog(), Search: &fakeSearch{},
+		Requests: request.NewMemStore(), Library: library.NewMemLibrary(), Location: time.FixedZone("ICT", 7*3600),
+		Listeners: live.NewMemListeners(time.Now),
+		Now:       time.Now, Skipper: &fakeSkipper{}, Ledger: &fakeLedger{spent: 0.25}, BudgetUSD: 1.0,
+		TTS: tts,
+	})
+}
+
 func newTestServer(t *testing.T, ytIDs ...string) *Server {
 	t.Helper()
 	lib := library.NewMemLibrary()

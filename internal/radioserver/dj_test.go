@@ -94,3 +94,28 @@ func TestVoiceKnownAcceptsBarePersistedID(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, known, "bare persisted id must resolve against the namespaced catalog")
 }
+
+// TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged guards
+// against voiceKnown being called unconditionally: a down tts-service must
+// not block edits to break_every, station_id_min, or max_chars -- including
+// the one action an operator wants when TTS itself is broken (break_every:
+// 0, to stop the DJ attempting breaks). Only an actual voice_id change may
+// consult (and be blocked by) the catalog.
+func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged(t *testing.T) {
+	s := newTestServerWithTTS(t, erroringTTS{})
+	ctx := context.Background()
+
+	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
+		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Neural2-A", SpeakingRate: 1.0,
+			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), resp.GetSettings().GetBreakEvery())
+
+	// Changing voice_id while the catalog is down must still fail Unavailable.
+	_, err = s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
+		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Chirp3-HD-Aoede", SpeakingRate: 1.0,
+			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
+	})
+	require.Equal(t, codes.Unavailable, status.Code(err))
+}
