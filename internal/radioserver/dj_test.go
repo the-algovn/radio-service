@@ -81,3 +81,16 @@ func TestUpdateDJSettingsValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "vi-VN-Neural2-A", st.GetDj().GetVoiceId())
 }
+
+// TestVoiceKnownAcceptsBarePersistedID guards the canonicalization fix: the
+// shared tts-service's catalog only ever returns namespaced ids
+// ("google:vi-VN-Neural2-A"), but the persisted production value is bare
+// (the 00010 migration's dj_voice_id default). Without canonicalizing both
+// sides before comparing, this bare id -- already live in prod -- would be
+// rejected as unknown, breaking the console DJ page.
+func TestVoiceKnownAcceptsBarePersistedID(t *testing.T) {
+	s := newTestServer(t)
+	known, err := s.voiceKnown(context.Background(), "vi-VN-Neural2-A")
+	require.NoError(t, err)
+	require.True(t, known, "bare persisted id must resolve against the namespaced catalog")
+}

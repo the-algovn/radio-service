@@ -125,7 +125,21 @@ func djSettingsProto(dj station.DJSettings) *radiov1.DJSettings {
 		MaxChars: int32(dj.MaxChars)}
 }
 
+// canonicalVoiceID mirrors catalog.Resolve's namespacing rule in tts-service:
+// an id with no "provider:" prefix is a bare id persisted before tts-service
+// existed (e.g. the 00010 migration's dj_voice_id default) and resolves to
+// google, tts-service's original sole provider.
+func canonicalVoiceID(id string) string {
+	if !strings.Contains(id, ":") {
+		return "google:" + id
+	}
+	return id
+}
+
 // voiceKnown reports catalog membership by asking the shared tts-service.
+// Both sides are canonicalized before comparing, since a bare persisted id
+// (e.g. "vi-VN-Neural2-A") must match the catalog's namespaced id
+// ("google:vi-VN-Neural2-A") for the same voice.
 // "fake" is deliberately NOT accepted: the shared catalog never lists it,
 // and persisting it would poison the row for the day a real backend key is
 // missing (spec §6).
@@ -134,8 +148,9 @@ func (s *Server) voiceKnown(ctx context.Context, id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	want := canonicalVoiceID(id)
 	for _, v := range resp.GetVoices() {
-		if v.GetId() == id {
+		if canonicalVoiceID(v.GetId()) == want {
 			return true, nil
 		}
 	}
