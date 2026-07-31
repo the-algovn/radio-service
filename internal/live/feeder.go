@@ -787,7 +787,19 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 				}
 			}
 		}
-		f.commitNextUp(ctx)
+		// A resume is not a track START. RunSession re-enters after any
+		// session-fatal error (engine.go), and findBootResume adopts a track
+		// already in flight — so running commitNextUp here would fire mid-track
+		// with no preceding next-up consumption. That destroys the director's pin
+		// (a pinned `ready` request is itself pending, so the clear branch fires)
+		// while its rendered clip survives on another goroutine and still passes
+		// the anchor check — she promises a song the queue then re-picks. With an
+		// empty queue it is worse: the shuffle branch overwrites a committed track
+		// outright. Deferring the commitment by one track is exactly the
+		// pre-pin behaviour.
+		if !resumed {
+			f.commitNextUp(ctx)
+		}
 		// Start the lookahead for the item after this one. It must run AFTER
 		// commitNextUp: planNext reads the next-up commitment commitNextUp
 		// just made, and that ordering is what keeps the pick identical to the

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
 )
 
@@ -196,4 +197,63 @@ func TestBootResumeThenCrashKeepsOriginalOffset(t *testing.T) {
 	require.InDelta(t, 30.5, dec.offsetFor("/fake/art-a"), 1.5)
 	cancel()
 	<-done
+}
+
+// TestBootResumeDoesNotClearPinnedNextUp is RunSession-altitude coverage for
+// Fix 1 (whole-branch review, 2026-07-30): Engine.Run re-enters RunSession
+// after ANY session-fatal error, not only at process boot, and
+// findBootResume runs at the top of every RunSession. A resume is not a
+// track START — the resumed entry is still mid-flight — so commitNextUp must
+// not run on this iteration. Before the fix it ran unconditionally: a pinned
+// `ready` request is itself in Pending(), so commitNextUp's clear branch
+// fired and destroyed the director's pin, even though the resumed track's
+// air-log row is untouched and the promise the DJ already spoke should still
+// bind. A planNext/commitNext-level test cannot see this — it is purely a
+// consequence of where commitNextUp sits relative to the resume branch in
+// RunSession's loop.
+func TestBootResumeDoesNotClearPinnedNextUp(t *testing.T) {
+	ctx0 := context.Background()
+	store, lib, reqs := newFixture(t, "resumed", "promised")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	sched := schedule.NewMemStore()
+	log := NewMemAirLog()
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(),
+		func(d *FeederDeps) { d.Sched = sched; d.Log = log })
+
+	// A track still mid-flight per the air log — this is what findBootResume
+	// adopts. Real wall clock: findBootResume deliberately does not use
+	// f.d.Clock (see its doc comment).
+	require.NoError(t, log.Append(ctx0, Entry{
+		YTID: "resumed", Title: "t-resumed", Artist: "c-resumed",
+		StartedAt: time.Now().Add(-5 * time.Second), DurationS: 300,
+	}))
+
+	// The director pinned this request before the session died.
+	promised, err := reqs.Create(ctx0, request.Item{
+		Source: request.SourceListener, DisplayName: "Ngọc", YTID: "promised",
+		Title: "t-promised", Channel: "c-promised", Status: request.StatusReady})
+	require.NoError(t, err)
+	require.NoError(t, sched.SetNextUp(ctx0, schedule.NextUp{
+		YTID: "promised", Title: "t-promised", Channel: "c-promised",
+		RequestID: promised.ID}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	// The first now-playing frame publishes right after commitNextUp runs at
+	// the boundary — the earliest point at which the resume path could have
+	// cleared the pin.
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 1)
+	cancel()
+	require.NoError(t, <-done)
+
+	frames := prod.byTopic(TopicNowPlaying)
+	require.Contains(t, frames[0], "t-resumed", "the session must have resumed the in-flight track")
+
+	nu, ok, err := sched.GetNextUp(ctx0)
+	require.NoError(t, err)
+	require.True(t, ok, "a resumed (mid-track) iteration must not destroy the director's pin")
+	require.Equal(t, "promised", nu.YTID)
+	require.Equal(t, promised.ID, nu.RequestID)
 }
