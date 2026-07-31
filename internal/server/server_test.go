@@ -396,3 +396,55 @@ func TestModelForFallsBackToDefaultWithoutAScriptModel(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "only", got.Name())
 }
+
+// Both tests below key one Models entry's Name() on the literal "fake" to
+// exploit ParseCallIn's real short-circuit (server.go: m.Name() == "fake")
+// as an observation point: whichever entry is actually selected either hits
+// the canned response (Fake: true, no error) or falls into callin.Parse,
+// where namedModel.Generate's script-shaped JSON fails Normalize's verdict
+// check and surfaces as an error. That gives each test a genuine pass/fail
+// signal tied to which model ParseCallIn picked, without a recording double.
+
+// modelFor now prefers ScriptModel for an empty name — right for
+// GenerateScript, wrong for call-in moderation, which must keep the
+// deployment's default provider regardless of what script model is
+// registered alongside it.
+func TestParseCallInWithNoModelPinsToDefaultNotScript(t *testing.T) {
+	led := spend.NewMemLedger()
+	s := New(Deps{
+		Ledger: led,
+		Models: map[string]brain.Model{
+			"anthropic": namedModel{name: "fake"},   // default: selecting it short-circuits
+			"script":    namedModel{name: "sonnet"}, // script: selecting it would hit callin.Parse and fail
+		},
+		DefaultModel: "anthropic",
+		ScriptModel:  "script",
+	})
+
+	resp, err := s.ParseCallIn(context.Background(), &radiolabv1.ParseCallInRequest{
+		Text: "cho mình xin bài Em Của Ngày Hôm Qua, tặng Ngọc",
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetFake(), "no explicit model must pin to DefaultModel, "+
+		"not fall through to the script model preference meant for GenerateScript")
+}
+
+func TestParseCallInExplicitModelStillHonoured(t *testing.T) {
+	led := spend.NewMemLedger()
+	s := New(Deps{
+		Ledger: led,
+		Models: map[string]brain.Model{
+			"anthropic": namedModel{name: "haiku"}, // default: selecting it would hit callin.Parse and fail
+			"script":    namedModel{name: "fake"},  // explicitly requested: selecting it short-circuits
+		},
+		DefaultModel: "anthropic",
+		ScriptModel:  "script",
+	})
+
+	resp, err := s.ParseCallIn(context.Background(), &radiolabv1.ParseCallInRequest{
+		Text:  "cho mình xin bài Em Của Ngày Hôm Qua, tặng Ngọc",
+		Model: "script",
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetFake(), "an explicitly named model must still be honoured, not overridden by the default pin")
+}

@@ -309,9 +309,17 @@ func (s *Server) ParseCallIn(ctx context.Context, req *radiolabv1.ParseCallInReq
 	if strings.TrimSpace(req.GetText()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "text is required")
 	}
-	m, ok := s.modelFor(req.GetModel())
+	// Call-in moderation keeps the deployment's default provider. modelFor's
+	// empty-name default now prefers the script model, which is right for
+	// GenerateScript and wrong here — moderation should not silently follow the
+	// DJ's prose tier onto a different provider or price.
+	name := req.GetModel()
+	if name == "" {
+		name = s.DefaultModelName()
+	}
+	m, ok := s.modelFor(name)
 	if !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "unknown model %q", req.GetModel())
+		return nil, status.Errorf(codes.InvalidArgument, "unknown model %q", name)
 	}
 	if m.Name() == "fake" {
 		// brain.Fake returns script-shaped JSON that fails callin's schema —
