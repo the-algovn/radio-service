@@ -284,20 +284,24 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 	}, nil
 }
 
-// benchBrief normalises the request's brief into the JSON that reaches the
-// prompt. brief_json is re-marshalled from a parsed object rather than
-// forwarded as-is, so malformed input is a rejected request instead of
-// arbitrary text landing inside the <brief> delimiter.
+// benchBrief resolves the request's brief into the JSON that reaches the
+// prompt. Unmarshalling is the validation: malformed input becomes a rejected
+// request instead of arbitrary text landing inside the <brief> delimiter.
+//
+// The ORIGINAL bytes are then forwarded, deliberately NOT a re-marshal of the
+// parsed map. Go alphabetises map keys on marshal, while the director's brief
+// is marshalled from a struct and comes out in field order — so re-marshalling
+// would hand the bench a differently-ordered <brief> block than the one that
+// airs, defeating the parity this whole path exists to establish. Re-marshalling
+// buys no safety to trade for that: it normalises syntax, not the
+// attacker-controlled string values inside, and the successful Unmarshal above
+// is what actually proves the input is well-formed.
 func benchBrief(req *radiolabv1.GenerateScriptRequest) (briefJSON, briefType string, maxChars int, err error) {
 	if raw := req.GetBriefJson(); raw != "" {
 		var obj map[string]any
 		if uerr := json.Unmarshal([]byte(raw), &obj); uerr != nil {
 			return "", "", 0, status.Errorf(codes.InvalidArgument,
 				"brief_json is not a JSON object: %v", uerr)
-		}
-		b, merr := json.Marshal(obj)
-		if merr != nil {
-			return "", "", 0, status.Errorf(codes.Internal, "re-marshal brief: %v", merr)
 		}
 		briefType, _ = obj["type"].(string)
 		if n, okn := obj["max_chars"].(float64); okn {
@@ -306,7 +310,7 @@ func benchBrief(req *radiolabv1.GenerateScriptRequest) (briefJSON, briefType str
 		if maxChars <= 0 {
 			maxChars = 800
 		}
-		return string(b), briefType, maxChars, nil
+		return raw, briefType, maxChars, nil
 	}
 	// Deprecated typed path, kept so an un-bumped console still works.
 	b, merr := protojson.Marshal(req.GetBrief())

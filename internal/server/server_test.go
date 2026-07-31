@@ -454,11 +454,7 @@ func TestParseCallInExplicitModelStillHonoured(t *testing.T) {
 // makes an audition mean anything.
 func TestBenchPromptMatchesDirector(t *testing.T) {
 	const persona = "Bạn là Tiểu Dương Dương.\n"
-	// Keys are alphabetical (just_played, max_chars, type): benchBrief
-	// round-trips brief_json through map[string]any, and encoding/json sorts
-	// map keys on marshal, so only an already-sorted literal survives the
-	// round-trip byte-for-byte against this test's unprocessed wantUser.
-	brief := `{"just_played":{"title":"A"},"max_chars":1500,"type":"seam"}`
+	brief := `{"type":"seam","just_played":{"title":"A"},"max_chars":1500}`
 
 	wantSystem, wantUser := brain.BuildScriptPrompts(persona, brief)
 
@@ -472,6 +468,28 @@ func TestBenchPromptMatchesDirector(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, wantSystem, spy.system)
 	require.Equal(t, wantUser, spy.user)
+}
+
+// The property TestBenchPromptMatchesDirector's fixture could otherwise hide:
+// a brief shaped like the director's own — keys in Brief struct field order
+// (type, clock, daypart, ..., max_chars), NOT alphabetical — must reach the
+// prompt byte-identical. A re-marshal through map[string]any would alphabetise
+// this and silently break parity for every real brief, since the director
+// marshals a struct (field order), not a map (sorted order); only an
+// already-sorted fixture would still pass.
+func TestGenerateScriptForwardsBriefJSONByteIdentical(t *testing.T) {
+	const brief = `{"type":"seam","clock":"hai mươi ba giờ","daypart":"late_night","just_played":{"title":"A"},"max_chars":1500}`
+
+	spy := &promptSpyModel{}
+	s := New(Deps{Models: map[string]brain.Model{"script": spy},
+		DefaultModel: "script", ScriptModel: "script"})
+
+	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+		BriefJson: brief, PersonaOverride: "p",
+	})
+	require.NoError(t, err)
+	require.Contains(t, spy.user, brief, "the <brief> block must carry the ORIGINAL bytes, "+
+		"in the director's key order, not a map[string]any re-marshal")
 }
 
 func TestGenerateScriptRejectsMalformedBriefJSON(t *testing.T) {
