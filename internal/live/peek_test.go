@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -90,6 +91,42 @@ func TestPeekNextCommitmentWhoseTrackVanished(t *testing.T) {
 	require.False(t, found, "promise nothing when the commitment is unusable")
 }
 
+// A committed request that has already aired is the straddled-seam case
+// (spec §3): the peek happens before the pin, so by the time the pin lands
+// the promised request may have already aired. This is the one branch whose
+// regression is invisible downstream — if it wrongly returned found=true,
+// the director would set Committed=true, which deliberately skips the pin,
+// so nothing else would catch the stale promise.
+func TestPeekNextCommittedRequestAlreadyAired(t *testing.T) {
+	ctx := context.Background()
+	sched, reqs, lib := schedule.NewMemStore(), request.NewMemStore(), library.NewMemLibrary()
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "yt5", Title: "T", Channel: "C"}))
+	req, err := reqs.Create(ctx, request.Item{Source: request.SourceListener,
+		DisplayName: "Ngọc", YTID: "yt5", Status: request.StatusReady})
+	require.NoError(t, err)
+	require.NoError(t, reqs.MarkAired(ctx, req.ID, time.Now()))
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt5", Title: "T", Channel: "C", RequestID: req.ID}))
+
+	_, found, err := PeekNext(ctx, sched, reqs, lib)
+	require.NoError(t, err)
+	require.False(t, found, "an already-aired committed request must not be promised again")
+}
+
+// A committed request whose ID names no row at all (deleted, or never
+// existed) must degrade the same way as one that aired or was cancelled.
+func TestPeekNextCommittedRequestIDNamesNoRow(t *testing.T) {
+	ctx := context.Background()
+	sched, reqs, lib := schedule.NewMemStore(), request.NewMemStore(), library.NewMemLibrary()
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "yt6", Title: "T", Channel: "C"}))
+	require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+		YTID: "yt6", Title: "T", Channel: "C", RequestID: "no-such-request-id"}))
+
+	_, found, err := PeekNext(ctx, sched, reqs, lib)
+	require.NoError(t, err)
+	require.False(t, found, "a commitment whose request vanished must not be promised")
+}
+
 // PARITY: PeekNext must choose what planNext chooses. These two are separate
 // code paths over the same stores, and a drift between them is a DJ who names
 // one song while another plays — so this is a CI gate, not a nicety.
@@ -98,11 +135,16 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library)
+		// wantFound is what PeekNext must report. When false, the only parity
+		// that matters is that planNext also treats the commitment as unusable
+		// (skip=true) rather than airing it — PeekNext has nothing else to
+		// compare against once it has nothing to promise.
+		wantFound bool
 	}{
 		{"committed shuffle", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
 			require.NoError(t, lib.Add(ctx, library.Track{YTID: "a", Title: "A", Channel: "C"}))
 			require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{YTID: "a", Title: "A", Channel: "C"}))
-		}},
+		}, true},
 		{"committed request", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
 			require.NoError(t, lib.Add(ctx, library.Track{YTID: "b", Title: "B", Channel: "C"}))
 			r, err := reqs.Create(ctx, request.Item{Source: request.SourceListener,
@@ -110,7 +152,7 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
 				YTID: "b", Title: "B", Channel: "C", RequestID: r.ID}))
-		}},
+		}, true},
 		{"listener request outranks an older AI pick", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
 			require.NoError(t, lib.Add(ctx, library.Track{YTID: "ai", Title: "AI", Channel: "C"}))
 			require.NoError(t, lib.Add(ctx, library.Track{YTID: "li", Title: "LI", Channel: "C"}))
@@ -120,7 +162,21 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 			_, err = reqs.Create(ctx, request.Item{Source: request.SourceListener,
 				YTID: "li", Status: request.StatusReady})
 			require.NoError(t, err)
-		}},
+		}, true},
+		{"committed request already aired", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
+			require.NoError(t, lib.Add(ctx, library.Track{YTID: "c", Title: "C", Channel: "C"}))
+			r, err := reqs.Create(ctx, request.Item{Source: request.SourceListener,
+				YTID: "c", Status: request.StatusReady})
+			require.NoError(t, err)
+			require.NoError(t, reqs.MarkAired(ctx, r.ID, time.Now()))
+			require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+				YTID: "c", Title: "C", Channel: "C", RequestID: r.ID}))
+		}, false},
+		{"committed request ID names no row", func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
+			require.NoError(t, lib.Add(ctx, library.Track{YTID: "d", Title: "D", Channel: "C"}))
+			require.NoError(t, sched.SetNextUp(ctx, schedule.NextUp{
+				YTID: "d", Title: "D", Channel: "C", RequestID: "no-such-request-id"}))
+		}, false},
 	}
 
 	for _, tc := range cases {
@@ -138,10 +194,15 @@ func TestPeekNextMatchesPlanNext(t *testing.T) {
 
 			up, found, err := PeekNext(ctx, sched, reqs, lib)
 			require.NoError(t, err)
-			require.True(t, found)
+			require.Equal(t, tc.wantFound, found)
 
 			p, err := f.planNext(ctx)
 			require.NoError(t, err)
+			if !tc.wantFound {
+				require.True(t, p.skip,
+					"PeekNext found nothing to promise but planNext did not skip the same commitment — drift")
+				return
+			}
 			require.Equal(t, p.item.track.YTID, up.Track.YTID,
 				"PeekNext and planNext disagree — the DJ would name the wrong song")
 			require.Equal(t, p.item.requestID, up.RequestID)
