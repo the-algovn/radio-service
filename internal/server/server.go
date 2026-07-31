@@ -292,10 +292,15 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 // parsed map. Go alphabetises map keys on marshal, while the director's brief
 // is marshalled from a struct and comes out in field order — so re-marshalling
 // would hand the bench a differently-ordered <brief> block than the one that
-// airs, defeating the parity this whole path exists to establish. Re-marshalling
-// buys no safety to trade for that: it normalises syntax, not the
-// attacker-controlled string values inside, and the successful Unmarshal above
-// is what actually proves the input is well-formed.
+// airs, defeating the parity this whole path exists to establish. The safety
+// that loses is smaller than it looks: stdlib json.Marshal does HTML-escape
+// < > & inside string values, but the deprecated typed path below never had
+// that escaping either (protojson escapes only control chars, " and \), so it
+// was an inconsistent outlier rather than a layer anything relied on — and this
+// is an admin-only bench whose caller already supplies the system prompt via
+// persona_override. The successful Unmarshal above is what proves the input is
+// well-formed; the on-air director path is untouched and still marshals through
+// encoding/json.
 func benchBrief(req *radiolabv1.GenerateScriptRequest) (briefJSON, briefType string, maxChars int, err error) {
 	if raw := req.GetBriefJson(); raw != "" {
 		var obj map[string]any

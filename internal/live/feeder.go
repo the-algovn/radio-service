@@ -807,8 +807,10 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// while its rendered clip survives on another goroutine and still passes
 		// the anchor check — she promises a song the queue then re-picks. With an
 		// empty queue it is worse: the shuffle branch overwrites a committed track
-		// outright. Deferring the commitment by one track is exactly the
-		// pre-pin behaviour.
+		// outright. Skipping the commitment here narrows commitNextUp's original
+		// keep-the-queue-warm job by one boundary: planNext then falls through to
+		// the ready queue and, failing that, its own shuffle, so the next track is
+		// still chosen — just not pre-committed.
 		if !resumed {
 			f.commitNextUp(ctx)
 		}
