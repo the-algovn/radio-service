@@ -22,8 +22,9 @@ const (
 	// tickEvery is deliberately faster than the programmer's 60s — the
 	// director must notice "break due" within one track.
 	tickEvery = 20 * time.Second
-	// prepDeadline bounds one whole prepare attempt (the provider clients
-	// carry their own 25s HTTP timeouts); a timeout is an ordinary failure.
+	// prepDeadline bounds one whole prepare attempt. ttsclient sets no
+	// timeout of its own and relies entirely on this deadline; a timeout is
+	// an ordinary failure.
 	prepDeadline = 60 * time.Second
 	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
 	// lines. The live max_chars setting governs LLM seam scripts only
