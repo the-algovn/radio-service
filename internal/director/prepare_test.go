@@ -595,6 +595,36 @@ func TestPrepareSurvivesShowMemoryWriteFailure(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestPrepareStampsCorrelationAndTitles(t *testing.T) {
+	// The correlation id is what later joins the aired segment to the LLM
+	// call that scripted it. It is minted here and nowhere else, so if this
+	// silently returns "", every provenance join in the console misses.
+	sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+	sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+		return live.Upcoming{
+			Track: library.Track{YTID: "yt2", Title: "Chạy Ngay Đi", Channel: "Sơn Tùng M-TP"},
+		}, true, nil
+	}
+
+	clip, ok := sf.dr.prepare(context.Background(), live.ClipSeam, testStation)
+	require.True(t, ok)
+	require.NotEmpty(t, clip.CorrelationID, "a seam clip must carry a correlation id")
+	require.Equal(t, "Bài vừa xong", clip.BacksellTitle,
+		"the backsell names the track that just played")
+	require.Equal(t, "Chạy Ngay Đi", clip.PromiseTitle,
+		"the promise names the track she was allowed to announce")
+}
+
+func TestPrepareStationIDCarriesNoCorrelation(t *testing.T) {
+	// A station ID reads a pre-written line — no LLM call is made, so an id
+	// here would join to nothing and imply provenance that does not exist.
+	f := newPrepFixture(t, &seqModel{})
+	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID, testStation)
+	require.True(t, ok)
+	require.Empty(t, clip.CorrelationID)
+	require.Empty(t, clip.BacksellTitle)
+}
+
 type failingTalkMem struct{}
 
 func (failingTalkMem) Append(context.Context, talkmem.Entry) error { return errors.New("db down") }
