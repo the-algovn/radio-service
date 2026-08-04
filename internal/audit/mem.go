@@ -39,6 +39,9 @@ func (m *MemStore) match(r Rec, f Filter) bool {
 			return false
 		}
 	}
+	if f.CorrelationID != "" && r.CorrelationID != f.CorrelationID {
+		return false
+	}
 	if f.ErrorsOnly && r.Error == "" {
 		return false
 	}

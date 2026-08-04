@@ -217,15 +217,17 @@ WHERE ($1::text = ''
        OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
        OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
+  AND ($3::text = '' OR correlation_id = $3)
 `
 
 type CountLLMCallsParams struct {
-	LabelFilter string
-	ErrorsOnly  bool
+	LabelFilter       string
+	ErrorsOnly        bool
+	CorrelationFilter string
 }
 
 func (q *Queries) CountLLMCalls(ctx context.Context, arg CountLLMCallsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countLLMCalls, arg.LabelFilter, arg.ErrorsOnly)
+	row := q.db.QueryRow(ctx, countLLMCalls, arg.LabelFilter, arg.ErrorsOnly, arg.CorrelationFilter)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -510,31 +512,33 @@ func (q *Queries) HasPendingYTID(ctx context.Context, ytID string) (bool, error)
 }
 
 const insertLLMCall = `-- name: InsertLLMCall :exec
-INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+INSERT INTO llm_call (ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
                       in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 `
 
 type InsertLLMCallParams struct {
-	Ts           time.Time
-	Label        string
-	Model        string
-	Provider     string
-	SystemPrompt string
-	UserPrompt   string
-	Output       string
-	InTokens     int32
-	OutTokens    int32
-	CostUsd      float64
-	LatencyMs    int32
-	Error        string
-	Fake         bool
+	Ts            time.Time
+	Label         string
+	CorrelationID string
+	Model         string
+	Provider      string
+	SystemPrompt  string
+	UserPrompt    string
+	Output        string
+	InTokens      int32
+	OutTokens     int32
+	CostUsd       float64
+	LatencyMs     int32
+	Error         string
+	Fake          bool
 }
 
 func (q *Queries) InsertLLMCall(ctx context.Context, arg InsertLLMCallParams) error {
 	_, err := q.db.Exec(ctx, insertLLMCall,
 		arg.Ts,
 		arg.Label,
+		arg.CorrelationID,
 		arg.Model,
 		arg.Provider,
 		arg.SystemPrompt,
@@ -684,7 +688,7 @@ func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
 }
 
 const listLLMCalls = `-- name: ListLLMCalls :many
-SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+SELECT id, ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
        in_tokens, out_tokens, cost_usd, latency_ms, error, fake
 FROM llm_call
 WHERE ($1::text = ''
@@ -693,32 +697,35 @@ WHERE ($1::text = ''
        OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
        OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
+  AND ($3::text = '' OR correlation_id = $3)
 ORDER BY ts DESC
-LIMIT $4 OFFSET $3
+LIMIT $5 OFFSET $4
 `
 
 type ListLLMCallsParams struct {
-	LabelFilter string
-	ErrorsOnly  bool
-	Off         int32
-	Lim         int32
+	LabelFilter       string
+	ErrorsOnly        bool
+	CorrelationFilter string
+	Off               int32
+	Lim               int32
 }
 
 type ListLLMCallsRow struct {
-	ID           int64
-	Ts           time.Time
-	Label        string
-	Model        string
-	Provider     string
-	SystemPrompt string
-	UserPrompt   string
-	Output       string
-	InTokens     int32
-	OutTokens    int32
-	CostUsd      float64
-	LatencyMs    int32
-	Error        string
-	Fake         bool
+	ID            int64
+	Ts            time.Time
+	Label         string
+	CorrelationID string
+	Model         string
+	Provider      string
+	SystemPrompt  string
+	UserPrompt    string
+	Output        string
+	InTokens      int32
+	OutTokens     int32
+	CostUsd       float64
+	LatencyMs     int32
+	Error         string
+	Fake          bool
 }
 
 // label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
@@ -727,6 +734,7 @@ func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]L
 	rows, err := q.db.Query(ctx, listLLMCalls,
 		arg.LabelFilter,
 		arg.ErrorsOnly,
+		arg.CorrelationFilter,
 		arg.Off,
 		arg.Lim,
 	)
@@ -741,6 +749,7 @@ func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]L
 			&i.ID,
 			&i.Ts,
 			&i.Label,
+			&i.CorrelationID,
 			&i.Model,
 			&i.Provider,
 			&i.SystemPrompt,

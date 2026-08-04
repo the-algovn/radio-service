@@ -125,6 +125,36 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Equal(t, "director:seam", got[0].Label)
 	})
 
+	t.Run("correlation id round-trips and filters", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.Record(ctx, audit.Rec{
+			TS: base, Label: "director:seam", Model: "m", Provider: "fake",
+			CorrelationID: "corr-a",
+		}))
+		require.NoError(t, s.Record(ctx, audit.Rec{
+			TS: base.Add(time.Minute), Label: "director:seam", Model: "m", Provider: "fake",
+			CorrelationID: "corr-b",
+		}))
+		require.NoError(t, s.Record(ctx, audit.Rec{
+			TS: base.Add(2 * time.Minute), Label: "programmer:pick", Model: "m", Provider: "fake",
+		}))
+
+		got, err := s.List(ctx, audit.Filter{CorrelationID: "corr-a"}, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "corr-a", got[0].CorrelationID)
+
+		n, err := s.Count(ctx, audit.Filter{CorrelationID: "corr-a"})
+		require.NoError(t, err)
+		require.Equal(t, int64(1), n)
+
+		// An empty filter must not mean "only rows with an empty id" — the
+		// inspector's default view has to keep showing everything.
+		got, err = s.List(ctx, audit.Filter{}, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+	})
+
 	t.Run("stats group by label+model since", func(t *testing.T) {
 		s := newStore(t)
 		seed(s)

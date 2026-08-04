@@ -206,14 +206,14 @@ UPDATE next_up SET yt_id = '', title = '', channel = '', request_id = '',
        updated_at = now() WHERE id = TRUE;
 
 -- name: InsertLLMCall :exec
-INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+INSERT INTO llm_call (ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
                       in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
 
 -- name: ListLLMCalls :many
 -- label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
 -- matches that whole call-site group by prefix; anything else is an exact match.
-SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+SELECT id, ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
        in_tokens, out_tokens, cost_usd, latency_ms, error, fake
 FROM llm_call
 WHERE (sqlc.arg(label_filter)::text = ''
@@ -222,6 +222,7 @@ WHERE (sqlc.arg(label_filter)::text = ''
        OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%')
        OR (sqlc.arg(label_filter)::text = 'director:' AND label LIKE 'director:%'))
   AND (sqlc.arg(errors_only)::bool = false OR error <> '')
+  AND (sqlc.arg(correlation_filter)::text = '' OR correlation_id = sqlc.arg(correlation_filter))
 ORDER BY ts DESC
 LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
 
@@ -232,7 +233,8 @@ WHERE (sqlc.arg(label_filter)::text = ''
        OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%')
        OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%')
        OR (sqlc.arg(label_filter)::text = 'director:' AND label LIKE 'director:%'))
-  AND (sqlc.arg(errors_only)::bool = false OR error <> '');
+  AND (sqlc.arg(errors_only)::bool = false OR error <> '')
+  AND (sqlc.arg(correlation_filter)::text = '' OR correlation_id = sqlc.arg(correlation_filter));
 
 -- name: StatsLLMCalls :many
 SELECT label, model,
