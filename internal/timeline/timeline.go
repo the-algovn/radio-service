@@ -151,7 +151,15 @@ type State struct {
 	// documented order. Only `ready` rows hold an air slot.
 	Pending []request.Item
 
-	// Durations maps ytID -> duration_s for ready rows the caller resolved.
+	// Durations maps ytID -> duration_s for tracks the caller resolved from the
+	// library. An entry exists for every resolvable track: the pin's track,
+	// ready-request tracks, and the airing track for anchor checking.
+	//
+	// Absent means the track is NOT AIRABLE, never "unknown length." A
+	// fallback would render a phantom track as committed, which is how four
+	// implementation divergences were found before this comment existed.
+	// The pin arm REJECTS a NextUp whose YTID is missing from this map; the
+	// ready-queue arm pops heads until it finds one that IS present.
 	Durations map[string]int
 
 	// MedianTrackS sizes unknown-shuffle blocks; 0 means use FallbackMedianS.

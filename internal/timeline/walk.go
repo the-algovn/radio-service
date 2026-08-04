@@ -219,17 +219,22 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 // sized from the median track length.
 func musicArm(s State, clock time.Time, pinConsumed *bool, ready *[]request.Item, idx int) Segment {
 	// Committed next-up — the feeder's arm 1. The engine ALWAYS consumes
-	// the pin (consumedNextUp is set regardless of outcome). A shuffle pin
-	// (no RequestID) is always usable; a request pin is usable only when the
-	// request is still ready — otherwise the engine skips it and re-plans.
+	// the pin (consumedNextUp is set regardless of outcome). The pin is
+	// usable only when BOTH hold: (a) the track still exists in the library
+	// (present in Durations — absent means NOT AIRABLE), and (b) the
+	// request-id check passes (empty, or a Pending row at StatusReady).
+	// Otherwise the engine skips the pin and re-plans.
 	if s.NextUp != nil && !*pinConsumed {
 		*pinConsumed = true
-		dur := medianOr(s)
-		if d, ok := s.Durations[s.NextUp.YTID]; ok {
-			dur = d
-		}
-		// Shuffle pin — always usable.
-		if s.NextUp.RequestID == "" {
+
+		// Track must still exist. Durations membership IS the library-existence
+		// signal — the projector is pure and cannot call the library directly.
+		dur, exists := s.Durations[s.NextUp.YTID]
+		if !exists {
+			// Unusable pin (missing library track): fall through to the ready
+			// queue in the same iteration.
+		} else if s.NextUp.RequestID == "" {
+			// Shuffle pin (no RequestID) with an existing track.
 			return Segment{
 				SegmentID: "pin:" + s.NextUp.YTID,
 				Kind:      KindTrack,
@@ -240,11 +245,8 @@ func musicArm(s State, clock time.Time, pinConsumed *bool, ready *[]request.Item
 				StartedAt: clock,
 				DurationS: dur,
 			}
-		}
-		// Request pin — only usable when the request is still ready.
-		// The engine looks up the request and skips the pin when the row is
-		// absent (already aired/failed) or not ready (cancelled/approved).
-		if it, ok := pinRequestReady(s.Pending, s.NextUp.RequestID); ok {
+		} else if it, ok := pinRequestReady(s.Pending, s.NextUp.RequestID); ok {
+			// Request pin with a still-ready request and an existing track.
 			return Segment{
 				SegmentID:       "pin:" + s.NextUp.YTID,
 				Kind:            KindTrack,
@@ -260,16 +262,19 @@ func musicArm(s State, clock time.Time, pinConsumed *bool, ready *[]request.Item
 				RequestID:       it.ID,
 			}
 		}
-		// Unusable pin: fall through to the ready queue in the same iteration.
+		// Unusable pin (missing track, or request not ready): fall through to
+		// the ready queue in the same iteration.
 	}
 
-	// ready queue head — the feeder's arm 2.
-	if len(*ready) > 0 {
+	// ready queue head — the feeder's arm 2. Pop heads until one with a
+	// library-resolved track. planNext arm 2 returns skip when a ready
+	// request's track is missing, so the projector must skip them too.
+	for len(*ready) > 0 {
 		it := (*ready)[0]
 		*ready = (*ready)[1:]
-		dur := medianOr(s)
-		if d, ok := s.Durations[it.YTID]; ok {
-			dur = d
+		dur, ok := s.Durations[it.YTID]
+		if !ok {
+			continue // unresolvable; skip
 		}
 		return Segment{
 			SegmentID:       "req:" + it.ID,

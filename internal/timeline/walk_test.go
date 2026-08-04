@@ -275,6 +275,39 @@ func TestUsablePinWithReadyRequestCarriesProvenance(t *testing.T) {
 	require.Equal(t, "r7", first.RequestID)
 }
 
+// Fix 3: ready queue skips unresolvable heads //
+
+func TestReadyQueueSkipsUnresolvableHead(t *testing.T) {
+	// Two ready requests; the head's ytID is absent from Durations (missing
+	// library track). The projector must pop past it and project the second
+	// one — just as planNext arm 2 returns skip for unresolvable tracks.
+	s := liveState()
+	s.Pending = []request.Item{
+		{ID: "r1", YTID: "gone", Title: "Gone", Status: request.StatusReady},
+		{ID: "r2", YTID: "y2", Title: "Survivor", Status: request.StatusReady},
+	}
+	s.Durations = map[string]int{"y2": 250} // only the survivor resolved
+	up, _, _ := timeline.Project(s)
+	first := firstOfKind(t, up, timeline.KindTrack)
+	require.Equal(t, "Survivor", first.Title)
+	require.Equal(t, timeline.CertaintyProjected, first.Certainty)
+}
+
+func TestUnusablePinWithEmptyQueueFallsToUnknown(t *testing.T) {
+	// Pin whose track is missing from the library (absent from Durations),
+	// and no ready queue behind it. The pin is consumed but unusable; the
+	// projector must fall to KindUnknown rather than naming a phantom.
+	s := liveState()
+	s.NextUp = &schedule.NextUp{YTID: "gone", Title: "Phantom"}
+	// No Durations entry for "gone" → pin is unusable.
+	// No Pending → ready queue is empty.
+	up, _, _ := timeline.Project(s)
+	first := firstOfKind(t, up, timeline.KindTrack, timeline.KindUnknown)
+	require.Equal(t, timeline.KindUnknown, first.Kind)
+	require.Empty(t, first.Title)
+	require.Equal(t, timeline.CertaintyUnknown, first.Certainty)
+}
+
 // Fix 2: station ID may open a session //
 
 func TestStationIDOpensSessionWhenNoMusicHasAired(t *testing.T) {

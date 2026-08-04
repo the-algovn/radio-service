@@ -134,6 +134,11 @@ func TestProjectMatchesPeekNext(t *testing.T) {
 		},
 		{
 			// 4. Pin whose track is missing from the library.
+			//    The projection used to emit KindTrack/Committed with the title
+			//    taken straight off NextUp — a phantom track the engine skips.
+			//    After the fix, Durations membership IS the existence signal:
+			//    "gone" absent from Durations → pin is consumed but unusable →
+			//    falls through to KindUnknown.
 			name: "pin track missing from library",
 			setupLive: func(t *testing.T, sched schedule.Store, reqs request.Store, lib library.Library) {
 				// No lib.Add — the track that the pin references is absent.
@@ -141,10 +146,10 @@ func TestProjectMatchesPeekNext(t *testing.T) {
 			},
 			setupState: func(t *testing.T) timeline.State {
 				s := baseState()
-				// The schedule pin exists. The projector's musicArm does NOT
-				// verify library presence — it trusts NextUp blindly, so it
-				// would emit KindTrack/Committed while PeekNext returns false.
-				// This is the divergence this scenario is designed to catch.
+				// Pin present, but intentionally NOT in Durations — the caller
+				// resolved nothing because the library row is gone. The
+				// projector must treat this the same way the engine does: skip
+				// the pin, and fall through to unknown.
 				s.NextUp = &schedule.NextUp{YTID: "gone", Title: "Vanished"}
 				return s
 			},
