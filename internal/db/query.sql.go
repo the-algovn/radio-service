@@ -169,6 +169,54 @@ func (q *Queries) ClearNextUp(ctx context.Context) error {
 	return err
 }
 
+const closeOpenBroadcastSessions = `-- name: CloseOpenBroadcastSessions :exec
+UPDATE broadcast_session SET ended_at = $1 WHERE ended_at IS NULL
+`
+
+func (q *Queries) CloseOpenBroadcastSessions(ctx context.Context, endedAt *time.Time) error {
+	_, err := q.db.Exec(ctx, closeOpenBroadcastSessions, endedAt)
+	return err
+}
+
+const closeOrphanBroadcastSessions = `-- name: CloseOrphanBroadcastSessions :execrows
+UPDATE broadcast_session b
+SET ended_at = LEAST(
+      COALESCE(
+        (SELECT max(s.started_at + make_interval(secs => s.duration_s))
+         FROM (SELECT started_at, duration_s FROM air_log
+               UNION ALL
+               SELECT started_at, duration_s FROM talk_segment) s
+         WHERE s.started_at >= b.started_at
+           -- Upper bound: the next session's start. Without this, items from a
+           -- newer session would inflate this session's ended_at, silently
+           -- misdrawing the console's timeline dividers.
+           AND s.started_at < COALESCE(
+             (SELECT min(b2.started_at) FROM broadcast_session b2
+              WHERE b2.started_at > b.started_at),
+             'infinity'::timestamptz)),
+        b.started_at),
+      $1)
+WHERE b.ended_at IS NULL
+`
+
+// Boot reconciliation. A pod killed while on air never runs GoOffAir, so its
+// row stays open forever and `ended_at IS NULL` stops identifying the CURRENT
+// session. Close every open row at the end of the last item that aired inside
+// it, falling back to its own start when nothing did.
+//
+// The LEAST clamp caps the reconciled end at the instant reconciliation runs:
+// a process killed mid-item wrote the item's INTENDED duration at start, so
+// started_at + duration_s can overshoot the kill by up to one whole item. The
+// true kill time is unrecoverable afterwards, but the session provably ended
+// no later than NOW — clamp to that.
+func (q *Queries) CloseOrphanBroadcastSessions(ctx context.Context, at *time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, closeOrphanBroadcastSessions, at)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countLLMCalls = `-- name: CountLLMCalls :one
 SELECT count(*) FROM llm_call
 WHERE ($1::text = ''
@@ -177,15 +225,17 @@ WHERE ($1::text = ''
        OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
        OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
+  AND ($3::text = '' OR correlation_id = $3)
 `
 
 type CountLLMCallsParams struct {
-	LabelFilter string
-	ErrorsOnly  bool
+	LabelFilter       string
+	ErrorsOnly        bool
+	CorrelationFilter string
 }
 
 func (q *Queries) CountLLMCalls(ctx context.Context, arg CountLLMCallsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countLLMCalls, arg.LabelFilter, arg.ErrorsOnly)
+	row := q.db.QueryRow(ctx, countLLMCalls, arg.LabelFilter, arg.ErrorsOnly, arg.CorrelationFilter)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -229,6 +279,17 @@ func (q *Queries) CountRequestsSince(ctx context.Context, arg CountRequestsSince
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const countShowSegments = `-- name: CountShowSegments :one
+SELECT ((SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment))::int8
+`
+
+func (q *Queries) CountShowSegments(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countShowSegments)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const countTracks = `-- name: CountTracks :one
@@ -470,31 +531,33 @@ func (q *Queries) HasPendingYTID(ctx context.Context, ytID string) (bool, error)
 }
 
 const insertLLMCall = `-- name: InsertLLMCall :exec
-INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+INSERT INTO llm_call (ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
                       in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 `
 
 type InsertLLMCallParams struct {
-	Ts           time.Time
-	Label        string
-	Model        string
-	Provider     string
-	SystemPrompt string
-	UserPrompt   string
-	Output       string
-	InTokens     int32
-	OutTokens    int32
-	CostUsd      float64
-	LatencyMs    int32
-	Error        string
-	Fake         bool
+	Ts            time.Time
+	Label         string
+	CorrelationID string
+	Model         string
+	Provider      string
+	SystemPrompt  string
+	UserPrompt    string
+	Output        string
+	InTokens      int32
+	OutTokens     int32
+	CostUsd       float64
+	LatencyMs     int32
+	Error         string
+	Fake          bool
 }
 
 func (q *Queries) InsertLLMCall(ctx context.Context, arg InsertLLMCallParams) error {
 	_, err := q.db.Exec(ctx, insertLLMCall,
 		arg.Ts,
 		arg.Label,
+		arg.CorrelationID,
 		arg.Model,
 		arg.Provider,
 		arg.SystemPrompt,
@@ -552,6 +615,35 @@ type InsertTalkMemoryParams struct {
 
 func (q *Queries) InsertTalkMemory(ctx context.Context, arg InsertTalkMemoryParams) error {
 	_, err := q.db.Exec(ctx, insertTalkMemory, arg.Kind, arg.Summary, arg.Phrases)
+	return err
+}
+
+const insertTalkSegment = `-- name: InsertTalkSegment :exec
+INSERT INTO talk_segment (kind, started_at, duration_s, script,
+                          backsell_title, promise_title, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+
+type InsertTalkSegmentParams struct {
+	Kind          string
+	StartedAt     time.Time
+	DurationS     int32
+	Script        string
+	BacksellTitle string
+	PromiseTitle  string
+	CorrelationID string
+}
+
+func (q *Queries) InsertTalkSegment(ctx context.Context, arg InsertTalkSegmentParams) error {
+	_, err := q.db.Exec(ctx, insertTalkSegment,
+		arg.Kind,
+		arg.StartedAt,
+		arg.DurationS,
+		arg.Script,
+		arg.BacksellTitle,
+		arg.PromiseTitle,
+		arg.CorrelationID,
+	)
 	return err
 }
 
@@ -615,7 +707,7 @@ func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
 }
 
 const listLLMCalls = `-- name: ListLLMCalls :many
-SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+SELECT id, ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
        in_tokens, out_tokens, cost_usd, latency_ms, error, fake
 FROM llm_call
 WHERE ($1::text = ''
@@ -624,23 +716,44 @@ WHERE ($1::text = ''
        OR ($1::text = 'programmer:' AND label LIKE 'programmer:%')
        OR ($1::text = 'director:' AND label LIKE 'director:%'))
   AND ($2::bool = false OR error <> '')
+  AND ($3::text = '' OR correlation_id = $3)
 ORDER BY ts DESC
-LIMIT $4 OFFSET $3
+LIMIT $5 OFFSET $4
 `
 
 type ListLLMCallsParams struct {
-	LabelFilter string
-	ErrorsOnly  bool
-	Off         int32
-	Lim         int32
+	LabelFilter       string
+	ErrorsOnly        bool
+	CorrelationFilter string
+	Off               int32
+	Lim               int32
+}
+
+type ListLLMCallsRow struct {
+	ID            int64
+	Ts            time.Time
+	Label         string
+	CorrelationID string
+	Model         string
+	Provider      string
+	SystemPrompt  string
+	UserPrompt    string
+	Output        string
+	InTokens      int32
+	OutTokens     int32
+	CostUsd       float64
+	LatencyMs     int32
+	Error         string
+	Fake          bool
 }
 
 // label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
 // matches that whole call-site group by prefix; anything else is an exact match.
-func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]LlmCall, error) {
+func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]ListLLMCallsRow, error) {
 	rows, err := q.db.Query(ctx, listLLMCalls,
 		arg.LabelFilter,
 		arg.ErrorsOnly,
+		arg.CorrelationFilter,
 		arg.Off,
 		arg.Lim,
 	)
@@ -648,13 +761,14 @@ func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]L
 		return nil, err
 	}
 	defer rows.Close()
-	items := []LlmCall{}
+	items := []ListLLMCallsRow{}
 	for rows.Next() {
-		var i LlmCall
+		var i ListLLMCallsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Ts,
 			&i.Label,
+			&i.CorrelationID,
 			&i.Model,
 			&i.Provider,
 			&i.SystemPrompt,
@@ -1007,6 +1121,49 @@ func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequ
 	return i, err
 }
 
+const openBroadcastSession = `-- name: OpenBroadcastSession :exec
+INSERT INTO broadcast_session (started_at) VALUES ($1)
+`
+
+func (q *Queries) OpenBroadcastSession(ctx context.Context, startedAt time.Time) error {
+	_, err := q.db.Exec(ctx, openBroadcastSession, startedAt)
+	return err
+}
+
+const overlappingBroadcastSessions = `-- name: OverlappingBroadcastSessions :many
+SELECT id, started_at, ended_at FROM broadcast_session
+WHERE started_at <= $1
+  AND (ended_at IS NULL OR ended_at >= $2)
+ORDER BY started_at DESC
+LIMIT $3
+`
+
+type OverlappingBroadcastSessionsParams struct {
+	ToTs   time.Time
+	FromTs *time.Time
+	Lim    int32
+}
+
+func (q *Queries) OverlappingBroadcastSessions(ctx context.Context, arg OverlappingBroadcastSessionsParams) ([]BroadcastSession, error) {
+	rows, err := q.db.Query(ctx, overlappingBroadcastSessions, arg.ToTs, arg.FromTs, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BroadcastSession{}
+	for rows.Next() {
+		var i BroadcastSession
+		if err := rows.Scan(&i.ID, &i.StartedAt, &i.EndedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pendingRequestIDs = `-- name: PendingRequestIDs :many
 SELECT id::text AS id FROM request WHERE status IN ('approved', 'ready')
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id
@@ -1120,6 +1277,15 @@ func (q *Queries) PruneTalkMemory(ctx context.Context, createdAt time.Time) erro
 	return err
 }
 
+const pruneTalkSegments = `-- name: PruneTalkSegments :exec
+DELETE FROM talk_segment WHERE started_at < $1
+`
+
+func (q *Queries) PruneTalkSegments(ctx context.Context, before time.Time) error {
+	_, err := q.db.Exec(ctx, pruneTalkSegments, before)
+	return err
+}
+
 const recentAirLogYTIDs = `-- name: RecentAirLogYTIDs :many
 SELECT yt_id FROM air_log ORDER BY started_at DESC, id DESC LIMIT $1
 `
@@ -1137,6 +1303,122 @@ func (q *Queries) RecentAirLogYTIDs(ctx context.Context, limit int32) ([]string,
 			return nil, err
 		}
 		items = append(items, yt_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recentShowSegments = `-- name: RecentShowSegments :many
+SELECT s.origin, s.id, s.kind, s.yt_id, s.title, s.artist, s.started_at,
+       s.duration_s, s.source, s.requested_by_name, s.reason,
+       s.script, s.backsell_title, s.promise_title, s.correlation_id,
+       s.model, s.in_tokens, s.out_tokens, s.cost_usd, s.latency_ms
+FROM (
+  SELECT 'air'::text AS origin, a.id, 'track'::text AS kind,
+         a.yt_id, a.title, a.artist, a.started_at, a.duration_s,
+         a.source, a.requested_by_name, a.reason,
+         ''::text AS script, ''::text AS backsell_title, ''::text AS promise_title,
+         ''::text AS correlation_id, ''::text AS model,
+         0::int AS in_tokens, 0::int AS out_tokens,
+         0::double precision AS cost_usd, 0::int AS latency_ms
+  FROM air_log a
+  UNION ALL
+  SELECT 'talk'::text, t.id, t.kind,
+         ''::text, ''::text, ''::text, t.started_at, t.duration_s,
+         ''::text, ''::text, ''::text,
+         t.script, t.backsell_title, t.promise_title,
+         t.correlation_id, COALESCE(c.model, ''),
+         COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0),
+         COALESCE(c.cost_usd, 0), COALESCE(c.latency_ms, 0)
+  FROM talk_segment t
+  LEFT JOIN LATERAL (
+    SELECT (array_agg(l.model ORDER BY l.ts DESC, l.id DESC))[1] AS model,
+           SUM(l.in_tokens)::int              AS in_tokens,
+           SUM(l.out_tokens)::int             AS out_tokens,
+           SUM(l.cost_usd)::double precision  AS cost_usd,
+           SUM(l.latency_ms)::int             AS latency_ms
+    FROM llm_call l
+    WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
+  ) c ON true
+) s
+ORDER BY s.started_at DESC, s.id DESC, s.origin DESC
+LIMIT $2 OFFSET $1
+`
+
+type RecentShowSegmentsParams struct {
+	Off int32
+	Lim int32
+}
+
+type RecentShowSegmentsRow struct {
+	Origin          string
+	ID              int64
+	Kind            string
+	YtID            string
+	Title           string
+	Artist          string
+	StartedAt       time.Time
+	DurationS       int32
+	Source          string
+	RequestedByName string
+	Reason          string
+	Script          string
+	BacksellTitle   string
+	PromiseTitle    string
+	CorrelationID   string
+	Model           string
+	InTokens        int32
+	OutTokens       int32
+	CostUsd         float64
+	LatencyMs       int32
+}
+
+// The merged show log: music from air_log, talk from talk_segment, newest
+// first, with LLM provenance for talk rows that made a call.
+//
+// The provenance side is a LATERAL AGGREGATE, not a plain LEFT JOIN, and that
+// is load-bearing: one director prepare can write TWO llm_call rows (the
+// script validation loop retries once), so a plain join would emit the talk
+// segment twice. Summing also gives the break's TRUE cost rather than only the
+// winning attempt's.
+// s.origin DESC puts 'talk' before 'air' (talk > air lexically),
+// matching MemStore.merged's total-order comparator.
+func (q *Queries) RecentShowSegments(ctx context.Context, arg RecentShowSegmentsParams) ([]RecentShowSegmentsRow, error) {
+	rows, err := q.db.Query(ctx, recentShowSegments, arg.Off, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RecentShowSegmentsRow{}
+	for rows.Next() {
+		var i RecentShowSegmentsRow
+		if err := rows.Scan(
+			&i.Origin,
+			&i.ID,
+			&i.Kind,
+			&i.YtID,
+			&i.Title,
+			&i.Artist,
+			&i.StartedAt,
+			&i.DurationS,
+			&i.Source,
+			&i.RequestedByName,
+			&i.Reason,
+			&i.Script,
+			&i.BacksellTitle,
+			&i.PromiseTitle,
+			&i.CorrelationID,
+			&i.Model,
+			&i.InTokens,
+			&i.OutTokens,
+			&i.CostUsd,
+			&i.LatencyMs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

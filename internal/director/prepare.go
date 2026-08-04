@@ -2,6 +2,8 @@ package director
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,6 +44,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 	defer cancel()
 
 	var script, anchorYTID string
+	var correlationID, backsellTitle, promiseTitle string
 	var anchorStartedAt time.Time
 	var out brain.Output
 	var promised *live.Upcoming
@@ -62,6 +65,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 			return live.Clip{}, false // nothing airing → nothing to talk about
 		}
 		anchorYTID, anchorStartedAt = entry.YTID, entry.StartedAt
+		backsellTitle = entry.Title
 		pers, err := persona.Load(dr.d.PersonaDir)
 		if err != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: persona load failed", "err", err)
@@ -74,8 +78,15 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 				dr.d.Logger.WarnContext(ctx, "director: peek failed; backsell only", "err", perr)
 			} else if found {
 				promised = &up
+				promiseTitle = up.Track.Title
 			}
 		}
+		// Mint BEFORE generateValid — that function rebinds ctx with
+		// audit.WithLabel, deriving from whatever it is handed, so an id set
+		// afterwards would never reach the audit callback.
+		correlationID = newCorrelationID()
+		ctx = audit.WithCorrelation(ctx, correlationID)
+
 		briefJSON, err := json.Marshal(dr.buildBrief(ctx, st, entry, promised, dj.MaxChars))
 		if err != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
@@ -145,7 +156,9 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 	}
 	dr.d.Logger.InfoContext(ctx, "talk clip prepared", "kind", kind, "duration_s", durS, "script", script)
 	return live.Clip{Path: outPath, DurationS: durS, Script: script, Kind: kind,
-		AnchorYTID: anchorYTID, AnchorStartedAt: anchorStartedAt}, true
+		AnchorYTID: anchorYTID, AnchorStartedAt: anchorStartedAt,
+		BacksellTitle: backsellTitle, PromiseTitle: promiseTitle,
+		CorrelationID: correlationID}, true
 }
 
 // generateValid makes the script call with the on-air validation loop: parse
@@ -240,4 +253,16 @@ func (dr *Director) buildBrief(ctx context.Context, st station.Station,
 		}
 	}
 	return b
+}
+
+// newCorrelationID returns a random hex id grouping one prepare's LLM calls.
+// crypto/rand rather than google/uuid: the module carries uuid only as an
+// indirect dependency and no Go code in this repo generates one today
+// (request ids come from Postgres), so this avoids promoting it.
+func newCorrelationID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "" // no id is better than a predictable one; the join just misses
+	}
+	return hex.EncodeToString(b[:])
 }

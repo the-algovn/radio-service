@@ -21,6 +21,13 @@ type Clip struct {
 	Kind            string  // ClipSeam | ClipStationID
 	AnchorYTID      string
 	AnchorStartedAt time.Time
+	// BacksellTitle and PromiseTitle name what the break talked about, so the
+	// console can show what she referenced without re-parsing her script.
+	BacksellTitle string
+	PromiseTitle  string
+	// CorrelationID groups the LLM call(s) that wrote this clip. "" for a
+	// station ID, which reads a pre-written line and makes no call.
+	CorrelationID string
 }
 
 // TalkSource hands finished talk clips to the feeder. Implemented by

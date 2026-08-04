@@ -16,6 +16,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/showlog"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -23,6 +24,10 @@ const (
 	bytesPerSecond = 192000 // s16le 48kHz stereo
 	chunkBytes     = 48000  // 250ms per feed chunk
 	republishEvery = 25 * time.Second
+	// talkSegmentWriteTimeout bounds the detached show-log insert. Generous
+	// relative to a healthy insert and far below the point where a leaked
+	// goroutine per break would matter.
+	talkSegmentWriteTimeout = 2 * time.Second
 )
 
 type Clock interface {
@@ -57,6 +62,18 @@ type FeederDeps struct {
 	// Talk hands pre-rendered DJ talk clips to the boundary (v2). nil =
 	// feature absent; the feeder behaves exactly as before.
 	Talk TalkSource
+	// TalkSegments records aired talk clips. nil = feature absent; airClip
+	// writes nothing and the feeder is byte-for-byte what shipped before
+	// this existed.
+	TalkSegments TalkRecorder
+}
+
+// TalkRecorder records aired talk clips for the console's show timeline.
+// Narrow by design: showlog.Store also carries the read side, and typing the
+// dependency as the whole store would widen the feeder every time that
+// interface grows.
+type TalkRecorder interface {
+	Append(ctx context.Context, t showlog.Talk) error
 }
 
 type Feeder struct {
@@ -1057,6 +1074,26 @@ func (f *Feeder) airClip(ctx context.Context, sess Session, clip Clip, samplesFe
 		StartedAt: f.startedAt(*samplesFed), DurationS: int(clip.DurationS + 0.5)}
 	n, _ := f.d.Listeners.Count(ctx)
 	f.publish(ctx, TopicNowPlaying, DJPayload(entry, n))
+	if f.d.TalkSegments != nil {
+		seg := showlog.Talk{
+			Kind: clip.Kind, StartedAt: entry.StartedAt, DurationS: entry.DurationS,
+			Script: clip.Script, BacksellTitle: clip.BacksellTitle,
+			PromiseTitle: clip.PromiseTitle, CorrelationID: clip.CorrelationID,
+		}
+		// Detached and bounded. This goroutine owes the encoder a chunk every
+		// 250ms, and airClip is the one boundary with no I/O in it (see line
+		// "a clip is already on disk, so airing one costs no fetch").
+		// WithoutCancel because an off-air flip mid-insert must not lose the
+		// row — the clip aired either way, and the timeline should say so.
+		go func() {
+			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), talkSegmentWriteTimeout)
+			defer cancel()
+			if err := f.d.TalkSegments.Append(wctx, seg); err != nil {
+				f.d.Logger.ErrorContext(wctx, "talk segment append failed",
+					"kind", seg.Kind, "err", err)
+			}
+		}()
+	}
 	return f.airTrack(ctx, sess, rd, samplesFed, tick, republish,
 		func(listeners int) []byte { return DJPayload(entry, listeners) })
 }

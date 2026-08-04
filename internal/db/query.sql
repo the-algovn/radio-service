@@ -206,14 +206,14 @@ UPDATE next_up SET yt_id = '', title = '', channel = '', request_id = '',
        updated_at = now() WHERE id = TRUE;
 
 -- name: InsertLLMCall :exec
-INSERT INTO llm_call (ts, label, model, provider, system_prompt, user_prompt, output,
+INSERT INTO llm_call (ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
                       in_tokens, out_tokens, cost_usd, latency_ms, error, fake)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
 
 -- name: ListLLMCalls :many
 -- label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
 -- matches that whole call-site group by prefix; anything else is an exact match.
-SELECT id, ts, label, model, provider, system_prompt, user_prompt, output,
+SELECT id, ts, label, correlation_id, model, provider, system_prompt, user_prompt, output,
        in_tokens, out_tokens, cost_usd, latency_ms, error, fake
 FROM llm_call
 WHERE (sqlc.arg(label_filter)::text = ''
@@ -222,6 +222,7 @@ WHERE (sqlc.arg(label_filter)::text = ''
        OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%')
        OR (sqlc.arg(label_filter)::text = 'director:' AND label LIKE 'director:%'))
   AND (sqlc.arg(errors_only)::bool = false OR error <> '')
+  AND (sqlc.arg(correlation_filter)::text = '' OR correlation_id = sqlc.arg(correlation_filter))
 ORDER BY ts DESC
 LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
 
@@ -232,7 +233,8 @@ WHERE (sqlc.arg(label_filter)::text = ''
        OR (sqlc.arg(label_filter)::text = 'script:' AND label LIKE 'script:%')
        OR (sqlc.arg(label_filter)::text = 'programmer:' AND label LIKE 'programmer:%')
        OR (sqlc.arg(label_filter)::text = 'director:' AND label LIKE 'director:%'))
-  AND (sqlc.arg(errors_only)::bool = false OR error <> '');
+  AND (sqlc.arg(errors_only)::bool = false OR error <> '')
+  AND (sqlc.arg(correlation_filter)::text = '' OR correlation_id = sqlc.arg(correlation_filter));
 
 -- name: StatsLLMCalls :many
 SELECT label, model,
@@ -266,3 +268,103 @@ DELETE FROM talk_memory WHERE created_at < $1;
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE id = $1;
+
+-- name: InsertTalkSegment :exec
+INSERT INTO talk_segment (kind, started_at, duration_s, script,
+                          backsell_title, promise_title, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: PruneTalkSegments :exec
+DELETE FROM talk_segment WHERE started_at < sqlc.arg(before);
+
+-- name: OpenBroadcastSession :exec
+INSERT INTO broadcast_session (started_at) VALUES (sqlc.arg(started_at));
+
+-- name: CloseOpenBroadcastSessions :exec
+UPDATE broadcast_session SET ended_at = sqlc.arg(ended_at) WHERE ended_at IS NULL;
+
+-- name: CloseOrphanBroadcastSessions :execrows
+-- Boot reconciliation. A pod killed while on air never runs GoOffAir, so its
+-- row stays open forever and `ended_at IS NULL` stops identifying the CURRENT
+-- session. Close every open row at the end of the last item that aired inside
+-- it, falling back to its own start when nothing did.
+--
+-- The LEAST clamp caps the reconciled end at the instant reconciliation runs:
+-- a process killed mid-item wrote the item's INTENDED duration at start, so
+-- started_at + duration_s can overshoot the kill by up to one whole item. The
+-- true kill time is unrecoverable afterwards, but the session provably ended
+-- no later than NOW — clamp to that.
+UPDATE broadcast_session b
+SET ended_at = LEAST(
+      COALESCE(
+        (SELECT max(s.started_at + make_interval(secs => s.duration_s))
+         FROM (SELECT started_at, duration_s FROM air_log
+               UNION ALL
+               SELECT started_at, duration_s FROM talk_segment) s
+         WHERE s.started_at >= b.started_at
+           -- Upper bound: the next session's start. Without this, items from a
+           -- newer session would inflate this session's ended_at, silently
+           -- misdrawing the console's timeline dividers.
+           AND s.started_at < COALESCE(
+             (SELECT min(b2.started_at) FROM broadcast_session b2
+              WHERE b2.started_at > b.started_at),
+             'infinity'::timestamptz)),
+        b.started_at),
+      sqlc.arg(at))
+WHERE b.ended_at IS NULL;
+
+-- name: OverlappingBroadcastSessions :many
+SELECT id, started_at, ended_at FROM broadcast_session
+WHERE started_at <= sqlc.arg(to_ts)
+  AND (ended_at IS NULL OR ended_at >= sqlc.arg(from_ts))
+ORDER BY started_at DESC
+LIMIT sqlc.arg(lim);
+
+-- name: RecentShowSegments :many
+-- The merged show log: music from air_log, talk from talk_segment, newest
+-- first, with LLM provenance for talk rows that made a call.
+--
+-- The provenance side is a LATERAL AGGREGATE, not a plain LEFT JOIN, and that
+-- is load-bearing: one director prepare can write TWO llm_call rows (the
+-- script validation loop retries once), so a plain join would emit the talk
+-- segment twice. Summing also gives the break's TRUE cost rather than only the
+-- winning attempt's.
+SELECT s.origin, s.id, s.kind, s.yt_id, s.title, s.artist, s.started_at,
+       s.duration_s, s.source, s.requested_by_name, s.reason,
+       s.script, s.backsell_title, s.promise_title, s.correlation_id,
+       s.model, s.in_tokens, s.out_tokens, s.cost_usd, s.latency_ms
+FROM (
+  SELECT 'air'::text AS origin, a.id, 'track'::text AS kind,
+         a.yt_id, a.title, a.artist, a.started_at, a.duration_s,
+         a.source, a.requested_by_name, a.reason,
+         ''::text AS script, ''::text AS backsell_title, ''::text AS promise_title,
+         ''::text AS correlation_id, ''::text AS model,
+         0::int AS in_tokens, 0::int AS out_tokens,
+         0::double precision AS cost_usd, 0::int AS latency_ms
+  FROM air_log a
+  UNION ALL
+  SELECT 'talk'::text, t.id, t.kind,
+         ''::text, ''::text, ''::text, t.started_at, t.duration_s,
+         ''::text, ''::text, ''::text,
+         t.script, t.backsell_title, t.promise_title,
+         t.correlation_id, COALESCE(c.model, ''),
+         COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0),
+         COALESCE(c.cost_usd, 0), COALESCE(c.latency_ms, 0)
+  FROM talk_segment t
+  LEFT JOIN LATERAL (
+    SELECT (array_agg(l.model ORDER BY l.ts DESC, l.id DESC))[1] AS model,
+           SUM(l.in_tokens)::int              AS in_tokens,
+           SUM(l.out_tokens)::int             AS out_tokens,
+           SUM(l.cost_usd)::double precision  AS cost_usd,
+           SUM(l.latency_ms)::int             AS latency_ms
+    FROM llm_call l
+    WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
+  ) c ON true
+) s
+-- s.origin DESC puts 'talk' before 'air' (talk > air lexically),
+-- matching MemStore.merged's total-order comparator.
+ORDER BY s.started_at DESC, s.id DESC, s.origin DESC
+LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
+
+-- name: CountShowSegments :one
+SELECT ((SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment))::int8;

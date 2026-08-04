@@ -12,6 +12,7 @@ import (
 )
 
 type ctxKey struct{}
+type corrKey struct{}
 type startKey struct{}
 type modelKey struct{}
 
@@ -27,6 +28,22 @@ func WithLabel(ctx context.Context, label string) context.Context {
 // LabelFrom returns the label set by WithLabel, or "" if none.
 func LabelFrom(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// WithCorrelation tags ctx with an id grouping every LLM call made for one
+// unit of work. Set it BEFORE the label: generateValid rebinds ctx with
+// WithLabel, deriving from whatever it was handed, so a correlation set
+// afterwards would never reach the callback.
+func WithCorrelation(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, corrKey{}, id)
+}
+
+// CorrelationFrom returns the id set by WithCorrelation, or "" if none.
+func CorrelationFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(corrKey{}).(string); ok {
 		return v
 	}
 	return ""
@@ -137,7 +154,8 @@ func (h *callbackHandler) rec(ctx context.Context, info *callbacks.RunInfo) Rec 
 	// calls, so it is always "" in real traffic (see the comment in OnStart).
 	modelID, _ := ctx.Value(modelKey{}).(string)
 	return Rec{
-		TS: start, Label: LabelFrom(ctx), Model: modelID, Provider: provider,
+		TS: start, Label: LabelFrom(ctx), CorrelationID: CorrelationFrom(ctx),
+		Model: modelID, Provider: provider,
 		System: p.system, User: p.user,
 		LatencyMS: int(h.clock.Now().Sub(start).Milliseconds()),
 		Fake:      provider == "fake",

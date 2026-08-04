@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/the-algovn/radio-service/internal/showlog"
 )
 
 func TestDJPayloadShape(t *testing.T) {
@@ -23,6 +25,15 @@ func TestDJPayloadShape(t *testing.T) {
 		_, has := m[k]
 		require.False(t, has, k)
 	}
+}
+
+func TestClipKindConstantsMirrorShowlog(t *testing.T) {
+	// feeder.go writes clip.Kind straight through to showlog.Talk.Kind, so the
+	// two packages' constants must stay equal by value — if one is renamed
+	// without the other, talk_segment.kind silently becomes unrecognisable with
+	// no test failure anywhere.
+	require.Equal(t, showlog.KindSeam, ClipSeam)
+	require.Equal(t, showlog.KindStationID, ClipStationID)
 }
 
 func TestDJPayloadZeroListenersPresent(t *testing.T) {

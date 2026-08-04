@@ -9,25 +9,30 @@ import (
 )
 
 type Rec struct {
-	ID        int64
-	TS        time.Time
-	Label     string // director:seam | director:station_id | programmer:pick | script:<type> | callin
-	Model     string // full model id
-	Provider  string // anthropic | gemini | fake
-	System    string
-	User      string
-	Output    string // "" on error
-	InTokens  int
-	OutTokens int
-	CostUSD   float64
-	LatencyMS int
-	Error     string // "" on success
-	Fake      bool
+	ID    int64
+	TS    time.Time
+	Label string // director:seam | director:station_id | programmer:pick | script:<type> | callin
+	// CorrelationID groups every call made for one unit of work — one
+	// director prepare makes up to two (the script validation loop retries
+	// once). Set from ctx by the callback; "" for call sites that set none.
+	CorrelationID string
+	Model         string // full model id
+	Provider      string // anthropic | gemini | fake
+	System        string
+	User          string
+	Output        string // "" on error
+	InTokens      int
+	OutTokens     int
+	CostUSD       float64
+	LatencyMS     int
+	Error         string // "" on success
+	Fake          bool
 }
 
 type Filter struct {
-	Label      string // "" = all
-	ErrorsOnly bool
+	Label         string // "" = all
+	CorrelationID string // "" = all
+	ErrorsOnly    bool
 }
 
 type Stat struct {

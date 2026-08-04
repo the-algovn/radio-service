@@ -22,6 +22,12 @@ type AirLog struct {
 	Reason          string
 }
 
+type BroadcastSession struct {
+	ID        int64
+	StartedAt time.Time
+	EndedAt   *time.Time
+}
+
 type LedgerLine struct {
 	ID        int64
 	Ts        time.Time
@@ -35,20 +41,21 @@ type LedgerLine struct {
 }
 
 type LlmCall struct {
-	ID           int64
-	Ts           time.Time
-	Label        string
-	Model        string
-	Provider     string
-	SystemPrompt string
-	UserPrompt   string
-	Output       string
-	InTokens     int32
-	OutTokens    int32
-	CostUsd      float64
-	LatencyMs    int32
-	Error        string
-	Fake         bool
+	ID            int64
+	Ts            time.Time
+	Label         string
+	Model         string
+	Provider      string
+	SystemPrompt  string
+	UserPrompt    string
+	Output        string
+	InTokens      int32
+	OutTokens     int32
+	CostUsd       float64
+	LatencyMs     int32
+	Error         string
+	Fake          bool
+	CorrelationID string
 }
 
 type NextUp struct {
@@ -103,6 +110,17 @@ type TalkMemory struct {
 	Summary   string
 	Phrases   []string
 	CreatedAt time.Time
+}
+
+type TalkSegment struct {
+	ID            int64
+	Kind          string
+	StartedAt     time.Time
+	DurationS     int32
+	Script        string
+	BacksellTitle string
+	PromiseTitle  string
+	CorrelationID string
 }
 
 type Track struct {

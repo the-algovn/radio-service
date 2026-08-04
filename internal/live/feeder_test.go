@@ -20,6 +20,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/showlog"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -1872,4 +1873,105 @@ func TestPlanNextPinnedRequestMissingIsDiscarded(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, p.skip)
 	require.True(t, p.consumedNextUp)
+}
+
+// blockingSegments blocks Append until release is closed, then records.
+type blockingSegments struct {
+	release chan struct{}
+	entered atomic.Bool // set BEFORE blocking, so a never-called Append is detectable
+	mu      sync.Mutex
+	got     []showlog.Talk
+}
+
+func (b *blockingSegments) Append(_ context.Context, t showlog.Talk) error {
+	b.entered.Store(true)
+	<-b.release
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.got = append(b.got, t)
+	return nil
+}
+
+func (b *blockingSegments) seen() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.got)
+}
+
+func (b *blockingSegments) seen1() bool { return b.seen() == 1 }
+
+// newTalkSegmentFeeder mirrors TestTalkClipAirsBetweenTracks' setup, plus the
+// new dep. segs may be nil (feature absent).
+func newTalkSegmentFeeder(t *testing.T, segs TalkRecorder) (*Feeder, *fakeClock, *fakeProducer, *fakeTalkSource) {
+	t.Helper()
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	clipPath := writeClipFile(t, t.TempDir(), chunkBytes*2) // 0.5s of PCM
+	talk := &fakeTalkSource{minFinished: 1, clips: []Clip{{
+		Path: clipPath, DurationS: 0.5, Kind: ClipSeam,
+		Script: "chào buổi tối", BacksellTitle: "Lạc Trôi",
+		PromiseTitle: "Chạy Ngay Đi", CorrelationID: "corr-1",
+	}}}
+	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
+	f.d.Talk = talk
+	f.d.TalkSegments = segs
+	return f, clk, prod, talk
+}
+
+func TestAirClipRecordsTheSegment(t *testing.T) {
+	segs := &blockingSegments{release: make(chan struct{})}
+	close(segs.release) // not blocking for this case
+	f, clk, prod, _ := newTalkSegmentFeeder(t, segs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2) // track, then dj
+
+	require.Eventually(t, segs.seen1, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	segs.mu.Lock()
+	defer segs.mu.Unlock()
+	require.Equal(t, "corr-1", segs.got[0].CorrelationID)
+	require.Equal(t, ClipSeam, segs.got[0].Kind)
+	require.Equal(t, "Lạc Trôi", segs.got[0].BacksellTitle)
+	require.Equal(t, "Chạy Ngay Đi", segs.got[0].PromiseTitle)
+}
+
+func TestAirClipIsNotDelayedByASlowSegmentStore(t *testing.T) {
+	// airClip is the ONE boundary deliberately built with no I/O — feeder.go
+	// says so: "a clip is already on disk, so airing one costs no fetch". A
+	// synchronous insert here would let a pool stall starve the encoder, and
+	// "best-effort error handling" catches a returned error, not a hang.
+	segs := &blockingSegments{release: make(chan struct{})} // never released here
+	t.Cleanup(func() { close(segs.release) })
+	f, clk, prod, _ := newTalkSegmentFeeder(t, segs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+
+	// The third frame is the track AFTER the clip: reaching it proves the clip
+	// aired to completion while Append is still blocked.
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 3)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+	require.Eventually(t, func() bool { return segs.entered.Load() },
+		2*time.Second, 10*time.Millisecond,
+		"Append was never entered — the write may not be happening")
+}
+
+func TestNilTalkSegmentsWritesNothing(t *testing.T) {
+	f, clk, prod, _ := newTalkSegmentFeeder(t, nil) // nil = feature absent
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 3) // must not panic
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
 }
