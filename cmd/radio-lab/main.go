@@ -33,6 +33,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/artifact"
 	"github.com/the-algovn/radio-service/internal/audit"
 	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/broadcast"
 	"github.com/the-algovn/radio-service/internal/config"
 	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/ingest"
@@ -43,6 +44,7 @@ import (
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/server"
+	"github.com/the-algovn/radio-service/internal/showlog"
 	"github.com/the-algovn/radio-service/internal/spend"
 	"github.com/the-algovn/radio-service/internal/station"
 	"github.com/the-algovn/radio-service/internal/talkmem"
@@ -108,6 +110,12 @@ func main() {
 		retDays = 30
 	}
 	auditStore := audit.NewPGStore(pool, time.Duration(retDays)*24*time.Hour)
+
+	// The show log shares the audit store's retention window on purpose: its
+	// provenance is a join against llm_call, so a segment outliving its call
+	// would silently lose model, tokens and cost.
+	showLog := showlog.NewPGStore(pool, time.Duration(retDays)*24*time.Hour)
+	sessions := broadcast.NewPGStore(pool)
 
 	// MinIO artifact store
 	store, err := artifact.NewS3Store(artifact.S3Config{
@@ -282,9 +290,9 @@ func main() {
 		Fetch:   store.FetchToFile,
 		Decoder: live.NewFFDecoder(), Encoder: live.NewFFEncoder(),
 		Producer: producer, Clock: live.RealClock(), Dir: hlsDir, Logger: logger,
-		Talk: talk,
+		Talk: talk, TalkSegments: showLog,
 	})
-	engine := live.NewEngine(feeder, nil, logger)
+	engine := live.NewEngine(feeder, sessions, logger)
 	go func() {
 		if err := engine.Run(ctx); err != nil {
 			logger.ErrorContext(ctx, "engine exited", "err", err)
