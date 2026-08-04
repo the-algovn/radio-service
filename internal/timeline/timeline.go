@@ -19,10 +19,21 @@ import (
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
-// Segment kinds. "track" and "unknown" are projection-only; the two talk
-// kinds mirror showlog.KindSeam / showlog.KindStationID by value (and those
-// in turn mirror live.ClipSeam / live.ClipStationID). Redeclared rather than
-// imported so this package depends on neither live nor showlog.
+// Segment kinds — the WIRE vocabulary, which is not the stored vocabulary.
+//
+//	stored (talk_segment.kind)   wire (here)
+//	"seam"                    -> KindDJ        "dj"      <- a deliberate RENAME
+//	"station_id"              -> KindStationID "station_id"  <- same value
+//	(air_log rows)            -> KindTrack     "track"
+//	(synthesised by the walk) -> KindUnknown   "unknown"
+//
+// So KindStationID mirrors showlog.KindStationID / live.ClipStationID by value,
+// but KindDJ deliberately does NOT mirror showlog.KindSeam — "seam" names the
+// boundary a clip is inserted at, which is engine vocabulary a console reader
+// has no use for. The translation happens at the single read site.
+//
+// Redeclared rather than imported so this package depends on neither live nor
+// showlog.
 const (
 	KindTrack     = "track"
 	KindDJ        = "dj"
