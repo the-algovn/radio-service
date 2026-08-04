@@ -24,7 +24,7 @@ func (s *PGStore) Record(ctx context.Context, r Rec) error {
 	q := db.New(s.pool)
 	if err := q.InsertLLMCall(ctx, db.InsertLLMCallParams{
 		Ts: r.TS, Label: r.Label, CorrelationID: r.CorrelationID,
-			Model: r.Model, Provider: r.Provider,
+		Model: r.Model, Provider: r.Provider,
 		SystemPrompt: r.System, UserPrompt: r.User, Output: r.Output,
 		InTokens: int32(r.InTokens), OutTokens: int32(r.OutTokens), CostUsd: r.CostUSD,
 		LatencyMs: int32(r.LatencyMS), Error: r.Error, Fake: r.Fake,
