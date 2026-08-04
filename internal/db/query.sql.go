@@ -185,7 +185,14 @@ SET ended_at = COALESCE(
        FROM (SELECT started_at, duration_s FROM air_log
              UNION ALL
              SELECT started_at, duration_s FROM talk_segment) s
-       WHERE s.started_at >= b.started_at),
+       WHERE s.started_at >= b.started_at
+         -- Upper bound: the next session's start. Without this, items from a
+         -- newer session would inflate this session's ended_at, silently
+         -- misdrawing the console's timeline dividers.
+         AND s.started_at < COALESCE(
+           (SELECT min(b2.started_at) FROM broadcast_session b2
+            WHERE b2.started_at > b.started_at),
+           'infinity'::timestamptz)),
       b.started_at)
 WHERE b.ended_at IS NULL
 `
