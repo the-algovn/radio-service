@@ -266,3 +266,39 @@ DELETE FROM talk_memory WHERE created_at < $1;
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
        duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
 FROM request WHERE id = $1;
+
+-- name: InsertTalkSegment :exec
+INSERT INTO talk_segment (kind, started_at, duration_s, script,
+                          backsell_title, promise_title, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: PruneTalkSegments :exec
+DELETE FROM talk_segment WHERE started_at < sqlc.arg(before);
+
+-- name: OpenBroadcastSession :exec
+INSERT INTO broadcast_session (started_at) VALUES (sqlc.arg(started_at));
+
+-- name: CloseOpenBroadcastSessions :exec
+UPDATE broadcast_session SET ended_at = sqlc.arg(ended_at) WHERE ended_at IS NULL;
+
+-- name: CloseOrphanBroadcastSessions :execrows
+-- Boot reconciliation. A pod killed while on air never runs GoOffAir, so its
+-- row stays open forever and `ended_at IS NULL` stops identifying the CURRENT
+-- session. Close every open row at the end of the last item that aired inside
+-- it, falling back to its own start when nothing did.
+UPDATE broadcast_session b
+SET ended_at = COALESCE(
+      (SELECT max(s.started_at + make_interval(secs => s.duration_s))
+       FROM (SELECT started_at, duration_s FROM air_log
+             UNION ALL
+             SELECT started_at, duration_s FROM talk_segment) s
+       WHERE s.started_at >= b.started_at),
+      b.started_at)
+WHERE b.ended_at IS NULL;
+
+-- name: OverlappingBroadcastSessions :many
+SELECT id, started_at, ended_at FROM broadcast_session
+WHERE started_at <= sqlc.arg(to_ts)
+  AND (ended_at IS NULL OR ended_at >= sqlc.arg(from_ts))
+ORDER BY started_at DESC
+LIMIT sqlc.arg(lim);

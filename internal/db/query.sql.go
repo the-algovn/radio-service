@@ -169,6 +169,39 @@ func (q *Queries) ClearNextUp(ctx context.Context) error {
 	return err
 }
 
+const closeOpenBroadcastSessions = `-- name: CloseOpenBroadcastSessions :exec
+UPDATE broadcast_session SET ended_at = $1 WHERE ended_at IS NULL
+`
+
+func (q *Queries) CloseOpenBroadcastSessions(ctx context.Context, endedAt *time.Time) error {
+	_, err := q.db.Exec(ctx, closeOpenBroadcastSessions, endedAt)
+	return err
+}
+
+const closeOrphanBroadcastSessions = `-- name: CloseOrphanBroadcastSessions :execrows
+UPDATE broadcast_session b
+SET ended_at = COALESCE(
+      (SELECT max(s.started_at + make_interval(secs => s.duration_s))
+       FROM (SELECT started_at, duration_s FROM air_log
+             UNION ALL
+             SELECT started_at, duration_s FROM talk_segment) s
+       WHERE s.started_at >= b.started_at),
+      b.started_at)
+WHERE b.ended_at IS NULL
+`
+
+// Boot reconciliation. A pod killed while on air never runs GoOffAir, so its
+// row stays open forever and `ended_at IS NULL` stops identifying the CURRENT
+// session. Close every open row at the end of the last item that aired inside
+// it, falling back to its own start when nothing did.
+func (q *Queries) CloseOrphanBroadcastSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, closeOrphanBroadcastSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countLLMCalls = `-- name: CountLLMCalls :one
 SELECT count(*) FROM llm_call
 WHERE ($1::text = ''
@@ -555,6 +588,35 @@ func (q *Queries) InsertTalkMemory(ctx context.Context, arg InsertTalkMemoryPara
 	return err
 }
 
+const insertTalkSegment = `-- name: InsertTalkSegment :exec
+INSERT INTO talk_segment (kind, started_at, duration_s, script,
+                          backsell_title, promise_title, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+
+type InsertTalkSegmentParams struct {
+	Kind          string
+	StartedAt     time.Time
+	DurationS     int32
+	Script        string
+	BacksellTitle string
+	PromiseTitle  string
+	CorrelationID string
+}
+
+func (q *Queries) InsertTalkSegment(ctx context.Context, arg InsertTalkSegmentParams) error {
+	_, err := q.db.Exec(ctx, insertTalkSegment,
+		arg.Kind,
+		arg.StartedAt,
+		arg.DurationS,
+		arg.Script,
+		arg.BacksellTitle,
+		arg.PromiseTitle,
+		arg.CorrelationID,
+	)
+	return err
+}
+
 const insertTrack = `-- name: InsertTrack :exec
 INSERT INTO track (yt_id, title, channel, duration_s, artifact_id, input_i, input_tp, input_lra, tail_silence_s, tail_decay_s, song_key)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -635,9 +697,26 @@ type ListLLMCallsParams struct {
 	Lim         int32
 }
 
+type ListLLMCallsRow struct {
+	ID           int64
+	Ts           time.Time
+	Label        string
+	Model        string
+	Provider     string
+	SystemPrompt string
+	UserPrompt   string
+	Output       string
+	InTokens     int32
+	OutTokens    int32
+	CostUsd      float64
+	LatencyMs    int32
+	Error        string
+	Fake         bool
+}
+
 // label_filter: "" = all; a value ending in ':' ("script:", "programmer:", "director:")
 // matches that whole call-site group by prefix; anything else is an exact match.
-func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]LlmCall, error) {
+func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]ListLLMCallsRow, error) {
 	rows, err := q.db.Query(ctx, listLLMCalls,
 		arg.LabelFilter,
 		arg.ErrorsOnly,
@@ -648,9 +727,9 @@ func (q *Queries) ListLLMCalls(ctx context.Context, arg ListLLMCallsParams) ([]L
 		return nil, err
 	}
 	defer rows.Close()
-	items := []LlmCall{}
+	items := []ListLLMCallsRow{}
 	for rows.Next() {
-		var i LlmCall
+		var i ListLLMCallsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Ts,
@@ -1007,6 +1086,49 @@ func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequ
 	return i, err
 }
 
+const openBroadcastSession = `-- name: OpenBroadcastSession :exec
+INSERT INTO broadcast_session (started_at) VALUES ($1)
+`
+
+func (q *Queries) OpenBroadcastSession(ctx context.Context, startedAt time.Time) error {
+	_, err := q.db.Exec(ctx, openBroadcastSession, startedAt)
+	return err
+}
+
+const overlappingBroadcastSessions = `-- name: OverlappingBroadcastSessions :many
+SELECT id, started_at, ended_at FROM broadcast_session
+WHERE started_at <= $1
+  AND (ended_at IS NULL OR ended_at >= $2)
+ORDER BY started_at DESC
+LIMIT $3
+`
+
+type OverlappingBroadcastSessionsParams struct {
+	ToTs   time.Time
+	FromTs *time.Time
+	Lim    int32
+}
+
+func (q *Queries) OverlappingBroadcastSessions(ctx context.Context, arg OverlappingBroadcastSessionsParams) ([]BroadcastSession, error) {
+	rows, err := q.db.Query(ctx, overlappingBroadcastSessions, arg.ToTs, arg.FromTs, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BroadcastSession{}
+	for rows.Next() {
+		var i BroadcastSession
+		if err := rows.Scan(&i.ID, &i.StartedAt, &i.EndedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pendingRequestIDs = `-- name: PendingRequestIDs :many
 SELECT id::text AS id FROM request WHERE status IN ('approved', 'ready')
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id
@@ -1117,6 +1239,15 @@ DELETE FROM talk_memory WHERE created_at < $1
 
 func (q *Queries) PruneTalkMemory(ctx context.Context, createdAt time.Time) error {
 	_, err := q.db.Exec(ctx, pruneTalkMemory, createdAt)
+	return err
+}
+
+const pruneTalkSegments = `-- name: PruneTalkSegments :exec
+DELETE FROM talk_segment WHERE started_at < $1
+`
+
+func (q *Queries) PruneTalkSegments(ctx context.Context, before time.Time) error {
+	_, err := q.db.Exec(ctx, pruneTalkSegments, before)
 	return err
 }
 
