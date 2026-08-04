@@ -357,4 +357,4 @@ ORDER BY s.started_at DESC, s.id DESC
 LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
 
 -- name: CountShowSegments :one
-SELECT (SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment);
+SELECT ((SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment))::int8;

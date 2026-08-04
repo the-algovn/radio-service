@@ -274,12 +274,12 @@ func (q *Queries) CountRequestsSince(ctx context.Context, arg CountRequestsSince
 }
 
 const countShowSegments = `-- name: CountShowSegments :one
-SELECT (SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment)
+SELECT ((SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment))::int8
 `
 
-func (q *Queries) CountShowSegments(ctx context.Context) (int32, error) {
+func (q *Queries) CountShowSegments(ctx context.Context) (int64, error) {
 	row := q.db.QueryRow(ctx, countShowSegments)
-	var column_1 int32
+	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
 }

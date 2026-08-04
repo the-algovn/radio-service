@@ -118,4 +118,26 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 	})
+
+	t.Run("equal timestamps order is stable and repeatable", func(t *testing.T) {
+		// When music and talk share the exact same StartedAt, and IDs are
+		// not unique across origins, the backend must still produce a
+		// deterministic order — otherwise paging could skip or repeat a row.
+		base := time.Date(2026, 8, 4, 22, 0, 0, 0, time.UTC)
+		s := newStore(t, []showlog.Segment{
+			{Origin: showlog.OriginAir, Kind: "track", Title: "Music", StartedAt: base},
+		})
+		require.NoError(t, s.Append(ctx, showlog.Talk{
+			Kind: showlog.KindSeam, StartedAt: base, DurationS: 10,
+			Script: "Talk",
+		}))
+
+		first, err := s.Recent(ctx, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, first, 2)
+
+		second, err := s.Recent(ctx, 10, 0)
+		require.NoError(t, err)
+		require.Equal(t, first, second, "same input must produce the same order every time")
+	})
 }

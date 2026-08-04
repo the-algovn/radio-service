@@ -69,6 +69,5 @@ func (s *PGStore) Recent(ctx context.Context, limit, offset int) ([]Segment, err
 }
 
 func (s *PGStore) Count(ctx context.Context) (int64, error) {
-	n, err := db.New(s.pool).CountShowSegments(ctx)
-	return int64(n), err
+	return db.New(s.pool).CountShowSegments(ctx)
 }

@@ -51,7 +51,18 @@ func (m *MemStore) merged(ctx context.Context) ([]Segment, error) {
 		}
 		got = append(got, ms...)
 	}
-	sort.SliceStable(got, func(i, j int) bool { return got[i].StartedAt.After(got[j].StartedAt) })
+	sort.SliceStable(got, func(i, j int) bool {
+		if !got[i].StartedAt.Equal(got[j].StartedAt) {
+			return got[i].StartedAt.After(got[j].StartedAt)
+		}
+		if got[i].ID != got[j].ID {
+			return got[i].ID > got[j].ID
+		}
+		// ID is not unique across origins: talk rows get sequential IDs while
+		// injected music segments carry whatever the caller set. OriginTalk
+		// before OriginAir makes the ordering deterministic for every input.
+		return got[i].Origin == OriginTalk && got[j].Origin == OriginAir
+	})
 	return got, nil
 }
 
