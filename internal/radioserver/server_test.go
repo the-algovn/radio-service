@@ -513,3 +513,112 @@ func TestGetShowTimelineTalkRowMapsScriptProvenance(t *testing.T) {
 	require.Empty(t, music.GetModel())
 	require.Empty(t, music.GetCorrelationId())
 }
+
+func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
+	now := time.Now()
+	// 5 segments: [airing (newest), s1, s2, s3, s4].
+	// limit=2, so page 0 gets [airing, s1] and page 1 gets [s2, s3].
+	// total_past must be 4 on both pages, not 4 then 5.
+	airingSeg := showlog.Segment{
+		ID: 1, Origin: showlog.OriginAir, Kind: "track",
+		YTID: "airing", Title: "Airing", Artist: "A",
+		StartedAt: now.Add(-30 * time.Second), DurationS: 180,
+	}
+	segs := []showlog.Segment{
+		airingSeg,
+		{ID: 2, Origin: showlog.OriginAir, Kind: "track", YTID: "y2", Title: "Past 1", StartedAt: now.Add(-5 * time.Minute), DurationS: 200},
+		{ID: 3, Origin: showlog.OriginAir, Kind: "track", YTID: "y3", Title: "Past 2", StartedAt: now.Add(-10 * time.Minute), DurationS: 180},
+		{ID: 4, Origin: showlog.OriginAir, Kind: "track", YTID: "y4", Title: "Past 3", StartedAt: now.Add(-15 * time.Minute), DurationS: 240},
+		{ID: 5, Origin: showlog.OriginAir, Kind: "track", YTID: "y5", Title: "Past 4", StartedAt: now.Add(-20 * time.Minute), DurationS: 180},
+	}
+	lib := library.NewMemLibrary()
+	for _, sg := range segs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: sg.YTID, Title: sg.Title, Channel: sg.Artist,
+			DurationS: float64(sg.DurationS), ArtifactID: "a-" + sg.YTID,
+		}))
+	}
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	// page 0: offset=0, limit=2 → returns [airing, Past 1].
+	// airing excluded from past, so past = [Past 1], total_past = 4.
+	resp0, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	require.NotNil(t, resp0.GetAiring())
+	require.Equal(t, "Airing", resp0.GetAiring().GetTitle())
+	require.Len(t, resp0.GetPast(), 1)
+	require.Equal(t, "Past 1", resp0.GetPast()[0].GetTitle())
+	require.Equal(t, int64(4), resp0.GetTotalPast())
+
+	// page 1: offset=2, limit=2 → returns [Past 2, Past 3].
+	// airing not in page, but still detected; total_past still 4.
+	resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.NotNil(t, resp1.GetAiring()) // present because detected independently
+	require.Len(t, resp1.GetPast(), 2)
+	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
+	require.Equal(t, "Past 3", resp1.GetPast()[1].GetTitle())
+	require.Equal(t, int64(4), resp1.GetTotalPast()) // stable across pages
+}
+
+func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {
+	now := time.Now()
+	// On air but between items: newest row's end is already in the past.
+	// airing must be absent and total_past == total on all offsets.
+	segs := []showlog.Segment{
+		{ID: 1, Origin: showlog.OriginAir, Kind: "track", YTID: "y1", Title: "Past 0", StartedAt: now.Add(-4 * time.Minute), DurationS: 180},
+		{ID: 2, Origin: showlog.OriginAir, Kind: "track", YTID: "y2", Title: "Past 1", StartedAt: now.Add(-8 * time.Minute), DurationS: 200},
+		{ID: 3, Origin: showlog.OriginAir, Kind: "track", YTID: "y3", Title: "Past 2", StartedAt: now.Add(-12 * time.Minute), DurationS: 180},
+	}
+	lib := library.NewMemLibrary()
+	for _, sg := range segs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: sg.YTID, Title: sg.Title, Channel: sg.Artist,
+			DurationS: float64(sg.DurationS), ArtifactID: "a-" + sg.YTID,
+		}))
+	}
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	// offset=0: airing absent, total_past = total = 3.
+	resp0, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	require.Nil(t, resp0.GetAiring())
+	require.Len(t, resp0.GetPast(), 2)
+	require.Equal(t, int64(3), resp0.GetTotalPast())
+
+	// offset=2: still no airing, still total_past = 3.
+	resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.Nil(t, resp1.GetAiring())
+	require.Len(t, resp1.GetPast(), 1)
+	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
+	require.Equal(t, int64(3), resp1.GetTotalPast()) // stable across pages
+}

@@ -587,21 +587,31 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 		return nil, status.Errorf(codes.Internal, "show log count: %v", err)
 	}
 
-	// 3. Detect airing: the newest segment in the page whose interval contains
-	// now. When offset > 0 the airing row (always the newest overall) isn't
-	// in the page, so airing stays nil — and total_past reflects that.
+	// 3. Detect airing independently of the page, so total_past is the same
+	// answer for every offset. One extra indexed, single-row read.
+	newest, err := s.deps.ShowLog.Recent(ctx, 1, 0)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "show log recent: %v", err)
+	}
 	var airing *showlog.Segment
-	past := make([]showlog.Segment, 0, len(segs))
-	for i := range segs {
-		if airing == nil && segs[i].StartedAt.Add(time.Duration(segs[i].DurationS)*time.Second).After(now) {
-			airing = &segs[i]
-			continue // excluded from past
+	if len(newest) > 0 {
+		n := newest[0]
+		if n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
+			airing = &n
 		}
-		past = append(past, segs[i])
 	}
 	totalPast := total
 	if airing != nil {
 		totalPast--
+	}
+
+	// Build past, excluding the airing row when it is in the page (offset == 0).
+	past := make([]showlog.Segment, 0, len(segs))
+	for i := range segs {
+		if airing != nil && segs[i].ID == airing.ID && segs[i].Origin == airing.Origin {
+			continue
+		}
+		past = append(past, segs[i])
 	}
 
 	// 4. Committed next-up. Empty YTID means NOT committed (ClearNextUp writes
