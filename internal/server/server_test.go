@@ -541,6 +541,38 @@ func TestGenerateScriptStillAcceptsTheDeprecatedTypedBrief(t *testing.T) {
 	require.Contains(t, spy.user, `"type":"seam"`)
 }
 
+func TestListLLMCallsCorrelationFilter(t *testing.T) {
+	aud := audit.NewMemStore()
+	ctx := context.Background()
+
+	// Seed two LLM calls with different correlation IDs.
+	require.NoError(t, aud.Record(ctx, audit.Rec{
+		ID: 1, TS: time.Now(), Label: "script:seam", Provider: "google", Model: "gemini",
+		System: "s", User: "u", Output: "o", InTokens: 10, OutTokens: 5, CostUSD: 0.001,
+		LatencyMS: 200, CorrelationID: "corr-a",
+	}))
+	require.NoError(t, aud.Record(ctx, audit.Rec{
+		ID: 2, TS: time.Now(), Label: "callin", Provider: "anthropic", Model: "sonnet",
+		System: "s2", User: "u2", Output: "o2", InTokens: 20, OutTokens: 10, CostUSD: 0.002,
+		LatencyMS: 400, CorrelationID: "corr-b",
+	}))
+
+	s := New(Deps{Audit: aud})
+
+	// Filter to corr-a: only one row.
+	resp, err := s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{CorrelationId: "corr-a"})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), resp.GetTotal())
+	require.Len(t, resp.GetCalls(), 1)
+	require.Equal(t, int64(1), resp.GetCalls()[0].GetId())
+
+	// Empty filter: both rows.
+	resp2, err2 := s.ListLLMCalls(ctx, &radiolabv1.ListLLMCallsRequest{})
+	require.NoError(t, err2)
+	require.Equal(t, int64(2), resp2.GetTotal())
+	require.Len(t, resp2.GetCalls(), 2)
+}
+
 // promptSpyModel records what it was asked, and returns a valid script.
 type promptSpyModel struct {
 	system, user, label string
