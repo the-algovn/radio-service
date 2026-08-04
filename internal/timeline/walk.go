@@ -86,6 +86,18 @@ func medianOr(s State) int {
 	return FallbackMedianS
 }
 
+// pinRequestReady checks whether a pinned request is still ready to air.
+// Returns the matching item when found and its status is ready; absent or
+// non-ready rows are unusable — the engine consumes and skips the pin.
+func pinRequestReady(pending []request.Item, requestID string) (request.Item, bool) {
+	for _, it := range pending {
+		if it.ID == requestID {
+			return it, it.Status == request.StatusReady
+		}
+	}
+	return request.Item{}, false
+}
+
 // anchorFresh runs the SAME test live's Take runs: identity plus a one-second
 // tolerance. A clip failing it is discarded at Take, so reporting it as
 // `prepared` would promise a break that cannot air.
@@ -136,23 +148,24 @@ func buildStaging(s State) []Segment {
 func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, sessionHasMusic bool,
 	finishedSinceSeam int, lastStationID time.Time, idx int) (Segment, bool) {
 
-	if lastWasBreak || !sessionHasMusic {
+	if lastWasBreak {
 		return Segment{}, false
 	}
 
-	// prepared: the director has a rendered clip ready to hand over at the
-	// next seam. Only valid on the first iteration (the slot can only be
-	// consumed once) and only when its anchor is still fresh.
-	if first && s.Dir.HasClip && anchorFresh(s) {
-		return Segment{
-			SegmentID:      fmt.Sprintf("proj:prep:%d", idx),
-			Kind:           s.Dir.ClipKind,
-			Certainty:      CertaintyPrepared,
-			DurationS:      int(math.Round(s.Dir.ClipDurationS)),
-			BacksellTitle:  s.Dir.ClipBacksellTitle,
-			PromiseTitle:   s.Dir.ClipPromiseTitle,
-			CorrelationID:  s.Dir.ClipCorrelationID,
-		}, true
+	// Prepared clip: station_id is always fresh (no anchor needed);
+	// seam clips must pass the anchor-freshness test Take applies.
+	if first && s.Dir.HasClip {
+		if s.Dir.ClipKind == KindStationID || anchorFresh(s) {
+			return Segment{
+				SegmentID:      fmt.Sprintf("proj:prep:%d", idx),
+				Kind:           s.Dir.ClipKind,
+				Certainty:      CertaintyPrepared,
+				DurationS:      int(math.Round(s.Dir.ClipDurationS)),
+				BacksellTitle:  s.Dir.ClipBacksellTitle,
+				PromiseTitle:   s.Dir.ClipPromiseTitle,
+				CorrelationID:  s.Dir.ClipCorrelationID,
+			}, true
+		}
 	}
 
 	// due breaks are suppressed by the gate (budget, no listeners, etc.).
@@ -161,7 +174,9 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 		return Segment{}, false
 	}
 
-	// station ID wins when both it and a seam are due.
+	// Station ID wins when both it and a seam are due, and is evaluated
+	// even when no music has aired yet — the engine's Take only
+	// anchor-checks seam clips, not station IDs.
 	if s.Station.DJ.StationIDMin > 0 {
 		if clock.Sub(lastStationID) >= time.Duration(s.Station.DJ.StationIDMin)*time.Minute {
 			return Segment{
@@ -174,9 +189,11 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 		}
 	}
 
-	// seam due: the +1 counts the currently-airing track, which the
-	// engine's TrackFinished call will increment before the next boundary
-	// (so finishedSinceSeam was N, will become N+1 before the boundary).
+	// Seam due — only when sessionHasMusic: a seam clip at session start
+	// always fails the anchor check against the zero Entry taken by Take.
+	if !sessionHasMusic {
+		return Segment{}, false
+	}
 	if s.Station.DJ.BreakEvery > 0 && finishedSinceSeam+1 >= s.Station.DJ.BreakEvery {
 		return Segment{
 			SegmentID: fmt.Sprintf("proj:due:%d", idx),
@@ -194,23 +211,49 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 // feeder's pin), then the ready queue, then an anonymous unknown block
 // sized from the median track length.
 func musicArm(s State, clock time.Time, pinConsumed *bool, ready *[]request.Item, idx int) Segment {
-	// committed next-up — the feeder's arm 1. Consumes the pin exactly once.
+	// Committed next-up — the feeder's arm 1. The engine ALWAYS consumes
+	// the pin (consumedNextUp is set regardless of outcome). A shuffle pin
+	// (no RequestID) is always usable; a request pin is usable only when the
+	// request is still ready — otherwise the engine skips it and re-plans.
 	if s.NextUp != nil && !*pinConsumed {
 		*pinConsumed = true
 		dur := medianOr(s)
 		if d, ok := s.Durations[s.NextUp.YTID]; ok {
 			dur = d
 		}
-		return Segment{
-			SegmentID: "pin:" + s.NextUp.YTID,
-			Kind:      KindTrack,
-			Certainty: CertaintyCommitted,
-			Title:     s.NextUp.Title,
-			YTID:      s.NextUp.YTID,
-			Artist:    s.NextUp.Channel,
-			StartedAt: clock,
-			DurationS: dur,
+		// Shuffle pin — always usable.
+		if s.NextUp.RequestID == "" {
+			return Segment{
+				SegmentID: "pin:" + s.NextUp.YTID,
+				Kind:      KindTrack,
+				Certainty: CertaintyCommitted,
+				Title:     s.NextUp.Title,
+				YTID:      s.NextUp.YTID,
+				Artist:    s.NextUp.Channel,
+				StartedAt: clock,
+				DurationS: dur,
+			}
 		}
+		// Request pin — only usable when the request is still ready.
+		// The engine looks up the request and skips the pin when the row is
+		// absent (already aired/failed) or not ready (cancelled/approved).
+		if it, ok := pinRequestReady(s.Pending, s.NextUp.RequestID); ok {
+			return Segment{
+				SegmentID:       "pin:" + s.NextUp.YTID,
+				Kind:            KindTrack,
+				Certainty:       CertaintyCommitted,
+				Title:           s.NextUp.Title,
+				YTID:            s.NextUp.YTID,
+				Artist:          s.NextUp.Channel,
+				StartedAt:       clock,
+				DurationS:       dur,
+				Source:          it.Source,
+				RequestedByName: it.DisplayName,
+				Reason:          it.Reason,
+				RequestID:       it.ID,
+			}
+		}
+		// Unusable pin: fall through to the ready queue in the same iteration.
 	}
 
 	// ready queue head — the feeder's arm 2.

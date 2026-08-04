@@ -223,6 +223,72 @@ func TestSegmentIDsAreUniqueAndStable(t *testing.T) {
 	}
 }
 
+// Fix 1: unusable pinned request //
+
+func TestUnusablePinWithMissingRequestFallsToReadyQueue(t *testing.T) {
+	s := liveState()
+	s.NextUp = &schedule.NextUp{YTID: "pin", Title: "Phantom", RequestID: "ghost"}
+	s.Pending = []request.Item{{ID: "r1", YTID: "y1", Title: "Queued", Status: request.StatusReady}}
+	s.Durations = map[string]int{"pin": 200, "y1": 200}
+	up, _, _ := timeline.Project(s)
+	first := firstOfKind(t, up, timeline.KindTrack)
+	require.Equal(t, "Queued", first.Title)
+	require.Equal(t, timeline.CertaintyProjected, first.Certainty)
+}
+
+func TestUnusablePinWithApprovedRequestFallsToReadyQueue(t *testing.T) {
+	s := liveState()
+	s.NextUp = &schedule.NextUp{YTID: "pin", Title: "Pending", RequestID: "r9"}
+	s.Pending = []request.Item{
+		{ID: "r9", YTID: "pin", Title: "Pending", Status: request.StatusApproved},
+		{ID: "r1", YTID: "y1", Title: "Ready", Status: request.StatusReady},
+	}
+	s.Durations = map[string]int{"pin": 200, "y1": 200}
+	up, _, _ := timeline.Project(s)
+	require.Equal(t, "Ready", firstOfKind(t, up, timeline.KindTrack).Title)
+}
+
+func TestUsablePinWithReadyRequestCarriesProvenance(t *testing.T) {
+	s := liveState()
+	s.NextUp = &schedule.NextUp{YTID: "pin", Title: "Promised", RequestID: "r7"}
+	s.Pending = []request.Item{
+		{ID: "r7", YTID: "pin", Title: "Promised",
+			Source: request.SourceAI, DisplayName: "DJ", Reason: "it slaps",
+			Status: request.StatusReady},
+	}
+	s.Durations = map[string]int{"pin": 200}
+	up, _, _ := timeline.Project(s)
+	first := firstOfKind(t, up, timeline.KindTrack)
+	require.Equal(t, timeline.CertaintyCommitted, first.Certainty)
+	require.Equal(t, "Promised", first.Title)
+	require.Equal(t, request.SourceAI, first.Source)
+	require.Equal(t, "DJ", first.RequestedByName)
+	require.Equal(t, "it slaps", first.Reason)
+	require.Equal(t, "r7", first.RequestID)
+}
+
+// Fix 2: station ID may open a session //
+
+func TestStationIDOpensSessionWhenNoMusicHasAired(t *testing.T) {
+	s := liveState()
+	s.Airing = nil
+	s.Station.DJ.StationIDMin = 3
+	s.Dir.LastStationID = base.Add(-5 * time.Minute)
+	up, _, _ := timeline.Project(s)
+	require.Equal(t, timeline.KindStationID, up[0].Kind)
+}
+
+func TestSeamDueIsSkippedWhenNoMusicHasAired(t *testing.T) {
+	s := liveState()
+	s.Airing = nil
+	s.Dir.FinishedSinceSeam = 1
+	s.Station.DJ.StationIDMin = 20
+	s.Dir.LastStationID = base
+	up, _, _ := timeline.Project(s)
+	require.NotEqual(t, timeline.KindDJ, up[0].Kind)
+	require.NotEqual(t, timeline.KindStationID, up[0].Kind)
+}
+
 // helpers
 
 func isBreak(s timeline.Segment) bool {
