@@ -54,12 +54,30 @@ func TestGatePrecedence(t *testing.T) {
 			want: timeline.GateBudget,
 		},
 		{
+			name: "budget outranks no listeners even when both fail",
+			st: timeline.State{
+				Station: onAir(), Dir: timeline.DirectorSnapshot{Present: true},
+				Listeners: 0, SpentUSD: 5, BudgetUSD: 5,
+			},
+			want: timeline.GateBudget,
+		},
+		{
+			// Budget genuinely satisfied, so no listeners is the only gate
+			// left — and, being last, the one to act on.
 			name: "no listeners is the last real gate",
 			st: timeline.State{
 				Station: onAir(), Dir: timeline.DirectorSnapshot{Present: true},
 				Listeners: 0, SpentUSD: 0, BudgetUSD: 5,
 			},
 			want: timeline.GateNoListeners,
+		},
+		{
+			name: "zero budget means unlimited, not instantly exceeded",
+			st: timeline.State{
+				Station: onAir(), Dir: timeline.DirectorSnapshot{Present: true},
+				Listeners: 1, SpentUSD: 500, BudgetUSD: 0,
+			},
+			want: timeline.GateOK,
 		},
 		{
 			name: "everything satisfied",
