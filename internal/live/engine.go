@@ -21,7 +21,7 @@ import (
 type BroadcastSessions interface {
 	Open(ctx context.Context, at time.Time) error
 	Close(ctx context.Context, at time.Time) error
-	CloseOrphans(ctx context.Context) (int64, error)
+	CloseOrphans(ctx context.Context, at time.Time) (int64, error)
 }
 
 // Engine supervises broadcast sessions: it waits for a Poke (radioserver's
@@ -53,7 +53,7 @@ func (e *Engine) Poke() {
 func (e *Engine) Run(ctx context.Context) error {
 	// Boot reconciliation, BEFORE any session can be opened.
 	if e.sessions != nil {
-		if n, err := e.sessions.CloseOrphans(ctx); err != nil {
+		if n, err := e.sessions.CloseOrphans(ctx, e.f.d.Clock.Now()); err != nil {
 			e.logger.ErrorContext(ctx, "closing orphan broadcast sessions failed", "err", err)
 		} else if n > 0 {
 			e.logger.InfoContext(ctx, "closed orphan broadcast sessions", "n", n)

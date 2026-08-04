@@ -82,7 +82,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		s := newStore(t)
 		require.NoError(t, s.Open(ctx, base))
 
-		n, err := s.CloseOrphans(ctx)
+		n, err := s.CloseOrphans(ctx, base)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), n)
 
@@ -91,7 +91,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].EndedAt, "boot reconciliation must leave no open row")
 
-		n, err = s.CloseOrphans(ctx)
+		n, err = s.CloseOrphans(ctx, base)
 		require.NoError(t, err)
 		require.Zero(t, n, "a second run must find nothing left to close")
 	})

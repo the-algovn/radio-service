@@ -33,7 +33,7 @@ func (f *fakeSessions) Close(_ context.Context, at time.Time) error {
 	return nil
 }
 
-func (f *fakeSessions) CloseOrphans(_ context.Context) (int64, error) {
+func (f *fakeSessions) CloseOrphans(_ context.Context, _ time.Time) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.order = append(f.order, "orphans")

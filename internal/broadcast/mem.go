@@ -38,14 +38,18 @@ func (m *MemStore) Close(_ context.Context, at time.Time) error {
 
 // CloseOrphans has no air log to consult in memory, so it closes each open
 // session at its own start — the same fallback the SQL uses when nothing
-// aired inside the session.
-func (m *MemStore) CloseOrphans(_ context.Context) (int64, error) {
+// aired inside the session — then clamps to at for parity with the PG store.
+func (m *MemStore) CloseOrphans(_ context.Context, at time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
 	for i := range m.sessions {
 		if m.sessions[i].EndedAt == nil {
 			end := m.sessions[i].StartedAt
+			// started_at <= at always in practice, but clamp for parity.
+			if at.Before(end) {
+				end = at
+			}
 			m.sessions[i].EndedAt = &end
 			n++
 		}

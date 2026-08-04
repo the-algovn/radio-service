@@ -36,7 +36,7 @@ type Store interface {
 	// CloseOrphans closes sessions left open by a process that died on air,
 	// at the end of the last item that aired inside them. Returns how many
 	// were closed. Call once at boot, BEFORE any session can be opened.
-	CloseOrphans(ctx context.Context) (int64, error)
+	CloseOrphans(ctx context.Context, at time.Time) (int64, error)
 	// Overlapping returns sessions intersecting [from, to], newest first.
 	// limit <= 0 means defaultLimit, never unbounded.
 	Overlapping(ctx context.Context, from, to time.Time, limit int) ([]Session, error)

@@ -26,8 +26,8 @@ func (s *PGStore) Close(ctx context.Context, at time.Time) error {
 	return db.New(s.pool).CloseOpenBroadcastSessions(ctx, &at)
 }
 
-func (s *PGStore) CloseOrphans(ctx context.Context) (int64, error) {
-	return db.New(s.pool).CloseOrphanBroadcastSessions(ctx)
+func (s *PGStore) CloseOrphans(ctx context.Context, at time.Time) (int64, error) {
+	return db.New(s.pool).CloseOrphanBroadcastSessions(ctx, &at)
 }
 
 func (s *PGStore) Overlapping(ctx context.Context, from, to time.Time, limit int) ([]Session, error) {

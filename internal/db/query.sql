@@ -288,21 +288,29 @@ UPDATE broadcast_session SET ended_at = sqlc.arg(ended_at) WHERE ended_at IS NUL
 -- row stays open forever and `ended_at IS NULL` stops identifying the CURRENT
 -- session. Close every open row at the end of the last item that aired inside
 -- it, falling back to its own start when nothing did.
+--
+-- The LEAST clamp caps the reconciled end at the instant reconciliation runs:
+-- a process killed mid-item wrote the item's INTENDED duration at start, so
+-- started_at + duration_s can overshoot the kill by up to one whole item. The
+-- true kill time is unrecoverable afterwards, but the session provably ended
+-- no later than NOW — clamp to that.
 UPDATE broadcast_session b
-SET ended_at = COALESCE(
-      (SELECT max(s.started_at + make_interval(secs => s.duration_s))
-       FROM (SELECT started_at, duration_s FROM air_log
-             UNION ALL
-             SELECT started_at, duration_s FROM talk_segment) s
-       WHERE s.started_at >= b.started_at
-         -- Upper bound: the next session's start. Without this, items from a
-         -- newer session would inflate this session's ended_at, silently
-         -- misdrawing the console's timeline dividers.
-         AND s.started_at < COALESCE(
-           (SELECT min(b2.started_at) FROM broadcast_session b2
-            WHERE b2.started_at > b.started_at),
-           'infinity'::timestamptz)),
-      b.started_at)
+SET ended_at = LEAST(
+      COALESCE(
+        (SELECT max(s.started_at + make_interval(secs => s.duration_s))
+         FROM (SELECT started_at, duration_s FROM air_log
+               UNION ALL
+               SELECT started_at, duration_s FROM talk_segment) s
+         WHERE s.started_at >= b.started_at
+           -- Upper bound: the next session's start. Without this, items from a
+           -- newer session would inflate this session's ended_at, silently
+           -- misdrawing the console's timeline dividers.
+           AND s.started_at < COALESCE(
+             (SELECT min(b2.started_at) FROM broadcast_session b2
+              WHERE b2.started_at > b.started_at),
+             'infinity'::timestamptz)),
+        b.started_at),
+      sqlc.arg(at))
 WHERE b.ended_at IS NULL;
 
 -- name: OverlappingBroadcastSessions :many
