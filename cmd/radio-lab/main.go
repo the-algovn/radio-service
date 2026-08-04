@@ -284,7 +284,7 @@ func main() {
 		Producer: producer, Clock: live.RealClock(), Dir: hlsDir, Logger: logger,
 		Talk: talk,
 	})
-	engine := live.NewEngine(feeder, logger)
+	engine := live.NewEngine(feeder, nil, logger)
 	go func() {
 		if err := engine.Run(ctx); err != nil {
 			logger.ErrorContext(ctx, "engine exited", "err", err)
