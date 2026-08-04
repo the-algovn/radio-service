@@ -359,6 +359,8 @@ func main() {
 		Location:  loc,
 		Skipper:   feeder,
 		Ledger:    ledger,
+		ShowLog:   showLog,
+		Sessions:  sessions,
 		BudgetUSD: budget,
 		TTS:       ttsClient,
 	}
