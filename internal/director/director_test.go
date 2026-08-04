@@ -288,6 +288,47 @@ func TestRunOnceOnAirTransitionResetsStationIDTimer(t *testing.T) {
 	f.dr.mu.Unlock()
 }
 
+func TestSnapshotCopiesTheSlotAndNeverLeaksIt(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	dr.slot = &live.Clip{Path: "/tmp/x.pcm", Kind: live.ClipSeam, DurationS: 12, CorrelationID: "c1"}
+
+	snap := dr.Snapshot()
+	require.True(t, snap.Present)
+	require.True(t, snap.HasClip)
+	require.Equal(t, "c1", snap.ClipCorrelationID)
+
+	dr.slot = nil // simulate Take
+	require.True(t, snap.HasClip, "the snapshot must be a value copy, not a view")
+}
+
+func TestSnapshotDoesNotMutateTheFormatClock(t *testing.T) {
+	dr, clk := newCoreDirector(t)
+	dr.finishedSinceSeam = 3
+	dr.lastStationID = clk.Now()
+	before := dr.finishedSinceSeam
+
+	_ = dr.Snapshot()
+	require.Equal(t, before, dr.finishedSinceSeam)
+}
+
+func TestSnapshotIsRaceFreeWithTake(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	done := make(chan struct{})
+	go func() {
+		for range 200 {
+			_ = dr.Snapshot()
+		}
+		close(done)
+	}()
+	for range 200 {
+		dr.mu.Lock()
+		dr.slot = &live.Clip{Path: "/nonexistent", Kind: live.ClipStationID}
+		dr.mu.Unlock()
+		_, _ = dr.Take(live.Entry{})
+	}
+	<-done
+}
+
 func TestRunExitsOnCancel(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	ctx, cancel := context.WithCancel(context.Background())

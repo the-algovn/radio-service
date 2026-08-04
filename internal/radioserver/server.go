@@ -17,6 +17,7 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
+	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
@@ -71,6 +72,11 @@ type Ledger interface {
 	SpentSince(ctx context.Context, since time.Time) (float64, error)
 }
 
+// Breaks exposes the director's cadence state read-only. Narrow and local,
+// matching Notifier/Skipper/Ledger — radioserver has no business calling the
+// director's mutating methods.
+type Breaks interface{ Snapshot() director.Snapshot }
+
 type Deps struct {
 	Store     station.Store
 	Log       live.AirLog
@@ -86,6 +92,7 @@ type Deps struct {
 	Location  *time.Location // station-local civil day for daily quotas; nil → UTC
 	Skipper   Skipper
 	Ledger    Ledger
+	Breaks    Breaks
 	BudgetUSD float64
 	TTS       ttsv1.TTSServiceClient // voice catalog membership for UpdateDJSettings
 }
