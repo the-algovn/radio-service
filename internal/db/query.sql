@@ -353,7 +353,9 @@ FROM (
     WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
   ) c ON true
 ) s
-ORDER BY s.started_at DESC, s.id DESC
+-- s.origin DESC puts 'talk' before 'air' (talk > air lexically),
+-- matching MemStore.merged's total-order comparator.
+ORDER BY s.started_at DESC, s.id DESC, s.origin DESC
 LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
 
 -- name: CountShowSegments :one

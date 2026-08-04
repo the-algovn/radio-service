@@ -119,25 +119,27 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Len(t, got, 1)
 	})
 
-	t.Run("equal timestamps order is stable and repeatable", func(t *testing.T) {
-		// When music and talk share the exact same StartedAt, and IDs are
-		// not unique across origins, the backend must still produce a
-		// deterministic order — otherwise paging could skip or repeat a row.
+	t.Run("equal timestamps with colliding ids resolves on origin", func(t *testing.T) {
+		// air_log.id and talk_segment.id are independent BIGSERIAL sequences,
+		// so ids genuinely coexist in both tables. When a pair shares both
+		// started_at and id, the origin column is the only tiebreaker.
+		// 'talk' > 'air' lexically, so ORDER BY origin DESC puts talk first.
 		base := time.Date(2026, 8, 4, 22, 0, 0, 0, time.UTC)
+		// The factory seeds both rows with id=1 and the same timestamp.
+		// MemStore's first Append naturally assigns id=1; the PG harness
+		// inserts with explicit id=1.
 		s := newStore(t, []showlog.Segment{
-			{Origin: showlog.OriginAir, Kind: "track", Title: "Music", StartedAt: base},
+			{ID: 1, Origin: showlog.OriginAir, Kind: "track", Title: "Music", StartedAt: base},
 		})
-		require.NoError(t, s.Append(ctx, showlog.Talk{
-			Kind: showlog.KindSeam, StartedAt: base, DurationS: 10,
-			Script: "Talk",
-		}))
-
-		first, err := s.Recent(ctx, 10, 0)
+		got, err := s.Recent(ctx, 10, 0)
 		require.NoError(t, err)
-		require.Len(t, first, 2)
+		require.Len(t, got, 2)
+		require.Equal(t, showlog.OriginTalk, got[0].Origin, "origin tiebreak: talk before air on id collision")
+		require.Equal(t, showlog.OriginAir, got[1].Origin)
 
-		second, err := s.Recent(ctx, 10, 0)
+		// Must be stable across calls.
+		got2, err := s.Recent(ctx, 10, 0)
 		require.NoError(t, err)
-		require.Equal(t, first, second, "same input must produce the same order every time")
+		require.Equal(t, got, got2, "same input must produce the same order every time")
 	})
 }

@@ -30,11 +30,26 @@ func TestPGStoreContract(t *testing.T) {
 	runStoreContract(t, func(t *testing.T, music []showlog.Segment) showlog.Store {
 		pool := newPGPool(t)
 		for _, m := range music {
-			_, err := pool.Exec(context.Background(),
-				`INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				m.YTID, m.Title, m.Artist, m.StartedAt, m.DurationS)
-			require.NoError(t, err)
+			if m.ID != 0 {
+				_, err := pool.Exec(context.Background(),
+					`INSERT INTO air_log (id, yt_id, title, artist, started_at, duration_s)
+					 VALUES ($1, $2, $3, $4, $5, $6)`,
+					m.ID, m.YTID, m.Title, m.Artist, m.StartedAt, m.DurationS)
+				require.NoError(t, err)
+				// Seed a talk_segment with the same id and timestamp so the
+				// origin column is the only tiebreaker (tests ORDER BY origin DESC).
+				_, err = pool.Exec(context.Background(),
+					`INSERT INTO talk_segment (id, kind, started_at, duration_s)
+					 VALUES ($1, 'seam', $2, 10)`,
+					m.ID, m.StartedAt)
+				require.NoError(t, err)
+			} else {
+				_, err := pool.Exec(context.Background(),
+					`INSERT INTO air_log (yt_id, title, artist, started_at, duration_s)
+					 VALUES ($1, $2, $3, $4, $5)`,
+					m.YTID, m.Title, m.Artist, m.StartedAt, m.DurationS)
+				require.NoError(t, err)
+			}
 		}
 		// 0 retention = never prune, so the contract's timings are its own.
 		return showlog.NewPGStore(pool, 0)

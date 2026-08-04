@@ -1335,7 +1335,7 @@ FROM (
     WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
   ) c ON true
 ) s
-ORDER BY s.started_at DESC, s.id DESC
+ORDER BY s.started_at DESC, s.id DESC, s.origin DESC
 LIMIT $2 OFFSET $1
 `
 
@@ -1375,6 +1375,8 @@ type RecentShowSegmentsRow struct {
 // script validation loop retries once), so a plain join would emit the talk
 // segment twice. Summing also gives the break's TRUE cost rather than only the
 // winning attempt's.
+// s.origin DESC puts 'talk' before 'air' (talk > air lexically),
+// matching MemStore.merged's total-order comparator.
 func (q *Queries) RecentShowSegments(ctx context.Context, arg RecentShowSegmentsParams) ([]RecentShowSegmentsRow, error) {
 	rows, err := q.db.Query(ctx, recentShowSegments, arg.Off, arg.Lim)
 	if err != nil {
