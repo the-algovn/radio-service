@@ -1878,11 +1878,13 @@ func TestPlanNextPinnedRequestMissingIsDiscarded(t *testing.T) {
 // blockingSegments blocks Append until release is closed, then records.
 type blockingSegments struct {
 	release chan struct{}
+	entered atomic.Bool // set BEFORE blocking, so a never-called Append is detectable
 	mu      sync.Mutex
 	got     []showlog.Talk
 }
 
 func (b *blockingSegments) Append(_ context.Context, t showlog.Talk) error {
+	b.entered.Store(true)
 	<-b.release
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1958,6 +1960,9 @@ func TestAirClipIsNotDelayedByASlowSegmentStore(t *testing.T) {
 	pumpFrames(t, clk, prod, done, TopicNowPlaying, 3)
 	cancel()
 	require.NoError(t, drive(t, clk, done, 100))
+	require.Eventually(t, func() bool { return segs.entered.Load() },
+		2*time.Second, 10*time.Millisecond,
+		"Append was never entered — the write may not be happening")
 }
 
 func TestNilTalkSegmentsWritesNothing(t *testing.T) {
