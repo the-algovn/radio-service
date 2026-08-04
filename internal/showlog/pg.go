@@ -41,3 +41,34 @@ func (s *PGStore) Append(ctx context.Context, t Talk) error {
 	}
 	return nil
 }
+
+func (s *PGStore) Recent(ctx context.Context, limit, offset int) ([]Segment, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := db.New(s.pool).RecentShowSegments(ctx, db.RecentShowSegmentsParams{
+		Lim: int32(clampLimit(limit)), Off: int32(offset),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Segment, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Segment{
+			ID: r.ID, Origin: r.Origin, Kind: r.Kind, YTID: r.YtID,
+			Title: r.Title, Artist: r.Artist, StartedAt: r.StartedAt,
+			DurationS: int(r.DurationS), Source: r.Source,
+			RequestedByName: r.RequestedByName, Reason: r.Reason,
+			Script: r.Script, BacksellTitle: r.BacksellTitle,
+			PromiseTitle: r.PromiseTitle, CorrelationID: r.CorrelationID,
+			Model: r.Model, InTokens: int(r.InTokens), OutTokens: int(r.OutTokens),
+			CostUSD: r.CostUsd, LatencyMS: int(r.LatencyMs),
+		})
+	}
+	return out, nil
+}
+
+func (s *PGStore) Count(ctx context.Context) (int64, error) {
+	n, err := db.New(s.pool).CountShowSegments(ctx)
+	return int64(n), err
+}

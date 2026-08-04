@@ -273,6 +273,17 @@ func (q *Queries) CountRequestsSince(ctx context.Context, arg CountRequestsSince
 	return count, err
 }
 
+const countShowSegments = `-- name: CountShowSegments :one
+SELECT (SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment)
+`
+
+func (q *Queries) CountShowSegments(ctx context.Context) (int32, error) {
+	row := q.db.QueryRow(ctx, countShowSegments)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countTracks = `-- name: CountTracks :one
 SELECT count(*)
 FROM track
@@ -1284,6 +1295,120 @@ func (q *Queries) RecentAirLogYTIDs(ctx context.Context, limit int32) ([]string,
 			return nil, err
 		}
 		items = append(items, yt_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recentShowSegments = `-- name: RecentShowSegments :many
+SELECT s.origin, s.id, s.kind, s.yt_id, s.title, s.artist, s.started_at,
+       s.duration_s, s.source, s.requested_by_name, s.reason,
+       s.script, s.backsell_title, s.promise_title, s.correlation_id,
+       s.model, s.in_tokens, s.out_tokens, s.cost_usd, s.latency_ms
+FROM (
+  SELECT 'air'::text AS origin, a.id, 'track'::text AS kind,
+         a.yt_id, a.title, a.artist, a.started_at, a.duration_s,
+         a.source, a.requested_by_name, a.reason,
+         ''::text AS script, ''::text AS backsell_title, ''::text AS promise_title,
+         ''::text AS correlation_id, ''::text AS model,
+         0::int AS in_tokens, 0::int AS out_tokens,
+         0::double precision AS cost_usd, 0::int AS latency_ms
+  FROM air_log a
+  UNION ALL
+  SELECT 'talk'::text, t.id, t.kind,
+         ''::text, ''::text, ''::text, t.started_at, t.duration_s,
+         ''::text, ''::text, ''::text,
+         t.script, t.backsell_title, t.promise_title,
+         t.correlation_id, COALESCE(c.model, ''),
+         COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0),
+         COALESCE(c.cost_usd, 0), COALESCE(c.latency_ms, 0)
+  FROM talk_segment t
+  LEFT JOIN LATERAL (
+    SELECT (array_agg(l.model ORDER BY l.ts DESC, l.id DESC))[1] AS model,
+           SUM(l.in_tokens)::int              AS in_tokens,
+           SUM(l.out_tokens)::int             AS out_tokens,
+           SUM(l.cost_usd)::double precision  AS cost_usd,
+           SUM(l.latency_ms)::int             AS latency_ms
+    FROM llm_call l
+    WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
+  ) c ON true
+) s
+ORDER BY s.started_at DESC, s.id DESC
+LIMIT $2 OFFSET $1
+`
+
+type RecentShowSegmentsParams struct {
+	Off int32
+	Lim int32
+}
+
+type RecentShowSegmentsRow struct {
+	Origin          string
+	ID              int64
+	Kind            string
+	YtID            string
+	Title           string
+	Artist          string
+	StartedAt       time.Time
+	DurationS       int32
+	Source          string
+	RequestedByName string
+	Reason          string
+	Script          string
+	BacksellTitle   string
+	PromiseTitle    string
+	CorrelationID   string
+	Model           string
+	InTokens        int32
+	OutTokens       int32
+	CostUsd         float64
+	LatencyMs       int32
+}
+
+// The merged show log: music from air_log, talk from talk_segment, newest
+// first, with LLM provenance for talk rows that made a call.
+//
+// The provenance side is a LATERAL AGGREGATE, not a plain LEFT JOIN, and that
+// is load-bearing: one director prepare can write TWO llm_call rows (the
+// script validation loop retries once), so a plain join would emit the talk
+// segment twice. Summing also gives the break's TRUE cost rather than only the
+// winning attempt's.
+func (q *Queries) RecentShowSegments(ctx context.Context, arg RecentShowSegmentsParams) ([]RecentShowSegmentsRow, error) {
+	rows, err := q.db.Query(ctx, recentShowSegments, arg.Off, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RecentShowSegmentsRow{}
+	for rows.Next() {
+		var i RecentShowSegmentsRow
+		if err := rows.Scan(
+			&i.Origin,
+			&i.ID,
+			&i.Kind,
+			&i.YtID,
+			&i.Title,
+			&i.Artist,
+			&i.StartedAt,
+			&i.DurationS,
+			&i.Source,
+			&i.RequestedByName,
+			&i.Reason,
+			&i.Script,
+			&i.BacksellTitle,
+			&i.PromiseTitle,
+			&i.CorrelationID,
+			&i.Model,
+			&i.InTokens,
+			&i.OutTokens,
+			&i.CostUsd,
+			&i.LatencyMs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

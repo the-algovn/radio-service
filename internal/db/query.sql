@@ -311,3 +311,50 @@ WHERE started_at <= sqlc.arg(to_ts)
   AND (ended_at IS NULL OR ended_at >= sqlc.arg(from_ts))
 ORDER BY started_at DESC
 LIMIT sqlc.arg(lim);
+
+-- name: RecentShowSegments :many
+-- The merged show log: music from air_log, talk from talk_segment, newest
+-- first, with LLM provenance for talk rows that made a call.
+--
+-- The provenance side is a LATERAL AGGREGATE, not a plain LEFT JOIN, and that
+-- is load-bearing: one director prepare can write TWO llm_call rows (the
+-- script validation loop retries once), so a plain join would emit the talk
+-- segment twice. Summing also gives the break's TRUE cost rather than only the
+-- winning attempt's.
+SELECT s.origin, s.id, s.kind, s.yt_id, s.title, s.artist, s.started_at,
+       s.duration_s, s.source, s.requested_by_name, s.reason,
+       s.script, s.backsell_title, s.promise_title, s.correlation_id,
+       s.model, s.in_tokens, s.out_tokens, s.cost_usd, s.latency_ms
+FROM (
+  SELECT 'air'::text AS origin, a.id, 'track'::text AS kind,
+         a.yt_id, a.title, a.artist, a.started_at, a.duration_s,
+         a.source, a.requested_by_name, a.reason,
+         ''::text AS script, ''::text AS backsell_title, ''::text AS promise_title,
+         ''::text AS correlation_id, ''::text AS model,
+         0::int AS in_tokens, 0::int AS out_tokens,
+         0::double precision AS cost_usd, 0::int AS latency_ms
+  FROM air_log a
+  UNION ALL
+  SELECT 'talk'::text, t.id, t.kind,
+         ''::text, ''::text, ''::text, t.started_at, t.duration_s,
+         ''::text, ''::text, ''::text,
+         t.script, t.backsell_title, t.promise_title,
+         t.correlation_id, COALESCE(c.model, ''),
+         COALESCE(c.in_tokens, 0), COALESCE(c.out_tokens, 0),
+         COALESCE(c.cost_usd, 0), COALESCE(c.latency_ms, 0)
+  FROM talk_segment t
+  LEFT JOIN LATERAL (
+    SELECT (array_agg(l.model ORDER BY l.ts DESC, l.id DESC))[1] AS model,
+           SUM(l.in_tokens)::int              AS in_tokens,
+           SUM(l.out_tokens)::int             AS out_tokens,
+           SUM(l.cost_usd)::double precision  AS cost_usd,
+           SUM(l.latency_ms)::int             AS latency_ms
+    FROM llm_call l
+    WHERE t.correlation_id <> '' AND l.correlation_id = t.correlation_id
+  ) c ON true
+) s
+ORDER BY s.started_at DESC, s.id DESC
+LIMIT sqlc.arg(lim) OFFSET sqlc.arg(off);
+
+-- name: CountShowSegments :one
+SELECT (SELECT count(*) FROM air_log) + (SELECT count(*) FROM talk_segment);
