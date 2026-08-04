@@ -114,13 +114,21 @@ func TestStaleAnchorEmitsNoPrepared(t *testing.T) {
 	require.NotEqual(t, timeline.CertaintyPrepared, up[0].Certainty)
 }
 
-func TestAiringTalkSkipsTheSeamArm(t *testing.T) {
+func TestAiringBreakBlocksEvenADueStationID(t *testing.T) {
+	// The airing item is a talk break, so lastWasBreak is true. That guard
+	// must block EVERY break — even a station ID that is genuinely due.
+	// sessionHasMusic is false (DJ is not music) and the station ID is
+	// wildly overdue, so the only thing standing between this state and
+	// a due station ID is the `lastWasBreak` early-return in seamArm.
 	s := liveState()
 	s.Airing = airing(timeline.KindDJ, 38)
-	s.Dir.FinishedSinceSeam = 99 // a break would otherwise be wildly overdue
+	s.Station.DJ.StationIDMin = 1
+	s.Dir.LastStationID = base.Add(-99 * time.Hour)
 	up, _, _ := timeline.Project(s)
 	require.NotEqual(t, timeline.KindDJ, up[0].Kind)
 	require.NotEqual(t, timeline.KindStationID, up[0].Kind)
+	// Confirm it actually emitted music, not just "not a break".
+	firstOfKind(t, up, timeline.KindTrack, timeline.KindUnknown)
 }
 
 func TestSeamDueFromCadence(t *testing.T) {

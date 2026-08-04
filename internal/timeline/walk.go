@@ -101,6 +101,13 @@ func pinRequestReady(pending []request.Item, requestID string) (request.Item, bo
 // anchorFresh runs the SAME test live's Take runs: identity plus a one-second
 // tolerance. A clip failing it is discarded at Take, so reporting it as
 // `prepared` would promise a break that cannot air.
+//
+// It compares against s.Airing (which may be a talk break), not the last
+// *music* entry like the engine's Take(justFinished). That is only sound
+// because seamArm returns early when the airing item is a break — anchorFresh
+// is never evaluated in that state. Removing that guard without carrying a
+// lastMusicYTID/lastMusicStartedAt through the walk would make this silently
+// wrong.
 func anchorFresh(s State) bool {
 	if s.Airing == nil || s.Dir.ClipAnchorYTID != s.Airing.YTID {
 		return false
