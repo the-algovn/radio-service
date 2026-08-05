@@ -198,7 +198,13 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 	// Station ID wins when both it and a seam are due, and is evaluated
 	// even when no music has aired yet — the engine's Take only
 	// anchor-checks seam clips, not station IDs.
-	if s.Station.DJ.StationIDMin > 0 && s.Dir.StationIDsAvailable {
+	// A zero lastStationID is "the director has not reset its clock yet", not
+	// "overdue since the epoch". dr.lastStationID is reset on the off→on
+	// transition inside RunOnce, driven by a 20s ticker, and GoOnAir pokes the
+	// feeder rather than the director — so for up to 20s after go-on-air the
+	// projector sees the zero value while the engine never does. Sub saturates
+	// rather than overflowing, making the test unconditionally true.
+	if s.Station.DJ.StationIDMin > 0 && s.Dir.StationIDsAvailable && !lastStationID.IsZero() {
 		if clock.Sub(lastStationID) >= time.Duration(s.Station.DJ.StationIDMin)*time.Minute {
 			return Segment{
 				SegmentID: fmt.Sprintf("proj:due:%d", idx),

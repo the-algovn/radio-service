@@ -193,6 +193,20 @@ func TestNoStationIDWhenTheDirectorHasNoLines(t *testing.T) {
 	}
 }
 
+func TestZeroLastStationIDIsNotOverdue(t *testing.T) {
+	// For up to 20s after go-on-air the director has not yet reset
+	// lastStationID (the reset rides its own ticker; GoOnAir pokes the feeder).
+	// time.Time.Sub saturates, so an unguarded comparison announces a station
+	// ID the engine has explicitly deferred by StationIDMin — which then
+	// vanishes from the console on the next poll.
+	s := liveState()
+	s.Dir.LastStationID = time.Time{}
+	up, _, _ := timeline.Project(s)
+	require.NotEmpty(t, up)
+	require.NotEqual(t, timeline.KindStationID, up[0].Kind,
+		"a station ID is not due before the director's clock has started")
+}
+
 func TestStationIDIsTestedAgainstTheWalkClockNotNow(t *testing.T) {
 	s := liveState()
 	s.Dir.FinishedSinceSeam = 0
