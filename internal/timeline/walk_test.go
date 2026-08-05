@@ -27,7 +27,7 @@ func liveState() timeline.State {
 		Now:     base.Add(90 * time.Second),
 		Station: station.Station{OnAir: true, AIEnabled: true, DJ: station.DJSettings{BreakEvery: 2, StationIDMin: 20}},
 		Airing:  airing(timeline.KindTrack, 240),
-		Dir:     timeline.DirectorSnapshot{Present: true, LastStationID: base},
+		Dir:     timeline.DirectorSnapshot{Present: true, LastStationID: base, StationIDsAvailable: true},
 		Listeners: 2, BudgetUSD: 5, MedianTrackS: 200,
 	}
 }
@@ -175,6 +175,22 @@ func TestStationIDWinsWhenBothDue(t *testing.T) {
 	s.Dir.LastStationID = base.Add(-60 * time.Minute)
 	up, _, _ := timeline.Project(s)
 	require.Equal(t, timeline.KindStationID, up[0].Kind)
+}
+
+func TestNoStationIDWhenTheDirectorHasNoLines(t *testing.T) {
+	// ids.available() is a term of the engine's dueKindLocked. With no usable
+	// station-ID lines the engine falls through to BreakEvery and airs a seam,
+	// so promising a station_id here would be the wrong kind, the wrong
+	// duration, and would shift every following StartedAt forever.
+	s := liveState()
+	s.Dir.FinishedSinceSeam = 5
+	s.Dir.LastStationID = base.Add(-60 * time.Minute) // wildly overdue
+	s.Dir.StationIDsAvailable = false
+	up, _, _ := timeline.Project(s)
+	for _, seg := range up {
+		require.NotEqual(t, timeline.KindStationID, seg.Kind,
+			"the director cannot produce a station ID it has no lines for")
+	}
 }
 
 func TestStationIDIsTestedAgainstTheWalkClockNotNow(t *testing.T) {

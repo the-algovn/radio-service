@@ -198,7 +198,7 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 	// Station ID wins when both it and a seam are due, and is evaluated
 	// even when no music has aired yet — the engine's Take only
 	// anchor-checks seam clips, not station IDs.
-	if s.Station.DJ.StationIDMin > 0 {
+	if s.Station.DJ.StationIDMin > 0 && s.Dir.StationIDsAvailable {
 		if clock.Sub(lastStationID) >= time.Duration(s.Station.DJ.StationIDMin)*time.Minute {
 			return Segment{
 				SegmentID: fmt.Sprintf("proj:due:%d", idx),

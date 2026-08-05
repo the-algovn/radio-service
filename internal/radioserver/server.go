@@ -707,6 +707,7 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 			ClipCorrelationID:   snap.ClipCorrelationID,
 			FinishedSinceSeam:   snap.FinishedSinceSeam,
 			LastStationID:       snap.LastStationID,
+			StationIDsAvailable: snap.StationIDsAvailable,
 		}
 	}
 

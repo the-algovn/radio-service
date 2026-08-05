@@ -95,6 +95,12 @@ type Snapshot struct {
 
 	FinishedSinceSeam int
 	LastStationID     time.Time
+
+	// StationIDsAvailable mirrors the ids.available() term of dueKindLocked.
+	// Without it a reader cannot reproduce the due test: with no usable
+	// station-ID lines the engine falls through to BreakEvery and airs a seam
+	// where a reader would expect a station_id.
+	StationIDsAvailable bool
 }
 
 // Director prepares talk breaks ahead of air and hands them to the feeder
@@ -298,6 +304,9 @@ func (dr *Director) Snapshot() Snapshot {
 		Present:           true,
 		FinishedSinceSeam: dr.finishedSinceSeam,
 		LastStationID:     dr.lastStationID,
+		// ids has its own mutex and is never held while taking dr.mu, so this
+		// is a len() under an uncontended lock — no I/O, no clock read.
+		StationIDsAvailable: dr.ids.available(),
 	}
 	if dr.slot != nil {
 		c := *dr.slot

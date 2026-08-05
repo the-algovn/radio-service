@@ -146,6 +146,11 @@ type DirectorSnapshot struct {
 
 	FinishedSinceSeam int
 	LastStationID     time.Time
+
+	// StationIDsAvailable is a term of the engine's due test: with no usable
+	// station-ID lines the engine falls through to BreakEvery and airs a seam
+	// where the projector would otherwise promise a station_id.
+	StationIDsAvailable bool
 }
 
 // State is everything Project needs, gathered once by the caller.
