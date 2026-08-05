@@ -714,7 +714,7 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 	// A read failure degrades to no markers; never fail the RPC.
 	var sessionMarkers []*radiov1.SessionMarker
 	if s.deps.Sessions != nil {
-		sessionMarkers = s.sessionMarkers(ctx, segs, past, airing, now, offset)
+		sessionMarkers = s.sessionMarkers(ctx, segs, airing, now)
 	}
 
 	// 10. Project the forward running order.
@@ -762,8 +762,8 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 
 // sessionMarkers queries broadcast sessions spanning the returned page.
 // A read error logs and returns nil — sessions are a degradation, not a failure.
-func (s *Server) sessionMarkers(ctx context.Context, segs, past []showlog.Segment, airing *showlog.Segment, now time.Time, offset int) []*radiov1.SessionMarker {
-	from := oldestStart(segs, past, airing, now)
+func (s *Server) sessionMarkers(ctx context.Context, segs []showlog.Segment, airing *showlog.Segment, now time.Time) []*radiov1.SessionMarker {
+	from := oldestStart(segs, airing, now)
 	to := now
 	sessions, err := s.deps.Sessions.Overlapping(ctx, from, to, 0)
 	if err != nil {
@@ -783,12 +783,8 @@ func (s *Server) sessionMarkers(ctx context.Context, segs, past []showlog.Segmen
 
 // oldestStart returns the earliest StartedAt in the page, for the sessions
 // query. Falls back to 12h ago when the page is empty.
-func oldestStart(segs, past []showlog.Segment, airing *showlog.Segment, now time.Time) time.Time {
-	// The page might segs or past; use the larger set.
+func oldestStart(segs []showlog.Segment, airing *showlog.Segment, now time.Time) time.Time {
 	candidates := segs
-	if len(past) > len(candidates) {
-		candidates = past
-	}
 	if len(candidates) == 0 && airing == nil {
 		return now.Add(-12 * time.Hour)
 	}
