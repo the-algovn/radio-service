@@ -273,6 +273,17 @@ func TestUsablePinWithReadyRequestCarriesProvenance(t *testing.T) {
 	require.Equal(t, "DJ", first.RequestedByName)
 	require.Equal(t, "it slaps", first.Reason)
 	require.Equal(t, "r7", first.RequestID)
+
+	// The pin's request is also a ready-queue row. The engine airs it once —
+	// MarkAired removes it before NextReady runs — so the walk must not
+	// project it again a few slots later.
+	seen := 0
+	for _, seg := range up {
+		if seg.RequestID == "r7" {
+			seen++
+		}
+	}
+	require.Equal(t, 1, seen, "a pinned ready request must be projected exactly once")
 }
 
 // Fix 3: ready queue skips unresolvable heads //

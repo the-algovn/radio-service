@@ -79,6 +79,16 @@ func readyOnly(items []request.Item) []request.Item {
 	return out
 }
 
+// removeRequest drops a request from the walk-local ready queue by ID.
+func removeRequest(ready *[]request.Item, id string) {
+	for i, it := range *ready {
+		if it.ID == id {
+			*ready = append((*ready)[:i:i], (*ready)[i+1:]...)
+			return
+		}
+	}
+}
+
 func medianOr(s State) int {
 	if s.MedianTrackS > 0 {
 		return s.MedianTrackS
@@ -247,6 +257,10 @@ func musicArm(s State, clock time.Time, pinConsumed *bool, ready *[]request.Item
 			}
 		} else if it, ok := pinRequestReady(s.Pending, s.NextUp.RequestID); ok {
 			// Request pin with a still-ready request and an existing track.
+			// The pin's row is by definition also in `ready` (both are the
+			// StatusReady test), so drop it: the engine's MarkAired removes it
+			// before NextReady runs, and leaving it would project it twice.
+			removeRequest(ready, it.ID)
 			return Segment{
 				SegmentID:       "pin:" + s.NextUp.YTID,
 				Kind:            KindTrack,
