@@ -178,6 +178,7 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 				Kind:           s.Dir.ClipKind,
 				Certainty:      CertaintyPrepared,
 				DurationS:      int(math.Round(s.Dir.ClipDurationS)),
+				StartedAt:      clock,
 				BacksellTitle:  s.Dir.ClipBacksellTitle,
 				PromiseTitle:   s.Dir.ClipPromiseTitle,
 				CorrelationID:  s.Dir.ClipCorrelationID,

@@ -201,6 +201,28 @@ func TestTimesAccumulateAndAreWholeSeconds(t *testing.T) {
 	}
 }
 
+func TestPreparedClipIsOnTheTimeAxis(t *testing.T) {
+	// A prepared clip is the item whose air time is best known, so it must
+	// carry StartedAt like every other emission. An empty StartedAt is the
+	// wire signal for the off-axis staging strip.
+	s := liveState()
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = timeline.KindDJ
+	s.Dir.ClipDurationS = 38
+	s.Dir.ClipAnchorYTID = "y1"
+	s.Dir.ClipAnchorStartedAt = base
+	s.Airing.YTID = "y1"
+	up, _, _ := timeline.Project(s)
+
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+	prevEnd := base.Add(240 * time.Second) // airing start + duration
+	for _, seg := range up {
+		require.False(t, seg.StartedAt.IsZero(), "every projected segment sits on the time axis")
+		require.True(t, seg.StartedAt.Equal(prevEnd), "each segment starts where the previous ended")
+		prevEnd = seg.StartedAt.Add(time.Duration(seg.DurationS) * time.Second)
+	}
+}
+
 func TestHorizonAndSegmentCap(t *testing.T) {
 	s := liveState()
 	up, _, _ := timeline.Project(s)
