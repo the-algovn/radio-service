@@ -348,7 +348,9 @@ func TestGetShowTimelineNilBreaksYieldsDjDisabled(t *testing.T) {
 }
 
 func TestGetShowTimelinePastExcludesAiringAndTotalPast(t *testing.T) {
-	now := time.Now()
+	// An hour past the store's on-air anchor, so every row below belongs to
+	// the current session — a row predating OnAirSince is not airing.
+	now := time.Now().Add(time.Hour)
 	// One airing track (started 30s ago, 180s long — still playing).
 	// Three finished tracks.
 	airingSeg := showlog.Segment{
@@ -383,6 +385,7 @@ func TestGetShowTimelinePastExcludesAiringAndTotalPast(t *testing.T) {
 		Library:   lib,
 		Listeners: live.NewMemListeners(time.Now),
 		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
 	})
 	ctx := context.Background()
 
@@ -515,7 +518,8 @@ func TestGetShowTimelineTalkRowMapsScriptProvenance(t *testing.T) {
 }
 
 func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
-	now := time.Now()
+	// An hour past the store's on-air anchor — see the note above.
+	now := time.Now().Add(time.Hour)
 	// 5 segments: [airing (newest), s1, s2, s3, s4].
 	// limit=2, so page 0 gets [airing, s1] and page 1 gets [s2, s3].
 	// total_past must be 4 on both pages, not 4 then 5.
@@ -551,6 +555,7 @@ func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
 		Library:   lib,
 		Listeners: live.NewMemListeners(time.Now),
 		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
 	})
 	ctx := context.Background()
 
@@ -573,6 +578,84 @@ func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
 	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
 	require.Equal(t, "Past 3", resp1.GetPast()[1].GetTitle())
 	require.Equal(t, int64(4), resp1.GetTotalPast()) // stable across pages
+}
+
+// A track cut short keeps its NOMINAL duration in air_log forever — nothing
+// ever amends the row — so arithmetic alone reports it airing long after the
+// audio stopped. Airing detection must consult the current session anchor.
+func TestGetShowTimelineStaleRowIsNotAiring(t *testing.T) {
+	ctx := context.Background()
+	// build serves exactly one show-log row, with the handler clock pinned.
+	build := func(t *testing.T, seg showlog.Segment, now time.Time, onAir bool) *Server {
+		t.Helper()
+		lib := library.NewMemLibrary()
+		require.NoError(t, lib.Add(ctx, library.Track{
+			YTID: seg.YTID, Title: seg.Title, DurationS: float64(seg.DurationS), ArtifactID: "a",
+		}))
+		st := station.NewMemStore()
+		if onAir {
+			_, err := st.GoOnAir(ctx)
+			require.NoError(t, err)
+		}
+		return newTimelineTestServer(t, Deps{
+			Store:     st,
+			ShowLog:   &fakeShowLog{segs: []showlog.Segment{seg}, count: 1},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+	}
+	// A row still nominally running an hour from now. GoOnAir, when the case
+	// asks for it, anchors the session AFTER this row started.
+	cutShort := func(t0 time.Time) showlog.Segment {
+		return showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Cut short", StartedAt: t0.Add(-5 * time.Minute), DurationS: 3600}
+	}
+
+	t.Run("off air", func(t *testing.T) {
+		t0 := time.Now()
+		s := build(t, cutShort(t0), t0, false)
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "an off-air station is airing nothing")
+		require.Len(t, resp.GetPast(), 1, "the cut track belongs in past")
+		require.Equal(t, "Cut short", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast())
+	})
+
+	t.Run("on air after a toggle", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		s := build(t, cutShort(t0), now, true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "the stale row is from the previous session")
+
+		// The phantom end would push the whole walk ~55 minutes out.
+		require.NotEmpty(t, resp.GetUpcoming())
+		startedAt, err := time.Parse(time.RFC3339, resp.GetUpcoming()[0].GetStartedAt())
+		require.NoError(t, err)
+		require.WithinDuration(t, now, startedAt, 2*time.Second,
+			"the next item starts now, not at the cut track's nominal end")
+	})
+
+	t.Run("genuinely airing", func(t *testing.T) {
+		// Guard against over-correction: a row started inside the current
+		// session and still running is airing.
+		t0 := time.Now()
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Now playing", StartedAt: t0.Add(30 * time.Minute), DurationS: 3600}
+		s := build(t, seg, t0.Add(time.Hour), true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetAiring())
+		require.Equal(t, "Now playing", resp.GetAiring().GetTitle())
+		require.Empty(t, resp.GetPast())
+		require.Equal(t, int64(0), resp.GetTotalPast())
+	})
 }
 
 func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {

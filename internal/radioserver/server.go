@@ -593,10 +593,17 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "show log recent: %v", err)
 	}
+	// The engine writes the NOMINAL duration at track start and never amends
+	// it, so a track cut short keeps a future end time forever. Arithmetic
+	// alone would report that row `airing` and — worse, once back on air —
+	// anchor the forward walk to a phantom end minutes from now. OnAirSince
+	// holds only the CURRENT session (see internal/broadcast), so a row that
+	// predates it belongs to a session that has already ended.
 	var airing *showlog.Segment
-	if len(newest) > 0 {
+	if len(newest) > 0 && st.OnAir && st.OnAirSince != nil {
 		n := newest[0]
-		if n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
+		if !n.StartedAt.Before(*st.OnAirSince) &&
+			n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
 			airing = &n
 		}
 	}
