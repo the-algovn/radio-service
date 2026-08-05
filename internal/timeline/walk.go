@@ -172,10 +172,13 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 	// Prepared clip: station_id is always fresh (no anchor needed);
 	// seam clips must pass the anchor-freshness test Take applies.
 	if first && s.Dir.HasClip {
-		if s.Dir.ClipKind == KindStationID || anchorFresh(s) {
+		// ClipKind is the ENGINE kind (live.ClipSeam / live.ClipStationID),
+		// which is not the wire vocabulary — translate before it ships.
+		kind := KindFromEngine(s.Dir.ClipKind)
+		if kind == KindStationID || anchorFresh(s) {
 			return Segment{
 				SegmentID:      fmt.Sprintf("proj:prep:%d", idx),
-				Kind:           s.Dir.ClipKind,
+				Kind:           kind,
 				Certainty:      CertaintyPrepared,
 				DurationS:      int(math.Round(s.Dir.ClipDurationS)),
 				StartedAt:      clock,

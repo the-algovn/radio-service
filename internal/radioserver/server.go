@@ -906,12 +906,5 @@ func showlogKindToTimeline(seg *showlog.Segment) string {
 	if seg.Origin == showlog.OriginAir {
 		return timeline.KindTrack
 	}
-	switch seg.Kind {
-	case showlog.KindSeam:
-		return timeline.KindDJ
-	case showlog.KindStationID:
-		return timeline.KindStationID
-	default:
-		return timeline.KindUnknown
-	}
+	return timeline.KindFromEngine(seg.Kind)
 }

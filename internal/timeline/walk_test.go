@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
 	"github.com/the-algovn/radio-service/internal/station"
@@ -92,7 +93,7 @@ func TestUnknownUsesFallbackMedianWhenUnset(t *testing.T) {
 func TestPreparedClipIsEmittedWithExactDuration(t *testing.T) {
 	s := liveState()
 	s.Dir.HasClip = true
-	s.Dir.ClipKind = timeline.KindDJ
+	s.Dir.ClipKind = live.ClipSeam // the ENGINE kind, which is what production supplies
 	s.Dir.ClipDurationS = 38
 	s.Dir.ClipAnchorYTID = "y1"
 	s.Dir.ClipAnchorStartedAt = base
@@ -100,12 +101,14 @@ func TestPreparedClipIsEmittedWithExactDuration(t *testing.T) {
 	up, _, _ := timeline.Project(s)
 	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
 	require.Equal(t, 38, up[0].DurationS)
+	require.Equal(t, timeline.KindDJ, up[0].Kind,
+		"the engine kind %q must be translated to the wire vocabulary", live.ClipSeam)
 }
 
 func TestStaleAnchorEmitsNoPrepared(t *testing.T) {
 	s := liveState()
 	s.Dir.HasClip = true
-	s.Dir.ClipKind = timeline.KindDJ
+	s.Dir.ClipKind = live.ClipSeam // the ENGINE kind, which is what production supplies
 	s.Dir.ClipDurationS = 38
 	s.Dir.ClipAnchorYTID = "y1"
 	s.Dir.ClipAnchorStartedAt = base.Add(5 * time.Second) // > AnchorTolerance
@@ -167,7 +170,7 @@ func TestGateSuppressesDueButNotPrepared(t *testing.T) {
 	}
 
 	s.Dir.HasClip = true
-	s.Dir.ClipKind = timeline.KindDJ
+	s.Dir.ClipKind = live.ClipSeam // the ENGINE kind, which is what production supplies
 	s.Dir.ClipDurationS = 30
 	s.Dir.ClipAnchorYTID = "y1"
 	s.Dir.ClipAnchorStartedAt = base
@@ -207,7 +210,7 @@ func TestPreparedClipIsOnTheTimeAxis(t *testing.T) {
 	// wire signal for the off-axis staging strip.
 	s := liveState()
 	s.Dir.HasClip = true
-	s.Dir.ClipKind = timeline.KindDJ
+	s.Dir.ClipKind = live.ClipSeam // the ENGINE kind, which is what production supplies
 	s.Dir.ClipDurationS = 38
 	s.Dir.ClipAnchorYTID = "y1"
 	s.Dir.ClipAnchorStartedAt = base

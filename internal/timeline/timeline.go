@@ -41,6 +41,22 @@ const (
 	KindUnknown   = "unknown"
 )
 
+// KindFromEngine translates an engine/stored talk kind (live.ClipSeam,
+// live.ClipStationID — same values as showlog.KindSeam/KindStationID) to the
+// wire vocabulary. It is the ONE translator: both read sites, the past path in
+// radioserver and the prepared-clip arm in the forward walk, go through here,
+// so "seam" can never reach a console.
+func KindFromEngine(kind string) string {
+	switch kind {
+	case "seam":
+		return KindDJ
+	case KindStationID:
+		return KindStationID
+	default:
+		return KindUnknown
+	}
+}
+
 // Certainty is the honesty contract. Only Aired and Airing are facts;
 // everything else is a claim of decreasing strength. Prepared is deliberately
 // NOT above Projected: a prepared clip can still evaporate at Take if its
