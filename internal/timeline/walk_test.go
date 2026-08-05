@@ -259,6 +259,17 @@ func TestHorizonAndSegmentCap(t *testing.T) {
 	require.LessOrEqual(t, len(up), timeline.MaxSegments)
 	last := up[len(up)-1]
 	require.True(t, last.StartedAt.Before(base.Add(240*time.Second + timeline.HorizonS*time.Second)))
+
+	// The cap is not redundant with the horizon. medianOr can return as little
+	// as 1s and BreakEvery has no lower bound, so on a short-track station the
+	// cap is the only thing that stops the walk — the case the assertion above
+	// never reaches, because liveState's ~15 segments are horizon-bound.
+	s.MedianTrackS = 1
+	up, _, _ = timeline.Project(s)
+	require.Len(t, up, timeline.MaxSegments, "the segment cap stops a short-track walk")
+	last = up[len(up)-1]
+	require.Less(t, last.StartedAt.Sub(base.Add(240*time.Second)), timeline.HorizonS*time.Second/2,
+		"the horizon must be nowhere near binding, or the cap is not what was tested")
 }
 
 func TestNothingAiringStartsAtNow(t *testing.T) {
