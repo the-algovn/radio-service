@@ -105,6 +105,33 @@ func TestPreparedClipIsEmittedWithExactDuration(t *testing.T) {
 		"the engine kind %q must be translated to the wire vocabulary", live.ClipSeam)
 }
 
+func TestOnlyOnePreparedClipAcrossTheHorizon(t *testing.T) {
+	// The director holds exactly ONE slotted clip. Without the `first` guard
+	// in seamArm it is emitted at every seam across the horizon, each copy
+	// carrying the same CorrelationID — one paid-for break rendered eight
+	// times at `prepared`, which is the fabrication the certainty ladder
+	// exists to prevent. This is the same composition hazard the walk
+	// documents for anchorFresh: the arm is only sound in the right state.
+	s := liveState()
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipSeam
+	s.Dir.ClipDurationS = 38
+	s.Dir.ClipAnchorYTID = "y1"
+	s.Dir.ClipAnchorStartedAt = base
+	s.Dir.ClipCorrelationID = "corr-1"
+	s.Airing.YTID = "y1"
+	up, _, _ := timeline.Project(s)
+
+	require.Greater(t, len(up), 3, "the walk must reach several seams or this asserts nothing")
+	prepared := 0
+	for _, seg := range up {
+		if seg.Certainty == timeline.CertaintyPrepared {
+			prepared++
+		}
+	}
+	require.Equal(t, 1, prepared, "the director's single clip must be projected once")
+}
+
 func TestStaleAnchorEmitsNoPrepared(t *testing.T) {
 	s := liveState()
 	s.Dir.HasClip = true
