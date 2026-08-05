@@ -24,10 +24,10 @@ func airing(kind string, dur int) *timeline.Segment {
 
 func liveState() timeline.State {
 	return timeline.State{
-		Now:     base.Add(90 * time.Second),
-		Station: station.Station{OnAir: true, AIEnabled: true, DJ: station.DJSettings{BreakEvery: 2, StationIDMin: 20}},
-		Airing:  airing(timeline.KindTrack, 240),
-		Dir:     timeline.DirectorSnapshot{Present: true, LastStationID: base, StationIDsAvailable: true},
+		Now:       base.Add(90 * time.Second),
+		Station:   station.Station{OnAir: true, AIEnabled: true, DJ: station.DJSettings{BreakEvery: 2, StationIDMin: 20}},
+		Airing:    airing(timeline.KindTrack, 240),
+		Dir:       timeline.DirectorSnapshot{Present: true, LastStationID: base, StationIDsAvailable: true},
 		Listeners: 2, BudgetUSD: 5, MedianTrackS: 200,
 	}
 }
@@ -288,7 +288,7 @@ func TestHorizonAndSegmentCap(t *testing.T) {
 	up, _, _ := timeline.Project(s)
 	require.LessOrEqual(t, len(up), timeline.MaxSegments)
 	last := up[len(up)-1]
-	require.True(t, last.StartedAt.Before(base.Add(240*time.Second + timeline.HorizonS*time.Second)))
+	require.True(t, last.StartedAt.Before(base.Add(240*time.Second+timeline.HorizonS*time.Second)))
 
 	// The cap is not redundant with the horizon. medianOr can return as little
 	// as 1s and BreakEvery has no lower bound, so on a short-track station the

@@ -177,14 +177,14 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 		kind := KindFromEngine(s.Dir.ClipKind)
 		if kind == KindStationID || anchorFresh(s) {
 			return Segment{
-				SegmentID:      fmt.Sprintf("proj:prep:%d", idx),
-				Kind:           kind,
-				Certainty:      CertaintyPrepared,
-				DurationS:      int(math.Round(s.Dir.ClipDurationS)),
-				StartedAt:      clock,
-				BacksellTitle:  s.Dir.ClipBacksellTitle,
-				PromiseTitle:   s.Dir.ClipPromiseTitle,
-				CorrelationID:  s.Dir.ClipCorrelationID,
+				SegmentID:     fmt.Sprintf("proj:prep:%d", idx),
+				Kind:          kind,
+				Certainty:     CertaintyPrepared,
+				DurationS:     int(math.Round(s.Dir.ClipDurationS)),
+				StartedAt:     clock,
+				BacksellTitle: s.Dir.ClipBacksellTitle,
+				PromiseTitle:  s.Dir.ClipPromiseTitle,
+				CorrelationID: s.Dir.ClipCorrelationID,
 			}, true
 		}
 	}
