@@ -348,8 +348,9 @@ func TestGetShowTimelineNilBreaksYieldsDjDisabled(t *testing.T) {
 }
 
 func TestGetShowTimelinePastExcludesAiringAndTotalPast(t *testing.T) {
-	// An hour past the store's on-air anchor, so every row below belongs to
-	// the current session — a row predating OnAirSince is not airing.
+	// The handler clock runs an hour past the store's on-air anchor. Nothing
+	// here turns on that gap — a music row's airing is pure arithmetic, session
+	// or no session (see TestGetShowTimelineAiringDetection).
 	now := time.Now().Add(time.Hour)
 	// One airing track (started 30s ago, 180s long — still playing).
 	// Three finished tracks.
@@ -580,10 +581,13 @@ func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
 	require.Equal(t, int64(4), resp1.GetTotalPast()) // stable across pages
 }
 
-// A track cut short keeps its NOMINAL duration in air_log forever — nothing
-// ever amends the row — so arithmetic alone reports it airing long after the
-// audio stopped. Airing detection must consult the current session anchor.
-func TestGetShowTimelineStaleRowIsNotAiring(t *testing.T) {
+// A row cut short keeps its NOMINAL duration forever — nothing ever amends it.
+// Off the air that makes arithmetic alone wrong. Back ON the air it does not:
+// the engine resumes the newest air_log row on exactly the same predicate (see
+// findBootResume/ResumeOffset in internal/live/feeder.go), so a music row that
+// predates OnAirSince really is playing. Talk is never resumed, so only it
+// needs the session anchor.
+func TestGetShowTimelineAiringDetection(t *testing.T) {
 	ctx := context.Background()
 	// build serves exactly one show-log row, with the handler clock pinned.
 	build := func(t *testing.T, seg showlog.Segment, now time.Time, onAir bool) *Server {
@@ -626,20 +630,43 @@ func TestGetShowTimelineStaleRowIsNotAiring(t *testing.T) {
 		require.Equal(t, int64(1), resp.GetTotalPast())
 	})
 
-	t.Run("on air after a toggle", func(t *testing.T) {
+	t.Run("on air after a toggle, the resumed track is still airing", func(t *testing.T) {
 		t0 := time.Now()
 		now := t0.Add(time.Minute)
-		s := build(t, cutShort(t0), now, true) // GoOnAir anchors at ~t0
+		seg := cutShort(t0)
+		s := build(t, seg, now, true) // GoOnAir anchors at ~t0
 		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
 		require.NoError(t, err)
-		require.Nil(t, resp.GetAiring(), "the stale row is from the previous session")
+		require.NotNil(t, resp.GetAiring(),
+			"ResumeOffset has not expired, so the engine resumes this track")
+		require.Equal(t, "Cut short", resp.GetAiring().GetTitle())
+		require.Empty(t, resp.GetPast())
+		require.Equal(t, int64(0), resp.GetTotalPast())
 
-		// The phantom end would push the whole walk ~55 minutes out.
+		// A resumed track is seeked to its wall-clock offset, so its nominal
+		// end IS its real end and the walk must anchor there, not at now.
+		wantEnd := seg.StartedAt.Add(time.Duration(seg.DurationS) * time.Second)
 		require.NotEmpty(t, resp.GetUpcoming())
 		startedAt, err := time.Parse(time.RFC3339, resp.GetUpcoming()[0].GetStartedAt())
 		require.NoError(t, err)
-		require.WithinDuration(t, now, startedAt, 2*time.Second,
-			"the next item starts now, not at the cut track's nominal end")
+		require.WithinDuration(t, wantEnd, startedAt, 2*time.Second,
+			"the next item starts when the resumed track ends")
+	})
+
+	t.Run("on air after a toggle, an interrupted talk clip is not airing", func(t *testing.T) {
+		// findBootResume reads the air log, and air_log is music-only, so a
+		// clip whose nominal end is still ahead was cut off, not resumed.
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
+			Title: "Break", StartedAt: t0.Add(-5 * time.Minute), DurationS: 3600}
+		s := build(t, seg, now, true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "talk is never resumed")
+		require.Len(t, resp.GetPast(), 1, "the cut clip belongs in past")
+		require.Equal(t, "Break", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast())
 	})
 
 	t.Run("genuinely airing", func(t *testing.T) {
