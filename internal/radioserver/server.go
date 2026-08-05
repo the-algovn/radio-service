@@ -612,13 +612,40 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 	// air, and must not be session-gated. findBootResume reads the air log
 	// only, and air_log is music-only (internal/showlog), so a talk row is
 	// never resumed and the session anchor does apply to it.
+	//
+	// A stale talk row on top does NOT mean nothing is airing, though. It
+	// means an off→on toggle happened after the clip started — only
+	// StationGoOnAir moves on_air_since, and internal/station/pg.go preserves
+	// it on an idempotent repeat, so a later anchor is a genuine edge. That
+	// edge is exactly what re-entered RunSession and re-ran findBootResume,
+	// which looks at the AIR log that this merged read has talk sitting on top
+	// of. Hence the fourth case: stale talk ⇒ the engine resumed the newest
+	// air row below iff that row's arithmetic holds. Scan rather than peek at
+	// newest[1] — talk can stack.
 	var airing *showlog.Segment
+	// ResumeOffset expires iff now-StartedAt >= DurationS, so "still inside
+	// its nominal duration" IS the engine's resume test.
+	stillRunning := func(sg showlog.Segment) bool {
+		return sg.StartedAt.Add(time.Duration(sg.DurationS) * time.Second).After(now)
+	}
 	if len(newest) > 0 && st.OnAir {
 		n := newest[0]
 		staleTalk := n.Origin == showlog.OriginTalk &&
 			st.OnAirSince != nil && n.StartedAt.Before(*st.OnAirSince)
-		if !staleTalk && n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
-			airing = &n
+		if !staleTalk {
+			if stillRunning(n) {
+				airing = &n
+			}
+		} else {
+			for i := range newest {
+				if newest[i].Origin != showlog.OriginAir {
+					continue
+				}
+				if a := newest[i]; stillRunning(a) {
+					airing = &a
+				}
+				break // only the NEWEST air row can be the resumed one
+			}
 		}
 	}
 	totalPast := total
