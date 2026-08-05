@@ -601,16 +601,23 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 		return nil, status.Errorf(codes.Internal, "show log recent: %v", err)
 	}
 	// The engine writes the NOMINAL duration at track start and never amends
-	// it, so a track cut short keeps a future end time forever. Arithmetic
-	// alone would report that row `airing` and — worse, once back on air —
-	// anchor the forward walk to a phantom end minutes from now. OnAirSince
-	// holds only the CURRENT session (see internal/broadcast), so a row that
-	// predates it belongs to a session that has already ended.
+	// it, so a track cut short keeps a future end time forever and arithmetic
+	// alone would report it airing off the air. Only the off-air case and TALK
+	// need correcting, though. Every on-air poll re-runs RunSession
+	// (internal/live/engine.go), which opens with findBootResume
+	// (internal/live/feeder.go) — despite the name it is not boot-only. It
+	// resumes the newest air_log row iff ResumeOffset has not expired, which is
+	// exactly this arithmetic test, and the resumed row is kept rather than
+	// re-appended. So a MUSIC row predating OnAirSince really can be on the
+	// air, and must not be session-gated. findBootResume reads the air log
+	// only, and air_log is music-only (internal/showlog), so a talk row is
+	// never resumed and the session anchor does apply to it.
 	var airing *showlog.Segment
-	if len(newest) > 0 && st.OnAir && st.OnAirSince != nil {
+	if len(newest) > 0 && st.OnAir {
 		n := newest[0]
-		if !n.StartedAt.Before(*st.OnAirSince) &&
-			n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
+		staleTalk := n.Origin == showlog.OriginTalk &&
+			st.OnAirSince != nil && n.StartedAt.Before(*st.OnAirSince)
+		if !staleTalk && n.StartedAt.Add(time.Duration(n.DurationS)*time.Second).After(now) {
 			airing = &n
 		}
 	}
