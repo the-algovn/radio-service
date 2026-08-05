@@ -589,13 +589,16 @@ func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
 // needs the session anchor.
 func TestGetShowTimelineAiringDetection(t *testing.T) {
 	ctx := context.Background()
-	// build serves exactly one show-log row, with the handler clock pinned.
-	build := func(t *testing.T, seg showlog.Segment, now time.Time, onAir bool) *Server {
+	// buildN serves segs in merged show-log order (newest first), with the
+	// handler clock pinned.
+	buildN := func(t *testing.T, now time.Time, onAir bool, segs ...showlog.Segment) *Server {
 		t.Helper()
 		lib := library.NewMemLibrary()
-		require.NoError(t, lib.Add(ctx, library.Track{
-			YTID: seg.YTID, Title: seg.Title, DurationS: float64(seg.DurationS), ArtifactID: "a",
-		}))
+		for _, seg := range segs {
+			require.NoError(t, lib.Add(ctx, library.Track{
+				YTID: seg.YTID, Title: seg.Title, DurationS: float64(seg.DurationS), ArtifactID: "a",
+			}))
+		}
 		st := station.NewMemStore()
 		if onAir {
 			_, err := st.GoOnAir(ctx)
@@ -603,7 +606,7 @@ func TestGetShowTimelineAiringDetection(t *testing.T) {
 		}
 		return newTimelineTestServer(t, Deps{
 			Store:     st,
-			ShowLog:   &fakeShowLog{segs: []showlog.Segment{seg}, count: 1},
+			ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
 			Requests:  request.NewMemStore(),
 			Sched:     schedule.NewMemStore(),
 			Library:   lib,
@@ -611,6 +614,11 @@ func TestGetShowTimelineAiringDetection(t *testing.T) {
 			Ledger:    &fakeLedger{},
 			Now:       func() time.Time { return now },
 		})
+	}
+	// build serves exactly one show-log row.
+	build := func(t *testing.T, seg showlog.Segment, now time.Time, onAir bool) *Server {
+		t.Helper()
+		return buildN(t, now, onAir, seg)
 	}
 	// A row still nominally running an hour from now. GoOnAir, when the case
 	// asks for it, anchors the session AFTER this row started.
@@ -656,6 +664,11 @@ func TestGetShowTimelineAiringDetection(t *testing.T) {
 	t.Run("on air after a toggle, an interrupted talk clip is not airing", func(t *testing.T) {
 		// findBootResume reads the air log, and air_log is music-only, so a
 		// clip whose nominal end is still ahead was cut off, not resumed.
+		//
+		// The answer here is nil because this fixture has NO air row for
+		// Log.Latest to find — not because a stale talk row on top implies
+		// nothing is airing. When there IS one underneath, the engine resumes
+		// it; see the two "shadowed" subtests below.
 		t0 := time.Now()
 		now := t0.Add(time.Minute)
 		seg := showlog.Segment{ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
@@ -667,6 +680,63 @@ func TestGetShowTimelineAiringDetection(t *testing.T) {
 		require.Len(t, resp.GetPast(), 1, "the cut clip belongs in past")
 		require.Equal(t, "Break", resp.GetPast()[0].GetTitle())
 		require.Equal(t, int64(1), resp.GetTotalPast())
+	})
+
+	// The reaching state for both "shadowed" cases: a track is skipped
+	// mid-play (air_log keeps its original nominal end — nothing amends
+	// duration_s), a break comes due so a talk clip airs, and the operator
+	// toggles off and back on DURING that clip. The clip is cut off, but the
+	// toggle re-ran findBootResume over the air log, so the skipped track is
+	// what the engine picked back up.
+	shadowed := func(t0 time.Time, airStart time.Time) []showlog.Segment {
+		return []showlog.Segment{
+			// Newest first: talk on top, started before GoOnAir ⇒ stale.
+			{ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
+				Title: "Break", StartedAt: t0.Add(-time.Minute), DurationS: 3600},
+			{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+				YTID: "y1", Title: "Shadowed", StartedAt: airStart, DurationS: 3600},
+		}
+	}
+
+	t.Run("on air after a toggle, a live air row under stale talk is airing", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		segs := shadowed(t0, t0.Add(-5*time.Minute)) // nominal end ~55min ahead
+		s := buildN(t, now, true, segs...)           // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetAiring(),
+			"the cut clip shadows the air row the engine resumed, it does not erase it")
+		require.Equal(t, "Shadowed", resp.GetAiring().GetTitle())
+
+		require.Len(t, resp.GetPast(), 1, "the airing air row is excluded from past")
+		require.Equal(t, "Break", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast(), "total-1")
+
+		// The clock anchor: the walk starts at the resumed track's real end,
+		// not at now. Anchoring at now would report the whole running order
+		// early by the track's remaining duration.
+		air := segs[1]
+		wantEnd := air.StartedAt.Add(time.Duration(air.DurationS) * time.Second)
+		require.NotEmpty(t, resp.GetUpcoming())
+		startedAt, err := time.Parse(time.RFC3339, resp.GetUpcoming()[0].GetStartedAt())
+		require.NoError(t, err)
+		require.WithinDuration(t, wantEnd, startedAt, 2*time.Second,
+			"the next item starts when the resumed track ends, not at now")
+	})
+
+	t.Run("on air after a toggle, an expired air row under stale talk is not airing", func(t *testing.T) {
+		// Guard against the scan unconditionally reporting an air row:
+		// ResumeOffset HAS expired here, so findBootResume declines.
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		segs := shadowed(t0, t0.Add(-2*time.Hour)) // nominal end ~1h in the past
+		s := buildN(t, now, true, segs...)
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "the air row underneath finished before the toggle")
+		require.Len(t, resp.GetPast(), 2)
+		require.Equal(t, int64(2), resp.GetTotalPast())
 	})
 
 	t.Run("genuinely airing", func(t *testing.T) {
