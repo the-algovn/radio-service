@@ -732,6 +732,66 @@ func TestGetShowTimelineSegmentIDsAreOriginQualifiedAndRoleIndependent(t *testin
 	})
 }
 
+// The median that sizes unknown blocks must not come from the requested page,
+// or the FUTURE becomes a function of how deep into the PAST the caller is
+// looking. The fixture's newest 30 rows are short and the older 30 are long,
+// so a page-derived median differs on every page below.
+func TestGetShowTimelineUpcomingIsIndependentOfPaging(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Now()
+	now := t0.Add(24 * time.Hour)
+
+	segs := make([]showlog.Segment, 60)
+	for i := range segs {
+		dur := 400
+		if i < 30 {
+			dur = 90
+		}
+		segs[i] = showlog.Segment{
+			ID: int64(i + 1), Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y", Title: "Past", DurationS: dur,
+			// 20 min apart, so every row has long since finished.
+			StartedAt: now.Add(-time.Duration(i+1) * 20 * time.Minute),
+		}
+	}
+	lib := library.NewMemLibrary()
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "y", Title: "Past", DurationS: 90, ArtifactID: "a"}))
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(ctx)
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
+	})
+
+	// (limit, offset) pairs whose pages hold, respectively: too few air rows
+	// to have a median at all, a short-heavy sample, and a long-only sample.
+	pages := []struct{ limit, offset int32 }{{3, 0}, {50, 0}, {50, 50}}
+	var want []*radiov1.ShowSegment
+	for _, p := range pages {
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: p.limit, Offset: p.offset})
+		require.NoError(t, err)
+		require.NotEmpty(t, resp.GetUpcoming())
+		if want == nil {
+			want = resp.GetUpcoming()
+			continue
+		}
+		require.Len(t, resp.GetUpcoming(), len(want), "limit=%d offset=%d", p.limit, p.offset)
+		for i, got := range resp.GetUpcoming() {
+			require.Equal(t, want[i].GetSegmentId(), got.GetSegmentId(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+			require.Equal(t, want[i].GetDurationS(), got.GetDurationS(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+			require.Equal(t, want[i].GetStartedAt(), got.GetStartedAt(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+		}
+	}
+}
+
 func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {
 	now := time.Now()
 	// On air but between items: newest row's end is already in the past.

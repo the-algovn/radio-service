@@ -50,6 +50,11 @@ const (
 	msgOperatorRemoved = "đài đã gỡ yêu cầu này"
 	recentTerminalCap  = 20
 
+	// medianSampleRows bounds the page-independent show-log read that decides
+	// the airing row and the median track length. Merged rows are roughly half
+	// talk at BreakEvery=2, so 50 still clears medianTrackS' five-row floor.
+	medianSampleRows = 50
+
 	// DJ settings bounds (spec §6). Rate matches the audition slider range;
 	// the max_chars floor prevents an unsatisfiable script cap (which would
 	// burn one LLM retry loop per due tick), the ceiling bounds per-break cost.
@@ -587,9 +592,11 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 		return nil, status.Errorf(codes.Internal, "show log count: %v", err)
 	}
 
-	// 3. Detect airing independently of the page, so total_past is the same
-	// answer for every offset. One extra indexed, single-row read.
-	newest, err := s.deps.ShowLog.Recent(ctx, 1, 0)
+	// 3. Read the newest rows independently of the page. This one indexed read
+	// serves two answers that must not vary with limit/offset: which row is
+	// airing (so total_past is the same for every page) and the median track
+	// length (which sizes the FUTURE — see step 6).
+	newest, err := s.deps.ShowLog.Recent(ctx, medianSampleRows, 0)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "show log recent: %v", err)
 	}
@@ -667,9 +674,11 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 		}
 	}
 
-	// 6. Median track seconds from the air_log rows in the page already
-	// fetched (no extra query). 0 when under 5 rows, so Project falls back.
-	medianS := medianTrackS(segs)
+	// 6. Median track seconds, sized from the page-independent sample read in
+	// step 3. Sizing it from the requested page would make the FUTURE a
+	// function of how deep into the PAST the caller happened to be looking.
+	// 0 when under 5 air rows, so Project falls back.
+	medianS := medianTrackS(newest)
 
 	// 7. Listeners and daily spend.
 	listeners, err := s.deps.Listeners.Count(ctx)
