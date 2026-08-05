@@ -811,11 +811,22 @@ func medianTrackS(segs []showlog.Segment) int {
 	return ds[len(ds)/2]
 }
 
+// showSegmentID mints the stable identity a console keys its rows on.
+//
+// It must be ORIGIN-QUALIFIED: air_log.id and talk_segment.id are independent
+// BIGSERIALs that RecentShowSegments UNION ALLs, so a bare id collides across
+// origins on any fresh database. And it must be ROLE-INDEPENDENT: the same row
+// is `airing` on one poll and `past` on the next, and a changing id remounts
+// the row in React.
+func showSegmentID(seg *showlog.Segment) string {
+	return fmt.Sprintf("log:%s:%d", seg.Origin, seg.ID)
+}
+
 // showlogToTimeline converts one showlog.Segment to a timeline.Segment,
 // branching on Origin so the projector sees the right Kind and fields.
 func showlogToTimeline(seg *showlog.Segment, cert string) timeline.Segment {
 	out := timeline.Segment{
-		SegmentID: fmt.Sprintf("log:%d", seg.ID),
+		SegmentID: showSegmentID(seg),
 		Kind:      showlogKindToTimeline(seg),
 		Certainty: cert,
 		Title:     seg.Title,
@@ -847,7 +858,7 @@ func showlogToTimeline(seg *showlog.Segment, cert string) timeline.Segment {
 // and air-log provenance; talk rows carry script and LLM provenance.
 func showlogToProto(seg *showlog.Segment) *radiov1.ShowSegment {
 	out := &radiov1.ShowSegment{
-		SegmentId: fmt.Sprintf("past:%d", seg.ID),
+		SegmentId: showSegmentID(seg),
 		Kind:      showlogKindToTimeline(seg),
 		Certainty: timeline.CertaintyAired,
 		Title:     seg.Title,

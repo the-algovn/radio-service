@@ -658,6 +658,80 @@ func TestGetShowTimelineStaleRowIsNotAiring(t *testing.T) {
 	})
 }
 
+// radio.proto documents segment_id as a stable identity across polls, which a
+// console keys its rows on. air_log.id and talk_segment.id are independent
+// BIGSERIALs, and the same row changes role from airing to past.
+func TestGetShowTimelineSegmentIDsAreOriginQualifiedAndRoleIndependent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("equal ids across origins do not collide", func(t *testing.T) {
+		now := time.Now()
+		// The same id 7 from both tables — routine on a fresh database.
+		segs := []showlog.Segment{
+			{ID: 7, Origin: showlog.OriginTalk, Kind: showlog.KindSeam, Title: "Talk",
+				StartedAt: now.Add(-2 * time.Minute), DurationS: 40},
+			{ID: 7, Origin: showlog.OriginAir, Kind: "track", YTID: "y7", Title: "Track",
+				StartedAt: now.Add(-10 * time.Minute), DurationS: 200},
+		}
+		lib := library.NewMemLibrary()
+		require.NoError(t, lib.Add(ctx, library.Track{YTID: "y7", Title: "Track", DurationS: 200, ArtifactID: "a"}))
+
+		s := newTimelineTestServer(t, Deps{
+			Store:     station.NewMemStore(),
+			ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Len(t, resp.GetPast(), 2)
+		require.NotEqual(t, resp.GetPast()[0].GetSegmentId(), resp.GetPast()[1].GetSegmentId(),
+			"two rows with equal ids from different tables are different segments")
+	})
+
+	t.Run("the airing row keeps its id once past", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(90 * time.Second)
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Boundary", StartedAt: t0.Add(time.Minute), DurationS: 60}
+		lib := library.NewMemLibrary()
+		require.NoError(t, lib.Add(ctx, library.Track{YTID: "y1", Title: "Boundary", DurationS: 60, ArtifactID: "a"}))
+		st := station.NewMemStore()
+		_, err := st.GoOnAir(ctx)
+		require.NoError(t, err)
+
+		s := newTimelineTestServer(t, Deps{
+			Store:     st,
+			ShowLog:   &fakeShowLog{segs: []showlog.Segment{seg}, count: 1},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+
+		// Poll 1: mid-track.
+		resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp1.GetAiring())
+
+		// Poll 2: the same row, one item boundary later.
+		now = t0.Add(5 * time.Minute)
+		resp2, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp2.GetAiring())
+		require.Len(t, resp2.GetPast(), 1)
+
+		require.Equal(t, resp1.GetAiring().GetSegmentId(), resp2.GetPast()[0].GetSegmentId(),
+			"the same DB row must keep one id whether airing or past")
+	})
+}
+
 func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {
 	now := time.Now()
 	// On air but between items: newest row's end is already in the past.
