@@ -7,7 +7,9 @@ package radioserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,12 +19,16 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
+	"github.com/the-algovn/radio-service/internal/broadcast"
+	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/ingest"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/showlog"
 	"github.com/the-algovn/radio-service/internal/station"
+	"github.com/the-algovn/radio-service/internal/timeline"
 )
 
 const (
@@ -43,6 +49,11 @@ const (
 
 	msgOperatorRemoved = "đài đã gỡ yêu cầu này"
 	recentTerminalCap  = 20
+
+	// medianSampleRows bounds the page-independent show-log read that decides
+	// the airing row and the median track length. Merged rows are roughly half
+	// talk at BreakEvery=2, so 50 still clears medianTrackS' five-row floor.
+	medianSampleRows = 50
 
 	// DJ settings bounds (spec §6). Rate matches the audition slider range;
 	// the max_chars floor prevents an unsatisfiable script cap (which would
@@ -71,6 +82,23 @@ type Ledger interface {
 	SpentSince(ctx context.Context, since time.Time) (float64, error)
 }
 
+// Breaks exposes the director's cadence state read-only. Narrow and local,
+// matching Notifier/Skipper/Ledger — radioserver has no business calling the
+// director's mutating methods.
+type Breaks interface{ Snapshot() director.Snapshot }
+
+// ShowLog is the read side of the show log: what aired, merged music+talk.
+// Append lives on the full Store; radioserver has no business writing it.
+type ShowLog interface {
+	Recent(ctx context.Context, limit, offset int) ([]showlog.Segment, error)
+	Count(ctx context.Context) (int64, error)
+}
+
+// Sessions is the read side of the broadcast-session log.
+type Sessions interface {
+	Overlapping(ctx context.Context, from, to time.Time, limit int) ([]broadcast.Session, error)
+}
+
 type Deps struct {
 	Store     station.Store
 	Log       live.AirLog
@@ -86,6 +114,9 @@ type Deps struct {
 	Location  *time.Location // station-local civil day for daily quotas; nil → UTC
 	Skipper   Skipper
 	Ledger    Ledger
+	Breaks    Breaks
+	ShowLog   ShowLog
+	Sessions  Sessions
 	BudgetUSD float64
 	TTS       ttsv1.TTSServiceClient // voice catalog membership for UpdateDJSettings
 }
@@ -535,4 +566,403 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	s.logger.InfoContext(ctx, "dj settings updated", "voice", st.DJ.VoiceID, "rate", st.DJ.Rate,
 		"break_every", st.DJ.BreakEvery, "station_id_min", st.DJ.StationIDMin, "max_chars", st.DJ.MaxChars)
 	return &radiov1.UpdateDJSettingsResponse{Settings: djSettingsProto(st.DJ)}, nil
+}
+
+// GetShowTimeline returns the full show context: what aired, what is airing,
+// what comes next, and the broadcast-session dividers. One read pass assembles
+// timeline.State, then timeline.Project projects the forward running order.
+func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimelineRequest) (*radiov1.GetShowTimelineResponse, error) {
+	now := s.deps.Now()
+	limit := int(req.GetLimit())
+	offset := int(req.GetOffset())
+
+	// 1. Station — the on-air flag, AI switch and DJ cadence settings.
+	st, err := s.deps.Store.GetStation(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "station: %v", err)
+	}
+
+	// 2. Show log page and total count.
+	segs, err := s.deps.ShowLog.Recent(ctx, limit, offset)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "show log: %v", err)
+	}
+	total, err := s.deps.ShowLog.Count(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "show log count: %v", err)
+	}
+
+	// 3. Read the newest rows independently of the page. This one indexed read
+	// serves two answers that must not vary with limit/offset: which row is
+	// airing (so total_past is the same for every page) and the median track
+	// length (which sizes the FUTURE — see step 6).
+	newest, err := s.deps.ShowLog.Recent(ctx, medianSampleRows, 0)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "show log recent: %v", err)
+	}
+	// The engine writes the NOMINAL duration at track start and never amends
+	// it, so a track cut short keeps a future end time forever and arithmetic
+	// alone would report it airing off the air. Only the off-air case and TALK
+	// need correcting, though. Every on-air poll re-runs RunSession
+	// (internal/live/engine.go), which opens with findBootResume
+	// (internal/live/feeder.go) — despite the name it is not boot-only. It
+	// resumes the newest air_log row iff ResumeOffset has not expired, which is
+	// exactly this arithmetic test, and the resumed row is kept rather than
+	// re-appended. So a MUSIC row predating OnAirSince really can be on the
+	// air, and must not be session-gated. findBootResume reads the air log
+	// only, and air_log is music-only (internal/showlog), so a talk row is
+	// never resumed and the session anchor does apply to it.
+	//
+	// A stale talk row on top does NOT mean nothing is airing, though. It
+	// means an off→on toggle happened after the clip started — only
+	// StationGoOnAir moves on_air_since, and internal/station/pg.go preserves
+	// it on an idempotent repeat, so a later anchor is a genuine edge. That
+	// edge is exactly what re-entered RunSession and re-ran findBootResume,
+	// which looks at the AIR log that this merged read has talk sitting on top
+	// of. Hence the fourth case: stale talk ⇒ the engine resumed the newest
+	// air row below iff that row's arithmetic holds. Scan rather than peek at
+	// newest[1] — talk can stack.
+	var airing *showlog.Segment
+	// ResumeOffset expires iff now-StartedAt >= DurationS, so "still inside
+	// its nominal duration" IS the engine's resume test.
+	stillRunning := func(sg showlog.Segment) bool {
+		return sg.StartedAt.Add(time.Duration(sg.DurationS) * time.Second).After(now)
+	}
+	if len(newest) > 0 && st.OnAir {
+		n := newest[0]
+		staleTalk := n.Origin == showlog.OriginTalk &&
+			st.OnAirSince != nil && n.StartedAt.Before(*st.OnAirSince)
+		if !staleTalk {
+			if stillRunning(n) {
+				airing = &n
+			}
+		} else {
+			for i := range newest {
+				if newest[i].Origin != showlog.OriginAir {
+					continue
+				}
+				if a := newest[i]; stillRunning(a) {
+					airing = &a
+				}
+				break // only the NEWEST air row can be the resumed one
+			}
+		}
+	}
+	totalPast := total
+	if airing != nil {
+		totalPast--
+	}
+
+	// Build past, excluding the airing row when it is in the page (offset == 0).
+	past := make([]showlog.Segment, 0, len(segs))
+	for i := range segs {
+		if airing != nil && segs[i].ID == airing.ID && segs[i].Origin == airing.Origin {
+			continue
+		}
+		past = append(past, segs[i])
+	}
+
+	// 4. Committed next-up. Empty YTID means NOT committed (ClearNextUp writes
+	// empty strings and the singleton row always exists).
+	var nextUp *schedule.NextUp
+	nu, found, err := s.deps.Sched.GetNextUp(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "next up: %v", err)
+	}
+	if found && nu.YTID != "" {
+		nextUp = &nu
+	}
+
+	// 5. Pending set + Durations map. Durations membership IS the
+	// library-existence signal: absent means NOT AIRABLE. Populate for every
+	// track successfully resolved — the airing track, every ready request, and
+	// the pinned next-up. A miss degrades the item (no entry in Durations, so
+	// the projector skips or marks it unknown) but never fails the RPC.
+	pending, err := s.deps.Requests.Pending(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "pending: %v", err)
+	}
+	durations := make(map[string]int)
+
+	if airing != nil && airing.Origin == showlog.OriginAir && airing.YTID != "" {
+		if tr, ok, _ := s.deps.Library.Get(ctx, airing.YTID); ok {
+			durations[airing.YTID] = int(tr.DurationS)
+		}
+	}
+	for _, it := range pending {
+		if it.Status != request.StatusReady {
+			continue
+		}
+		if _, exists := durations[it.YTID]; exists {
+			continue
+		}
+		if tr, ok, _ := s.deps.Library.Get(ctx, it.YTID); ok {
+			durations[it.YTID] = int(tr.DurationS)
+		}
+	}
+	if nextUp != nil {
+		if _, exists := durations[nextUp.YTID]; !exists {
+			if tr, ok, _ := s.deps.Library.Get(ctx, nextUp.YTID); ok {
+				durations[nextUp.YTID] = int(tr.DurationS)
+			}
+		}
+	}
+
+	// 6. Median track seconds, sized from the page-independent sample read in
+	// step 3. Sizing it from the requested page would make the FUTURE a
+	// function of how deep into the PAST the caller happened to be looking.
+	// 0 when under 5 air rows, so Project falls back.
+	medianS := medianTrackS(newest)
+
+	// 7. Listeners and daily spend.
+	listeners, err := s.deps.Listeners.Count(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "listeners: %v", err)
+	}
+	spent, err := s.deps.Ledger.SpentSince(ctx, request.DayStart(now, s.deps.Location))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "spend: %v", err)
+	}
+
+	// 8. Director snapshot — nil Breaks means RADIO_DJ_ENABLED is unset.
+	// Gate will report dj_disabled and no break segments will be emitted.
+	var dirSnap timeline.DirectorSnapshot
+	if s.deps.Breaks != nil {
+		snap := s.deps.Breaks.Snapshot()
+		dirSnap = timeline.DirectorSnapshot{
+			Present:             true,
+			HasClip:             snap.HasClip,
+			ClipKind:            snap.ClipKind,
+			ClipDurationS:       snap.ClipDurationS,
+			ClipAnchorYTID:      snap.ClipAnchorYTID,
+			ClipAnchorStartedAt: snap.ClipAnchorStartedAt,
+			ClipBacksellTitle:   snap.ClipBacksellTitle,
+			ClipPromiseTitle:    snap.ClipPromiseTitle,
+			ClipCorrelationID:   snap.ClipCorrelationID,
+			FinishedSinceSeam:   snap.FinishedSinceSeam,
+			LastStationID:       snap.LastStationID,
+			StationIDsAvailable: snap.StationIDsAvailable,
+		}
+	}
+
+	// 9. Broadcast session markers spanning the returned page.
+	// A read failure degrades to no markers; never fail the RPC.
+	var sessionMarkers []*radiov1.SessionMarker
+	if s.deps.Sessions != nil {
+		sessionMarkers = s.sessionMarkers(ctx, segs, airing, now)
+	}
+
+	// 10. Project the forward running order.
+	var airingSeg *timeline.Segment
+	if airing != nil {
+		as := showlogToTimeline(airing, timeline.CertaintyAiring)
+		airingSeg = &as
+	}
+	state := timeline.State{
+		Now:          now,
+		Station:      st,
+		Airing:       airingSeg,
+		NextUp:       nextUp,
+		Pending:      pending,
+		Durations:    durations,
+		MedianTrackS: medianS,
+		Dir:          dirSnap,
+		Listeners:    listeners,
+		SpentUSD:     spent,
+		BudgetUSD:    s.deps.BudgetUSD,
+	}
+	upcoming, staging, gate := timeline.Project(state)
+
+	// 11. Map to proto.
+	resp := &radiov1.GetShowTimelineResponse{
+		BreakGate: gate,
+		TotalPast: totalPast,
+		ServerNow: now.Format(time.RFC3339),
+		Sessions:  sessionMarkers,
+	}
+	for i := range past {
+		resp.Past = append(resp.Past, showlogToProto(&past[i]))
+	}
+	if airingSeg != nil {
+		resp.Airing = timelineToProto(airingSeg)
+	}
+	for i := range upcoming {
+		resp.Upcoming = append(resp.Upcoming, timelineToProto(&upcoming[i]))
+	}
+	for i := range staging {
+		resp.Staging = append(resp.Staging, timelineToProto(&staging[i]))
+	}
+	return resp, nil
+}
+
+// sessionMarkers queries broadcast sessions spanning the returned page.
+// A read error logs and returns nil — sessions are a degradation, not a failure.
+func (s *Server) sessionMarkers(ctx context.Context, segs []showlog.Segment, airing *showlog.Segment, now time.Time) []*radiov1.SessionMarker {
+	from := oldestStart(segs, airing, now)
+	to := now
+	sessions, err := s.deps.Sessions.Overlapping(ctx, from, to, 0)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "broadcast sessions read failed", "err", err)
+		return nil
+	}
+	out := make([]*radiov1.SessionMarker, 0, len(sessions))
+	for _, ses := range sessions {
+		m := &radiov1.SessionMarker{StartedAt: ses.StartedAt.Format(time.RFC3339)}
+		if ses.EndedAt != nil {
+			m.EndedAt = ses.EndedAt.Format(time.RFC3339)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// oldestStart returns the earliest StartedAt in the page, for the sessions
+// query. Falls back to 12h ago when the page is empty.
+func oldestStart(segs []showlog.Segment, airing *showlog.Segment, now time.Time) time.Time {
+	candidates := segs
+	if len(candidates) == 0 && airing == nil {
+		return now.Add(-12 * time.Hour)
+	}
+	oldest := now
+	for _, seg := range candidates {
+		if seg.StartedAt.Before(oldest) {
+			oldest = seg.StartedAt
+		}
+	}
+	if airing != nil && airing.StartedAt.Before(oldest) {
+		oldest = airing.StartedAt
+	}
+	return oldest
+}
+
+// medianTrackS computes the median duration of music rows (OriginAir) in segs.
+// Returns 0 when under 5 rows so the projector falls back to FallbackMedianS.
+func medianTrackS(segs []showlog.Segment) int {
+	var ds []int
+	for _, seg := range segs {
+		if seg.Origin == showlog.OriginAir && seg.DurationS > 0 {
+			ds = append(ds, seg.DurationS)
+		}
+	}
+	if len(ds) < 5 {
+		return 0
+	}
+	sort.Ints(ds)
+	return ds[len(ds)/2]
+}
+
+// showSegmentID mints the stable identity a console keys its rows on.
+//
+// It must be ORIGIN-QUALIFIED: air_log.id and talk_segment.id are independent
+// BIGSERIALs that RecentShowSegments UNION ALLs, so a bare id collides across
+// origins on any fresh database. And it must be ROLE-INDEPENDENT: the same row
+// is `airing` on one poll and `past` on the next, and a changing id remounts
+// the row in React.
+func showSegmentID(seg *showlog.Segment) string {
+	return fmt.Sprintf("log:%s:%d", seg.Origin, seg.ID)
+}
+
+// showlogToTimeline converts one showlog.Segment to a timeline.Segment,
+// branching on Origin so the projector sees the right Kind and fields.
+func showlogToTimeline(seg *showlog.Segment, cert string) timeline.Segment {
+	out := timeline.Segment{
+		SegmentID: showSegmentID(seg),
+		Kind:      showlogKindToTimeline(seg),
+		Certainty: cert,
+		Title:     seg.Title,
+		StartedAt: seg.StartedAt,
+		DurationS: seg.DurationS,
+	}
+	if seg.Origin == showlog.OriginAir {
+		out.YTID = seg.YTID
+		out.Artist = seg.Artist
+		out.Source = seg.Source
+		out.RequestedByName = seg.RequestedByName
+		out.Reason = seg.Reason
+	} else {
+		out.Script = seg.Script
+		out.BacksellTitle = seg.BacksellTitle
+		out.PromiseTitle = seg.PromiseTitle
+		out.CorrelationID = seg.CorrelationID
+		out.Model = seg.Model
+		out.InTokens = seg.InTokens
+		out.OutTokens = seg.OutTokens
+		out.CostUSD = seg.CostUSD
+		out.LatencyMS = seg.LatencyMS
+	}
+	return out
+}
+
+// showlogToProto maps a past showlog.Segment to a proto ShowSegment. Past rows
+// are always "aired". The mapping branches on Origin: music rows carry YTID
+// and air-log provenance; talk rows carry script and LLM provenance.
+func showlogToProto(seg *showlog.Segment) *radiov1.ShowSegment {
+	out := &radiov1.ShowSegment{
+		SegmentId: showSegmentID(seg),
+		Kind:      showlogKindToTimeline(seg),
+		Certainty: timeline.CertaintyAired,
+		Title:     seg.Title,
+		StartedAt: seg.StartedAt.Format(time.RFC3339),
+		DurationS: int32(seg.DurationS),
+	}
+	if seg.Origin == showlog.OriginAir {
+		out.Artist = seg.Artist
+		out.Source = seg.Source
+		out.RequestedByName = seg.RequestedByName
+		out.Reason = seg.Reason
+	} else {
+		out.Script = seg.Script
+		out.BacksellTitle = seg.BacksellTitle
+		out.PromiseTitle = seg.PromiseTitle
+		out.CorrelationId = seg.CorrelationID
+		out.Model = seg.Model
+		out.InTokens = int32(seg.InTokens)
+		out.OutTokens = int32(seg.OutTokens)
+		out.CostUsd = seg.CostUSD
+		out.LatencyMs = int32(seg.LatencyMS)
+	}
+	return out
+}
+
+// timelineToProto converts a timeline.Segment (past, airing, upcoming, or
+// staging) to a proto ShowSegment. Fields are set unconditionally; the
+// consumer branches on Kind at the other end.
+func timelineToProto(seg *timeline.Segment) *radiov1.ShowSegment {
+	out := &radiov1.ShowSegment{
+		SegmentId:       seg.SegmentID,
+		Kind:            seg.Kind,
+		Certainty:       seg.Certainty,
+		Title:           seg.Title,
+		Artist:          seg.Artist,
+		ThumbnailUrl:    seg.ThumbnailURL,
+		DurationS:       int32(seg.DurationS),
+		Source:          seg.Source,
+		RequestedByName: seg.RequestedByName,
+		Reason:          seg.Reason,
+		RequestId:       seg.RequestID,
+		Status:          seg.Status,
+		Script:          seg.Script,
+		BacksellTitle:   seg.BacksellTitle,
+		PromiseTitle:    seg.PromiseTitle,
+		CorrelationId:   seg.CorrelationID,
+		Model:           seg.Model,
+		InTokens:        int32(seg.InTokens),
+		OutTokens:       int32(seg.OutTokens),
+		CostUsd:         seg.CostUSD,
+		LatencyMs:       int32(seg.LatencyMS),
+	}
+	if !seg.StartedAt.IsZero() {
+		out.StartedAt = seg.StartedAt.Format(time.RFC3339)
+	}
+	return out
+}
+
+// showlogKindToTimeline translates the stored kind (Origin + Kind) to the wire
+// vocabulary. Stored kind "seam" maps to wire "dj"; "station_id" stays the same;
+// air-log rows are always "track".
+func showlogKindToTimeline(seg *showlog.Segment) string {
+	if seg.Origin == showlog.OriginAir {
+		return timeline.KindTrack
+	}
+	return timeline.KindFromEngine(seg.Kind)
 }

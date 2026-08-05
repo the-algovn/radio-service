@@ -345,7 +345,7 @@ func main() {
 		}()
 	}
 
-	radiov1.RegisterRadioServiceServer(gs, radioserver.New(radioserver.Deps{
+	deps := radioserver.Deps{
 		Store:     stationStore,
 		Log:       airLog,
 		Listeners: listeners,
@@ -359,9 +359,18 @@ func main() {
 		Location:  loc,
 		Skipper:   feeder,
 		Ledger:    ledger,
+		ShowLog:   showLog,
+		Sessions:  sessions,
 		BudgetUSD: budget,
 		TTS:       ttsClient,
-	}))
+	}
+	// Assign only when the director exists: a nil *Director in an interface
+	// field is a NON-nil interface, so the nil-guard in radioserver would
+	// pass and then panic on the first mu.Lock().
+	if dj != nil {
+		deps.Breaks = dj
+	}
+	radiov1.RegisterRadioServiceServer(gs, radioserver.New(deps))
 	healthpb.RegisterHealthServer(gs, health.NewServer())
 	reflection.Register(gs)
 

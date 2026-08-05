@@ -78,6 +78,31 @@ type Deps struct {
 	Sched Pinner   // nil → never promise the next track
 }
 
+// Snapshot is a value copy of the cadence state a projection needs. It
+// carries no cadence SETTINGS — BreakEvery and StationIDMin live on the
+// station row and are re-read every tick, so the caller supplies those.
+type Snapshot struct {
+	Present bool
+
+	HasClip             bool
+	ClipKind            string
+	ClipDurationS       float64
+	ClipAnchorYTID      string
+	ClipAnchorStartedAt time.Time
+	ClipBacksellTitle   string
+	ClipPromiseTitle    string
+	ClipCorrelationID   string
+
+	FinishedSinceSeam int
+	LastStationID     time.Time
+
+	// StationIDsAvailable mirrors the ids.available() term of dueKindLocked.
+	// Without it a reader cannot reproduce the due test: with no usable
+	// station-ID lines the engine falls through to BreakEvery and airs a seam
+	// where a reader would expect a station_id.
+	StationIDsAvailable bool
+}
+
 // Director prepares talk breaks ahead of air and hands them to the feeder
 // through the live.TalkSource seam. One goroutine (Run) prepares; the feeder
 // goroutine calls Take/TrackFinished; everything shared sits under mu.
@@ -257,4 +282,42 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	dr.mu.Lock()
 	dr.slot = &clip
 	dr.mu.Unlock()
+}
+
+// Snapshot copies the mu-guarded fields and returns them by value.
+//
+// Constraints, all load-bearing:
+//   - Pure field copies. Take and cancelPendingLocked already hold mu across
+//     an os.Remove syscall on the audio hot path; this must add no I/O, no
+//     logging and no clock read.
+//   - The slot is copied BY VALUE. Take sets dr.slot = nil while a caller
+//     could still hold the pointer.
+//   - It must not touch finishedSinceSeam or lastStationID — a read that
+//     mutates the format clock would silently change the cadence.
+//   - Script is deliberately NOT copied here. live.Clip.Script is "logs only,
+//     never published"; the aired script reaches the console from the stored
+//     talk_segment row instead, which is admin-gated at the route.
+func (dr *Director) Snapshot() Snapshot {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	s := Snapshot{
+		Present:           true,
+		FinishedSinceSeam: dr.finishedSinceSeam,
+		LastStationID:     dr.lastStationID,
+		// ids has its own mutex and is never held while taking dr.mu, so this
+		// is a len() under an uncontended lock — no I/O, no clock read.
+		StationIDsAvailable: dr.ids.available(),
+	}
+	if dr.slot != nil {
+		c := *dr.slot
+		s.HasClip = true
+		s.ClipKind = c.Kind
+		s.ClipDurationS = c.DurationS
+		s.ClipAnchorYTID = c.AnchorYTID
+		s.ClipAnchorStartedAt = c.AnchorStartedAt
+		s.ClipBacksellTitle = c.BacksellTitle
+		s.ClipPromiseTitle = c.PromiseTitle
+		s.ClipCorrelationID = c.CorrelationID
+	}
+	return s
 }

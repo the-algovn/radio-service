@@ -13,9 +13,13 @@ import (
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
+	"github.com/the-algovn/radio-service/internal/broadcast"
+	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
+	"github.com/the-algovn/radio-service/internal/schedule"
+	"github.com/the-algovn/radio-service/internal/showlog"
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
@@ -231,3 +235,704 @@ func TestGoOnAirPokesNotifier(t *testing.T) {
 type notifierFunc func()
 
 func (f notifierFunc) Poke() { f() }
+
+// -- GetShowTimeline test doubles --
+
+type fakeShowLog struct {
+	segs  []showlog.Segment
+	count int64
+}
+
+func (f *fakeShowLog) Recent(_ context.Context, limit, offset int) ([]showlog.Segment, error) {
+	// Mirror the store's clamping: limit<=0 → 50, capped at 200.
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(f.segs) {
+		return nil, nil
+	}
+	end := offset + limit
+	if end > len(f.segs) {
+		end = len(f.segs)
+	}
+	return f.segs[offset:end], nil
+}
+
+func (f *fakeShowLog) Count(_ context.Context) (int64, error) {
+	if f.count > 0 {
+		return f.count, nil
+	}
+	return int64(len(f.segs)), nil
+}
+
+type fakeSessions struct {
+	sessions []broadcast.Session
+}
+
+func (f *fakeSessions) Overlapping(_ context.Context, _, _ time.Time, _ int) ([]broadcast.Session, error) {
+	return f.sessions, nil
+}
+
+// fakeBreaks implements Breaks with a canned Snapshot, for director-present
+// tests that don't need the full director.
+type fakeBreaks struct {
+	snap director.Snapshot
+}
+
+func (f *fakeBreaks) Snapshot() director.Snapshot { return f.snap }
+
+func newTimelineTestServer(t *testing.T, deps Deps) *Server {
+	t.Helper()
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	if deps.Location == nil {
+		deps.Location = time.UTC
+	}
+	return New(deps)
+}
+
+// -- GetShowTimeline tests --
+
+func TestGetShowTimelineOffAir(t *testing.T) {
+	s := newTimelineTestServer(t, Deps{
+		Store:     station.NewMemStore(),
+		ShowLog:   &fakeShowLog{},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   library.NewMemLibrary(),
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+	require.NoError(t, err)
+	require.Empty(t, resp.GetUpcoming())
+	require.Equal(t, "off_air", resp.GetBreakGate())
+}
+
+func TestGetShowTimelineNilBreaksYieldsDjDisabled(t *testing.T) {
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   library.NewMemLibrary(),
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	// Breaks is deliberately nil — RADIO_DJ_ENABLED unset.
+	ctx := context.Background()
+	now := time.Now()
+
+	resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "dj_disabled", resp.GetBreakGate())
+	// Verify no break segments in upcoming — the DJ can't produce any.
+	for _, seg := range resp.GetUpcoming() {
+		require.NotEqual(t, "dj", seg.GetKind())
+		require.NotEqual(t, "station_id", seg.GetKind())
+	}
+	require.NotEmpty(t, resp.GetServerNow())
+	_ = now
+}
+
+func TestGetShowTimelinePastExcludesAiringAndTotalPast(t *testing.T) {
+	// The handler clock runs an hour past the store's on-air anchor. Nothing
+	// here turns on that gap — a music row's airing is pure arithmetic, session
+	// or no session (see TestGetShowTimelineAiringDetection).
+	now := time.Now().Add(time.Hour)
+	// One airing track (started 30s ago, 180s long — still playing).
+	// Three finished tracks.
+	airingSeg := showlog.Segment{
+		ID: 1, Origin: showlog.OriginAir, Kind: "track",
+		YTID: "airing", Title: "Airing", Artist: "Artist A",
+		StartedAt: now.Add(-30 * time.Second), DurationS: 180,
+		Source: "listener", RequestedByName: "Name",
+	}
+	segs := []showlog.Segment{
+		airingSeg,
+		{ID: 2, Origin: showlog.OriginAir, Kind: "track", YTID: "y2", Title: "Past 1", StartedAt: now.Add(-5 * time.Minute), DurationS: 200, Source: "ai", Reason: "reason 1"},
+		{ID: 3, Origin: showlog.OriginAir, Kind: "track", YTID: "y3", Title: "Past 2", StartedAt: now.Add(-10 * time.Minute), DurationS: 180},
+		{ID: 4, Origin: showlog.OriginAir, Kind: "track", YTID: "y4", Title: "Past 3", StartedAt: now.Add(-15 * time.Minute), DurationS: 240},
+	}
+	lib := library.NewMemLibrary()
+	for _, sg := range segs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: sg.YTID, Title: sg.Title, Channel: sg.Artist,
+			DurationS: float64(sg.DurationS), ArtifactID: "a-" + sg.YTID,
+		}))
+	}
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+	require.NoError(t, err)
+
+	// Airing is present and is the airing track.
+	require.NotNil(t, resp.GetAiring())
+	require.Equal(t, "Airing", resp.GetAiring().GetTitle())
+	require.Equal(t, "airing", resp.GetAiring().GetCertainty())
+
+	// Past does NOT include the airing row.
+	require.Len(t, resp.GetPast(), 3)
+	for _, p := range resp.GetPast() {
+		require.NotEqual(t, "Airing", p.GetTitle())
+	}
+	// total_past excludes the airing row.
+	require.Equal(t, int64(3), resp.GetTotalPast())
+}
+
+func TestGetShowTimelinePagingBoundsAreStores(t *testing.T) {
+	// Build more than the store default (50). The handler must NOT re-clamp.
+	now := time.Now()
+	segs := make([]showlog.Segment, 100)
+	for i := range segs {
+		segs[i] = showlog.Segment{
+			ID: int64(i + 1), Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y", Title: "Past", StartedAt: now.Add(-time.Duration(i+5) * time.Minute),
+			DurationS: 180,
+		}
+	}
+	lib := library.NewMemLibrary()
+	_ = lib.Add(context.Background(), library.Track{YTID: "y", Title: "Past", Channel: "c", DurationS: 180, ArtifactID: "a"})
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	// limit=0, offset=0 → the store default (50), NOT 20.
+	resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.GetPast(), 50)
+	require.Equal(t, int64(100), resp.GetTotalPast())
+
+	// limit=5, offset=0 → use caller's limit (store clamps at its layer).
+	resp2, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, resp2.GetPast(), 5)
+}
+
+func TestGetShowTimelineTalkRowMapsScriptProvenance(t *testing.T) {
+	now := time.Now()
+	// A music row (finished) and a talk row (finished).
+	talkSeg := showlog.Segment{
+		ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
+		Title: "Talk break", StartedAt: now.Add(-2 * time.Minute), DurationS: 40,
+		Script: "Chào các bạn", BacksellTitle: "Track A", PromiseTitle: "Track B",
+		CorrelationID: "corr-1", Model: "claude-haiku",
+		InTokens: 500, OutTokens: 80, CostUSD: 0.03, LatencyMS: 1200,
+	}
+	musicSeg := showlog.Segment{
+		ID: 2, Origin: showlog.OriginAir, Kind: "track",
+		YTID: "m1", Title: "Music Track", Artist: "Artist M",
+		StartedAt: now.Add(-5 * time.Minute), DurationS: 200,
+		Source: "ai", Reason: "vibe match",
+	}
+	segs := []showlog.Segment{talkSeg, musicSeg}
+	lib := library.NewMemLibrary()
+	require.NoError(t, lib.Add(context.Background(), library.Track{
+		YTID: "m1", Title: "Music Track", Channel: "Artist M",
+		DurationS: 200, ArtifactID: "a-m1",
+	}))
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+	require.NoError(t, err)
+
+	// Two past items: talk first (newest), then music.
+	require.Len(t, resp.GetPast(), 2)
+
+	// Talk row (newest, first in past): carries script and LLM provenance.
+	talk := resp.GetPast()[0]
+	require.Equal(t, "dj", talk.GetKind()) // stored "seam" → wire "dj"
+	require.Equal(t, "aired", talk.GetCertainty())
+	require.Equal(t, "Chào các bạn", talk.GetScript())
+	require.Equal(t, "Track A", talk.GetBacksellTitle())
+	require.Equal(t, "Track B", talk.GetPromiseTitle())
+	require.Equal(t, "corr-1", talk.GetCorrelationId())
+	require.Equal(t, "claude-haiku", talk.GetModel())
+	require.Equal(t, int32(500), talk.GetInTokens())
+	require.Equal(t, int32(80), talk.GetOutTokens())
+	require.Equal(t, 0.03, talk.GetCostUsd())
+	require.Equal(t, int32(1200), talk.GetLatencyMs())
+
+	// Music row: no script, no LLM provenance.
+	music := resp.GetPast()[1]
+	require.Equal(t, "track", music.GetKind())
+	require.Equal(t, "Music Track", music.GetTitle())
+	require.Equal(t, "Artist M", music.GetArtist())
+	require.Equal(t, "ai", music.GetSource())
+	require.Equal(t, "vibe match", music.GetReason())
+	require.Empty(t, music.GetScript())
+	require.Empty(t, music.GetModel())
+	require.Empty(t, music.GetCorrelationId())
+}
+
+func TestGetShowTimelineTotalPastStableAcrossPages(t *testing.T) {
+	// An hour past the store's on-air anchor — see the note above.
+	now := time.Now().Add(time.Hour)
+	// 5 segments: [airing (newest), s1, s2, s3, s4].
+	// limit=2, so page 0 gets [airing, s1] and page 1 gets [s2, s3].
+	// total_past must be 4 on both pages, not 4 then 5.
+	airingSeg := showlog.Segment{
+		ID: 1, Origin: showlog.OriginAir, Kind: "track",
+		YTID: "airing", Title: "Airing", Artist: "A",
+		StartedAt: now.Add(-30 * time.Second), DurationS: 180,
+	}
+	segs := []showlog.Segment{
+		airingSeg,
+		{ID: 2, Origin: showlog.OriginAir, Kind: "track", YTID: "y2", Title: "Past 1", StartedAt: now.Add(-5 * time.Minute), DurationS: 200},
+		{ID: 3, Origin: showlog.OriginAir, Kind: "track", YTID: "y3", Title: "Past 2", StartedAt: now.Add(-10 * time.Minute), DurationS: 180},
+		{ID: 4, Origin: showlog.OriginAir, Kind: "track", YTID: "y4", Title: "Past 3", StartedAt: now.Add(-15 * time.Minute), DurationS: 240},
+		{ID: 5, Origin: showlog.OriginAir, Kind: "track", YTID: "y5", Title: "Past 4", StartedAt: now.Add(-20 * time.Minute), DurationS: 180},
+	}
+	lib := library.NewMemLibrary()
+	for _, sg := range segs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: sg.YTID, Title: sg.Title, Channel: sg.Artist,
+			DurationS: float64(sg.DurationS), ArtifactID: "a-" + sg.YTID,
+		}))
+	}
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	// page 0: offset=0, limit=2 → returns [airing, Past 1].
+	// airing excluded from past, so past = [Past 1], total_past = 4.
+	resp0, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	require.NotNil(t, resp0.GetAiring())
+	require.Equal(t, "Airing", resp0.GetAiring().GetTitle())
+	require.Len(t, resp0.GetPast(), 1)
+	require.Equal(t, "Past 1", resp0.GetPast()[0].GetTitle())
+	require.Equal(t, int64(4), resp0.GetTotalPast())
+
+	// page 1: offset=2, limit=2 → returns [Past 2, Past 3].
+	// airing not in page, but still detected; total_past still 4.
+	resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.NotNil(t, resp1.GetAiring()) // present because detected independently
+	require.Len(t, resp1.GetPast(), 2)
+	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
+	require.Equal(t, "Past 3", resp1.GetPast()[1].GetTitle())
+	require.Equal(t, int64(4), resp1.GetTotalPast()) // stable across pages
+}
+
+// A row cut short keeps its NOMINAL duration forever — nothing ever amends it.
+// Off the air that makes arithmetic alone wrong. Back ON the air it does not:
+// the engine resumes the newest air_log row on exactly the same predicate (see
+// findBootResume/ResumeOffset in internal/live/feeder.go), so a music row that
+// predates OnAirSince really is playing. Talk is never resumed, so only it
+// needs the session anchor.
+func TestGetShowTimelineAiringDetection(t *testing.T) {
+	ctx := context.Background()
+	// buildN serves segs in merged show-log order (newest first), with the
+	// handler clock pinned.
+	buildN := func(t *testing.T, now time.Time, onAir bool, segs ...showlog.Segment) *Server {
+		t.Helper()
+		lib := library.NewMemLibrary()
+		for _, seg := range segs {
+			require.NoError(t, lib.Add(ctx, library.Track{
+				YTID: seg.YTID, Title: seg.Title, DurationS: float64(seg.DurationS), ArtifactID: "a",
+			}))
+		}
+		st := station.NewMemStore()
+		if onAir {
+			_, err := st.GoOnAir(ctx)
+			require.NoError(t, err)
+		}
+		return newTimelineTestServer(t, Deps{
+			Store:     st,
+			ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+	}
+	// build serves exactly one show-log row.
+	build := func(t *testing.T, seg showlog.Segment, now time.Time, onAir bool) *Server {
+		t.Helper()
+		return buildN(t, now, onAir, seg)
+	}
+	// A row still nominally running an hour from now. GoOnAir, when the case
+	// asks for it, anchors the session AFTER this row started.
+	cutShort := func(t0 time.Time) showlog.Segment {
+		return showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Cut short", StartedAt: t0.Add(-5 * time.Minute), DurationS: 3600}
+	}
+
+	t.Run("off air", func(t *testing.T) {
+		t0 := time.Now()
+		s := build(t, cutShort(t0), t0, false)
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "an off-air station is airing nothing")
+		require.Len(t, resp.GetPast(), 1, "the cut track belongs in past")
+		require.Equal(t, "Cut short", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast())
+	})
+
+	t.Run("on air after a toggle, the resumed track is still airing", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		seg := cutShort(t0)
+		s := build(t, seg, now, true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetAiring(),
+			"ResumeOffset has not expired, so the engine resumes this track")
+		require.Equal(t, "Cut short", resp.GetAiring().GetTitle())
+		require.Empty(t, resp.GetPast())
+		require.Equal(t, int64(0), resp.GetTotalPast())
+
+		// A resumed track is seeked to its wall-clock offset, so its nominal
+		// end IS its real end and the walk must anchor there, not at now.
+		wantEnd := seg.StartedAt.Add(time.Duration(seg.DurationS) * time.Second)
+		require.NotEmpty(t, resp.GetUpcoming())
+		startedAt, err := time.Parse(time.RFC3339, resp.GetUpcoming()[0].GetStartedAt())
+		require.NoError(t, err)
+		require.WithinDuration(t, wantEnd, startedAt, 2*time.Second,
+			"the next item starts when the resumed track ends")
+	})
+
+	t.Run("on air after a toggle, an interrupted talk clip is not airing", func(t *testing.T) {
+		// findBootResume reads the air log, and air_log is music-only, so a
+		// clip whose nominal end is still ahead was cut off, not resumed.
+		//
+		// The answer here is nil because this fixture has NO air row for
+		// Log.Latest to find — not because a stale talk row on top implies
+		// nothing is airing. When there IS one underneath, the engine resumes
+		// it; see the two "shadowed" subtests below.
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
+			Title: "Break", StartedAt: t0.Add(-5 * time.Minute), DurationS: 3600}
+		s := build(t, seg, now, true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "talk is never resumed")
+		require.Len(t, resp.GetPast(), 1, "the cut clip belongs in past")
+		require.Equal(t, "Break", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast())
+	})
+
+	// The reaching state for both "shadowed" cases: a track is skipped
+	// mid-play (air_log keeps its original nominal end — nothing amends
+	// duration_s), a break comes due so a talk clip airs, and the operator
+	// toggles off and back on DURING that clip. The clip is cut off, but the
+	// toggle re-ran findBootResume over the air log, so the skipped track is
+	// what the engine picked back up.
+	shadowed := func(t0 time.Time, airStart time.Time) []showlog.Segment {
+		return []showlog.Segment{
+			// Newest first: talk on top, started before GoOnAir ⇒ stale.
+			{ID: 1, Origin: showlog.OriginTalk, Kind: showlog.KindSeam,
+				Title: "Break", StartedAt: t0.Add(-time.Minute), DurationS: 3600},
+			{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+				YTID: "y1", Title: "Shadowed", StartedAt: airStart, DurationS: 3600},
+		}
+	}
+
+	t.Run("on air after a toggle, a live air row under stale talk is airing", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		segs := shadowed(t0, t0.Add(-5*time.Minute)) // nominal end ~55min ahead
+		s := buildN(t, now, true, segs...)           // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetAiring(),
+			"the cut clip shadows the air row the engine resumed, it does not erase it")
+		require.Equal(t, "Shadowed", resp.GetAiring().GetTitle())
+
+		require.Len(t, resp.GetPast(), 1, "the airing air row is excluded from past")
+		require.Equal(t, "Break", resp.GetPast()[0].GetTitle())
+		require.Equal(t, int64(1), resp.GetTotalPast(), "total-1")
+
+		// The clock anchor: the walk starts at the resumed track's real end,
+		// not at now. Anchoring at now would report the whole running order
+		// early by the track's remaining duration.
+		air := segs[1]
+		wantEnd := air.StartedAt.Add(time.Duration(air.DurationS) * time.Second)
+		require.NotEmpty(t, resp.GetUpcoming())
+		startedAt, err := time.Parse(time.RFC3339, resp.GetUpcoming()[0].GetStartedAt())
+		require.NoError(t, err)
+		require.WithinDuration(t, wantEnd, startedAt, 2*time.Second,
+			"the next item starts when the resumed track ends, not at now")
+	})
+
+	t.Run("on air after a toggle, an expired air row under stale talk is not airing", func(t *testing.T) {
+		// Guard against the scan unconditionally reporting an air row:
+		// ResumeOffset HAS expired here, so findBootResume declines.
+		t0 := time.Now()
+		now := t0.Add(time.Minute)
+		segs := shadowed(t0, t0.Add(-2*time.Hour)) // nominal end ~1h in the past
+		s := buildN(t, now, true, segs...)
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetAiring(), "the air row underneath finished before the toggle")
+		require.Len(t, resp.GetPast(), 2)
+		require.Equal(t, int64(2), resp.GetTotalPast())
+	})
+
+	t.Run("genuinely airing", func(t *testing.T) {
+		// Guard against over-correction: a row started inside the current
+		// session and still running is airing.
+		t0 := time.Now()
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Now playing", StartedAt: t0.Add(30 * time.Minute), DurationS: 3600}
+		s := build(t, seg, t0.Add(time.Hour), true) // GoOnAir anchors at ~t0
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp.GetAiring())
+		require.Equal(t, "Now playing", resp.GetAiring().GetTitle())
+		require.Empty(t, resp.GetPast())
+		require.Equal(t, int64(0), resp.GetTotalPast())
+	})
+}
+
+// radio.proto documents segment_id as a stable identity across polls, which a
+// console keys its rows on. air_log.id and talk_segment.id are independent
+// BIGSERIALs, and the same row changes role from airing to past.
+func TestGetShowTimelineSegmentIDsAreOriginQualifiedAndRoleIndependent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("equal ids across origins do not collide", func(t *testing.T) {
+		now := time.Now()
+		// The same id 7 from both tables — routine on a fresh database.
+		segs := []showlog.Segment{
+			{ID: 7, Origin: showlog.OriginTalk, Kind: showlog.KindSeam, Title: "Talk",
+				StartedAt: now.Add(-2 * time.Minute), DurationS: 40},
+			{ID: 7, Origin: showlog.OriginAir, Kind: "track", YTID: "y7", Title: "Track",
+				StartedAt: now.Add(-10 * time.Minute), DurationS: 200},
+		}
+		lib := library.NewMemLibrary()
+		require.NoError(t, lib.Add(ctx, library.Track{YTID: "y7", Title: "Track", DurationS: 200, ArtifactID: "a"}))
+
+		s := newTimelineTestServer(t, Deps{
+			Store:     station.NewMemStore(),
+			ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Len(t, resp.GetPast(), 2)
+		require.NotEqual(t, resp.GetPast()[0].GetSegmentId(), resp.GetPast()[1].GetSegmentId(),
+			"two rows with equal ids from different tables are different segments")
+	})
+
+	t.Run("the airing row keeps its id once past", func(t *testing.T) {
+		t0 := time.Now()
+		now := t0.Add(90 * time.Second)
+		seg := showlog.Segment{ID: 1, Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y1", Title: "Boundary", StartedAt: t0.Add(time.Minute), DurationS: 60}
+		lib := library.NewMemLibrary()
+		require.NoError(t, lib.Add(ctx, library.Track{YTID: "y1", Title: "Boundary", DurationS: 60, ArtifactID: "a"}))
+		st := station.NewMemStore()
+		_, err := st.GoOnAir(ctx)
+		require.NoError(t, err)
+
+		s := newTimelineTestServer(t, Deps{
+			Store:     st,
+			ShowLog:   &fakeShowLog{segs: []showlog.Segment{seg}, count: 1},
+			Requests:  request.NewMemStore(),
+			Sched:     schedule.NewMemStore(),
+			Library:   lib,
+			Listeners: live.NewMemListeners(time.Now),
+			Ledger:    &fakeLedger{},
+			Now:       func() time.Time { return now },
+		})
+
+		// Poll 1: mid-track.
+		resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, resp1.GetAiring())
+
+		// Poll 2: the same row, one item boundary later.
+		now = t0.Add(5 * time.Minute)
+		resp2, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{})
+		require.NoError(t, err)
+		require.Nil(t, resp2.GetAiring())
+		require.Len(t, resp2.GetPast(), 1)
+
+		require.Equal(t, resp1.GetAiring().GetSegmentId(), resp2.GetPast()[0].GetSegmentId(),
+			"the same DB row must keep one id whether airing or past")
+	})
+}
+
+// The median that sizes unknown blocks must not come from the requested page,
+// or the FUTURE becomes a function of how deep into the PAST the caller is
+// looking. The fixture's newest 30 rows are short and the older 30 are long,
+// so a page-derived median differs on every page below.
+func TestGetShowTimelineUpcomingIsIndependentOfPaging(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Now()
+	now := t0.Add(24 * time.Hour)
+
+	segs := make([]showlog.Segment, 60)
+	for i := range segs {
+		dur := 400
+		if i < 30 {
+			dur = 90
+		}
+		segs[i] = showlog.Segment{
+			ID: int64(i + 1), Origin: showlog.OriginAir, Kind: "track",
+			YTID: "y", Title: "Past", DurationS: dur,
+			// 20 min apart, so every row has long since finished.
+			StartedAt: now.Add(-time.Duration(i+1) * 20 * time.Minute),
+		}
+	}
+	lib := library.NewMemLibrary()
+	require.NoError(t, lib.Add(ctx, library.Track{YTID: "y", Title: "Past", DurationS: 90, ArtifactID: "a"}))
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(ctx)
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+		Now:       func() time.Time { return now },
+	})
+
+	// (limit, offset) pairs whose pages hold, respectively: too few air rows
+	// to have a median at all, a short-heavy sample, and a long-only sample.
+	pages := []struct{ limit, offset int32 }{{3, 0}, {50, 0}, {50, 50}}
+	var want []*radiov1.ShowSegment
+	for _, p := range pages {
+		resp, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: p.limit, Offset: p.offset})
+		require.NoError(t, err)
+		require.NotEmpty(t, resp.GetUpcoming())
+		if want == nil {
+			want = resp.GetUpcoming()
+			continue
+		}
+		require.Len(t, resp.GetUpcoming(), len(want), "limit=%d offset=%d", p.limit, p.offset)
+		for i, got := range resp.GetUpcoming() {
+			require.Equal(t, want[i].GetSegmentId(), got.GetSegmentId(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+			require.Equal(t, want[i].GetDurationS(), got.GetDurationS(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+			require.Equal(t, want[i].GetStartedAt(), got.GetStartedAt(), "limit=%d offset=%d item %d", p.limit, p.offset, i)
+		}
+	}
+}
+
+func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {
+	now := time.Now()
+	// On air but between items: newest row's end is already in the past.
+	// airing must be absent and total_past == total on all offsets.
+	segs := []showlog.Segment{
+		{ID: 1, Origin: showlog.OriginAir, Kind: "track", YTID: "y1", Title: "Past 0", StartedAt: now.Add(-4 * time.Minute), DurationS: 180},
+		{ID: 2, Origin: showlog.OriginAir, Kind: "track", YTID: "y2", Title: "Past 1", StartedAt: now.Add(-8 * time.Minute), DurationS: 200},
+		{ID: 3, Origin: showlog.OriginAir, Kind: "track", YTID: "y3", Title: "Past 2", StartedAt: now.Add(-12 * time.Minute), DurationS: 180},
+	}
+	lib := library.NewMemLibrary()
+	for _, sg := range segs {
+		require.NoError(t, lib.Add(context.Background(), library.Track{
+			YTID: sg.YTID, Title: sg.Title, Channel: sg.Artist,
+			DurationS: float64(sg.DurationS), ArtifactID: "a-" + sg.YTID,
+		}))
+	}
+
+	st := station.NewMemStore()
+	_, err := st.GoOnAir(context.Background())
+	require.NoError(t, err)
+
+	s := newTimelineTestServer(t, Deps{
+		Store:     st,
+		ShowLog:   &fakeShowLog{segs: segs, count: int64(len(segs))},
+		Requests:  request.NewMemStore(),
+		Sched:     schedule.NewMemStore(),
+		Library:   lib,
+		Listeners: live.NewMemListeners(time.Now),
+		Ledger:    &fakeLedger{},
+	})
+	ctx := context.Background()
+
+	// offset=0: airing absent, total_past = total = 3.
+	resp0, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 0})
+	require.NoError(t, err)
+	require.Nil(t, resp0.GetAiring())
+	require.Len(t, resp0.GetPast(), 2)
+	require.Equal(t, int64(3), resp0.GetTotalPast())
+
+	// offset=2: still no airing, still total_past = 3.
+	resp1, err := s.GetShowTimeline(ctx, &radiov1.GetShowTimelineRequest{Limit: 2, Offset: 2})
+	require.NoError(t, err)
+	require.Nil(t, resp1.GetAiring())
+	require.Len(t, resp1.GetPast(), 1)
+	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
+	require.Equal(t, int64(3), resp1.GetTotalPast()) // stable across pages
+}

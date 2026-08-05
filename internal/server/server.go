@@ -109,7 +109,7 @@ func (s *Server) ListLLMCalls(ctx context.Context, req *radiolabv1.ListLLMCallsR
 	if offset < 0 {
 		offset = 0
 	}
-	f := audit.Filter{Label: req.GetLabel(), ErrorsOnly: req.GetErrorsOnly()}
+	f := audit.Filter{Label: req.GetLabel(), ErrorsOnly: req.GetErrorsOnly(), CorrelationID: req.GetCorrelationId()}
 	recs, err := s.deps.Audit.List(ctx, f, limit, offset)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list llm calls: %v", err)
