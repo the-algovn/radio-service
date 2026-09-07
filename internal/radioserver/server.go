@@ -87,6 +87,14 @@ type Ledger interface {
 // director's mutating methods.
 type Breaks interface{ Snapshot() director.Snapshot }
 
+// BreakCommander is the WRITE half of the director seam, deliberately kept
+// apart from Breaks so the read interface stays read-only and its comment
+// stays true. Both are satisfied by the same *director.Director.
+type BreakCommander interface {
+	ForceBreak() bool
+	CancelPrepared() bool
+}
+
 // ShowLog is the read side of the show log: what aired, merged music+talk.
 // Append lives on the full Store; radioserver has no business writing it.
 type ShowLog interface {
@@ -115,6 +123,7 @@ type Deps struct {
 	Skipper   Skipper
 	Ledger    Ledger
 	Breaks    Breaks
+	Breaker   BreakCommander
 	ShowLog   ShowLog
 	Sessions  Sessions
 	BudgetUSD float64
@@ -511,6 +520,28 @@ func (s *Server) SkipTrack(ctx context.Context, _ *radiov1.SkipTrackRequest) (*r
 	return &radiov1.SkipTrackResponse{}, nil
 }
 
+// ForceBreak and CancelPreparedBreak are deliberately gate-free: ForceBreak
+// arms a flag the director then evaluates against every wake gate on its own
+// tick. Rejecting here on !st.OnAir would duplicate that logic in a second
+// place and let the two drift.
+func (s *Server) ForceBreak(ctx context.Context, _ *radiov1.ForceBreakRequest) (*radiov1.ForceBreakResponse, error) {
+	if s.deps.Breaker == nil {
+		return nil, status.Error(codes.FailedPrecondition, "the DJ is not running on this deployment")
+	}
+	armed := s.deps.Breaker.ForceBreak()
+	s.logger.InfoContext(ctx, "operator forced a break", "armed", armed)
+	return &radiov1.ForceBreakResponse{Armed: armed}, nil
+}
+
+func (s *Server) CancelPreparedBreak(ctx context.Context, _ *radiov1.CancelPreparedBreakRequest) (*radiov1.CancelPreparedBreakResponse, error) {
+	if s.deps.Breaker == nil {
+		return nil, status.Error(codes.FailedPrecondition, "the DJ is not running on this deployment")
+	}
+	cancelled := s.deps.Breaker.CancelPrepared()
+	s.logger.InfoContext(ctx, "operator cancelled a break", "cancelled", cancelled)
+	return &radiov1.CancelPreparedBreakResponse{Cancelled: cancelled}, nil
+}
+
 func (s *Server) SetAIEnabled(ctx context.Context, req *radiov1.SetAIEnabledRequest) (*radiov1.SetAIEnabledResponse, error) {
 	st, err := s.deps.Store.SetAIEnabled(ctx, req.GetEnabled())
 	if err != nil {
@@ -742,6 +773,7 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 			FinishedSinceSeam:   snap.FinishedSinceSeam,
 			LastStationID:       snap.LastStationID,
 			StationIDsAvailable: snap.StationIDsAvailable,
+			Forced:              snap.Forced,
 		}
 	}
 
@@ -950,6 +982,7 @@ func timelineToProto(seg *timeline.Segment) *radiov1.ShowSegment {
 		OutTokens:       int32(seg.OutTokens),
 		CostUsd:         seg.CostUSD,
 		LatencyMs:       int32(seg.LatencyMS),
+		Forced:          seg.Forced,
 	}
 	if !seg.StartedAt.IsZero() {
 		out.StartedAt = seg.StartedAt.Format(time.RFC3339)

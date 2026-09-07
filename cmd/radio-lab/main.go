@@ -369,6 +369,7 @@ func main() {
 	// pass and then panic on the first mu.Lock().
 	if dj != nil {
 		deps.Breaks = dj
+		deps.Breaker = dj
 	}
 	radiov1.RegisterRadioServiceServer(gs, radioserver.New(deps))
 	healthpb.RegisterHealthServer(gs, health.NewServer())

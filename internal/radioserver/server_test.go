@@ -84,6 +84,17 @@ func newTestServer(t *testing.T, ytIDs ...string) *Server {
 	})
 }
 
+func newTestServerWithBreaker(t *testing.T, fb BreakCommander) *Server {
+	t.Helper()
+	return New(Deps{
+		Store: station.NewMemStore(), Log: live.NewMemAirLog(), Search: &fakeSearch{},
+		Requests: request.NewMemStore(), Library: library.NewMemLibrary(), Location: time.FixedZone("ICT", 7*3600),
+		Listeners: live.NewMemListeners(time.Now),
+		Now:       time.Now, Skipper: &fakeSkipper{}, Ledger: &fakeLedger{spent: 0.25}, BudgetUSD: 1.0,
+		TTS: fakeTTS{}, Breaker: fb,
+	})
+}
+
 // TestPlaylistRPCsAreGone: the 9 deleted playlist methods now fall through to
 // the embedded UnimplementedRadioServiceServer and answer Unimplemented.
 func TestPlaylistRPCsAreGone(t *testing.T) {
@@ -935,4 +946,72 @@ func TestGetShowTimelineBetweenItemsStillOnAir(t *testing.T) {
 	require.Len(t, resp1.GetPast(), 1)
 	require.Equal(t, "Past 2", resp1.GetPast()[0].GetTitle())
 	require.Equal(t, int64(3), resp1.GetTotalPast()) // stable across pages
+}
+
+type fakeBreaker struct {
+	forceReturns  bool
+	cancelReturns bool
+	forceCalls    int
+	cancelCalls   int
+}
+
+func (f *fakeBreaker) ForceBreak() bool     { f.forceCalls++; return f.forceReturns }
+func (f *fakeBreaker) CancelPrepared() bool { f.cancelCalls++; return f.cancelReturns }
+
+func TestForceBreakWithoutADirector(t *testing.T) {
+	s := newTestServer(t) // no Breaker wired
+
+	_, err := s.ForceBreak(context.Background(), &radiov1.ForceBreakRequest{})
+
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestCancelPreparedBreakWithoutADirector(t *testing.T) {
+	s := newTestServer(t)
+
+	_, err := s.CancelPreparedBreak(context.Background(), &radiov1.CancelPreparedBreakRequest{})
+
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestForceBreakReportsArmed(t *testing.T) {
+	fb := &fakeBreaker{forceReturns: true}
+	s := newTestServerWithBreaker(t, fb)
+
+	resp, err := s.ForceBreak(context.Background(), &radiov1.ForceBreakRequest{})
+
+	require.NoError(t, err)
+	require.True(t, resp.GetArmed())
+	require.Equal(t, 1, fb.forceCalls)
+}
+
+func TestForceBreakReportsNotArmedAgainstAPreparedClip(t *testing.T) {
+	fb := &fakeBreaker{forceReturns: false}
+	s := newTestServerWithBreaker(t, fb)
+
+	resp, err := s.ForceBreak(context.Background(), &radiov1.ForceBreakRequest{})
+
+	require.NoError(t, err)
+	require.False(t, resp.GetArmed())
+}
+
+func TestCancelPreparedBreakWithNothingArmed(t *testing.T) {
+	fb := &fakeBreaker{cancelReturns: false}
+	s := newTestServerWithBreaker(t, fb)
+
+	resp, err := s.CancelPreparedBreak(context.Background(), &radiov1.CancelPreparedBreakRequest{})
+
+	require.NoError(t, err, "cancelling nothing is success, not an error")
+	require.False(t, resp.GetCancelled())
+	require.Equal(t, 1, fb.cancelCalls)
+}
+
+func TestCancelPreparedBreakReportsCancelled(t *testing.T) {
+	fb := &fakeBreaker{cancelReturns: true}
+	s := newTestServerWithBreaker(t, fb)
+
+	resp, err := s.CancelPreparedBreak(context.Background(), &radiov1.CancelPreparedBreakRequest{})
+
+	require.NoError(t, err)
+	require.True(t, resp.GetCancelled())
 }
