@@ -20,8 +20,13 @@ import (
 	"github.com/the-algovn/radio-service/internal/station"
 )
 
-// The talk segment kinds. Mirrored by value in internal/live and pinned by
-// live.TestClipKindConstantsMirrorShowlog.
+// The talk segment kinds. Of these, only KindSeam and KindStationID have a
+// live counterpart today (live.ClipSeam, live.ClipStationID - same values).
+// Nothing asserts the match directly; it is pinned behaviourally instead,
+// since director_test.go's TestTakeFreshSeamResetsCounter and
+// TestTakeStationIDAlwaysFreshAndStampsTimer both fail if either string
+// drifts and Advance falls through to its default branch. The other three
+// kinds get their live counterparts in a later plan.
 const (
 	KindStationID         = "station_id"
 	KindSeam              = "seam"

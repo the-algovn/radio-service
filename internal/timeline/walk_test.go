@@ -512,6 +512,36 @@ func TestPreparedClipCarriesForcedWhenArmed(t *testing.T) {
 	require.True(t, up[0].Forced, "Cancel must reach a prepared forced break")
 }
 
+// TestPreparedClipAdvancesCadenceWithTheEngineKind pins seamArm's middle
+// return - the ENGINE kind fed to cadence.Advance - for the prepared-clip
+// arm specifically. If that return is wrong (empty, or the WIRE kind by
+// mistake), Advance falls to its default branch: Forced is never cleared and
+// FinishedSinceSeam is never reset, so the next cadence-due seam wrongly
+// inherits the operator's single arming.
+func TestPreparedClipAdvancesCadenceWithTheEngineKind(t *testing.T) {
+	s := liveState()
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipSeam
+	s.Dir.ClipDurationS = 8
+	s.Dir.ClipAnchorYTID = "y1"
+	s.Dir.ClipAnchorStartedAt = base
+	s.Airing.YTID = "y1"
+	s.Dir.Forced = true
+
+	up, _, _ := timeline.Project(s)
+
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+	require.True(t, up[0].Forced, "the prepared clip itself carries the arming")
+
+	for _, seg := range up[1:] {
+		if seg.Kind == timeline.KindDJ {
+			require.False(t, seg.Forced,
+				"Forced must be cleared once the prepared clip airs in the projection - "+
+					"a later seam still carrying it means Advance never ran")
+		}
+	}
+}
+
 // Take anchor-checks seam clips against the just-finished entry, so a seam
 // prepared before any music aired is discarded. The projector must not
 // promise a break that cannot air; the flag survives and fires at the first
