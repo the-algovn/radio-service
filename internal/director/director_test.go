@@ -483,3 +483,26 @@ func TestNoSeamBeforeAnyMusicThisSession(t *testing.T) {
 	require.Equal(t, live.ClipSeam, dr.dueKindLocked(clk.Now(), dj),
 		"the first finished track opens the seam")
 }
+
+func TestGoingOnAirStartsTheSessionSilent(t *testing.T) {
+	// The counter carries across sessions. Without the reset, a seam is due
+	// the instant a new broadcast opens, is anchored to the PREVIOUS session's
+	// last track, and is discarded by Take - one wasted LLM call plus TTS on
+	// every session open.
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	seedAirLog(t, f)
+
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	f.dr.TrackFinished(live.Entry{YTID: "b"})
+	require.True(t, f.dr.cad.SessionHasMusic)
+	require.Equal(t, 2, f.dr.cad.FinishedSinceSeam)
+
+	onAir(t, f)
+	f.dr.RunOnce(context.Background())
+
+	require.False(t, f.dr.cad.SessionHasMusic, "a new session has heard no music yet")
+	require.Equal(t, 0, f.dr.cad.FinishedSinceSeam, "the format clock restarts with the session")
+	require.False(t, slotFilled(f.dr), "no clip is prepared before the session's first track")
+	require.Zero(t, f.model.calls, "and nothing is paid for one")
+}

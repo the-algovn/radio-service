@@ -288,9 +288,14 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	if !st.OnAir || !st.AIEnabled {
 		dr.cancelPendingLocked("paused or off-air")
 	}
+	// Going on air starts a new broadcast session. The counter must restart
+	// with it: a seam owed from the last session would be anchored to that
+	// session's last track and discarded by Take against the zero Entry.
 	if st.OnAir && !dr.wasOnAir {
 		dr.cad.LastStationID = now
 		dr.cad.Forced = false
+		dr.cad.SessionHasMusic = false
+		dr.cad.FinishedSinceSeam = 0
 	}
 	dr.wasOnAir = st.OnAir
 	dr.mu.Unlock()
