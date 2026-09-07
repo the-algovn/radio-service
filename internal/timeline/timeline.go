@@ -122,6 +122,11 @@ type Segment struct {
 	Model                                              string
 	InTokens, OutTokens, LatencyMS                     int
 	CostUSD                                            float64
+
+	// Forced marks a break the operator armed rather than one the cadence
+	// owed. The console offers Cancel on these; a cadence-due break is not
+	// cancellable in any meaningful sense, since the cadence re-arms it.
+	Forced bool
 }
 
 // DirectorSnapshot is a value copy of the director's cadence state.
@@ -151,6 +156,10 @@ type DirectorSnapshot struct {
 	// station-ID lines the engine falls through to BreakEvery and airs a seam
 	// where the projector would otherwise promise a station_id.
 	StationIDsAvailable bool
+
+	// Forced is the operator-armed term of the engine's due test. A break can
+	// be due with the cadence nowhere near owed.
+	Forced bool
 }
 
 // State is everything Project needs, gathered once by the caller.

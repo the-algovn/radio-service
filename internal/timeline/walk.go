@@ -185,6 +185,7 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 				BacksellTitle: s.Dir.ClipBacksellTitle,
 				PromiseTitle:  s.Dir.ClipPromiseTitle,
 				CorrelationID: s.Dir.ClipCorrelationID,
+				Forced:        s.Dir.Forced,
 			}, true
 		}
 	}
@@ -218,16 +219,19 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 
 	// Seam due — only when sessionHasMusic: a seam clip at session start
 	// always fails the anchor check against the zero Entry taken by Take.
+	// A forced break is no exception; the flag survives the discard and
+	// fires at the first real seam.
 	if !sessionHasMusic {
 		return Segment{}, false
 	}
-	if s.Station.DJ.BreakEvery > 0 && finishedSinceSeam+1 >= s.Station.DJ.BreakEvery {
+	if s.Dir.Forced || (s.Station.DJ.BreakEvery > 0 && finishedSinceSeam+1 >= s.Station.DJ.BreakEvery) {
 		return Segment{
 			SegmentID: fmt.Sprintf("proj:due:%d", idx),
 			Kind:      KindDJ,
 			Certainty: CertaintyDue,
 			DurationS: EstSeamS,
 			StartedAt: clock,
+			Forced:    s.Dir.Forced,
 		}, true
 	}
 

@@ -440,6 +440,94 @@ func isBreak(s timeline.Segment) bool {
 	return s.Kind == timeline.KindDJ || s.Kind == timeline.KindStationID
 }
 
+func TestForcedBreakProjectsAsDue(t *testing.T) {
+	s := liveState()
+	s.Station.DJ.BreakEvery = 8 // cadence nowhere near owed
+	s.Dir.FinishedSinceSeam = 0
+	s.Dir.Forced = true
+
+	up, _, _ := timeline.Project(s)
+
+	var dj *timeline.Segment
+	for i := range up {
+		if up[i].Kind == timeline.KindDJ {
+			dj = &up[i]
+			break
+		}
+	}
+	require.NotNil(t, dj, "a forced break must project as a row")
+	require.Equal(t, timeline.CertaintyDue, dj.Certainty)
+	require.True(t, dj.Forced, "the row must say it was armed, not owed")
+}
+
+func TestCadenceDueIsNotMarkedForced(t *testing.T) {
+	s := liveState()
+	s.Station.DJ.BreakEvery = 2
+	s.Dir.FinishedSinceSeam = 1 // +1 counts the airing track: owed
+	s.Dir.Forced = false
+
+	up, _, _ := timeline.Project(s)
+
+	for _, seg := range up {
+		if seg.Kind == timeline.KindDJ && seg.Certainty == timeline.CertaintyDue {
+			require.False(t, seg.Forced, "cadence-owed is not operator-armed")
+			return
+		}
+	}
+	t.Fatal("expected a cadence-due break")
+}
+
+func TestPreparedClipCarriesForcedWhenArmed(t *testing.T) {
+	s := liveState()
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipStationID // always fresh, no anchor needed
+	s.Dir.ClipDurationS = 8
+	s.Dir.Forced = true
+
+	up, _, _ := timeline.Project(s)
+
+	require.NotEmpty(t, up)
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+	require.True(t, up[0].Forced, "Cancel must reach a prepared forced break")
+}
+
+// Take anchor-checks seam clips against the just-finished entry, so a seam
+// prepared before any music aired is discarded. The projector must not
+// promise a break that cannot air; the flag survives and fires at the first
+// real seam instead.
+func TestForcedBreakIsSuppressedBeforeAnyMusicAired(t *testing.T) {
+	s := liveState()
+	s.Dir.Forced = true
+	s.Airing = nil // no music aired this session
+
+	up, _, _ := timeline.Project(s)
+
+	require.NotEqual(t, timeline.KindDJ, up[0].Kind,
+		"a forced break cannot open the session before any music has aired")
+
+	found := false
+	for _, seg := range up {
+		if seg.Kind == timeline.KindDJ {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "the forced flag must survive to fire at the first real seam")
+}
+
+func TestGateSuppressesAForcedDueBreak(t *testing.T) {
+	s := liveState()
+	s.Dir.Forced = true
+	s.Listeners = 0
+
+	up, _, gate := timeline.Project(s)
+	require.Equal(t, timeline.GateNoListeners, gate)
+	for _, seg := range up {
+		require.NotEqual(t, timeline.CertaintyDue, seg.Certainty,
+			"ForceBreak bypasses cadence only, never the listener gate")
+	}
+}
+
 func firstOfKind(t *testing.T, segs []timeline.Segment, kinds ...string) timeline.Segment {
 	t.Helper()
 	for _, s := range segs {

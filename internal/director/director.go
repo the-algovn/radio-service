@@ -237,6 +237,28 @@ func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
 	return ""
 }
 
+// DueKindForTest evaluates dueKindLocked against a synthetic state. It exists
+// so internal/timeline can pin its hand-written copy of this rule to the
+// original; walk.go re-implements the due test and would otherwise drift.
+func DueKindForTest(forced bool, finishedSinceSeam int, lastStationIDAgo time.Duration,
+	idsAvailable bool, dj station.DJSettings) string {
+
+	now := time.Now()
+	ids := &stationIDs{}
+	if idsAvailable {
+		ids = &stationIDs{lines: []string{"x"}}
+	}
+	dr := &Director{ids: ids}
+	dr.forcedBreak = forced
+	dr.finishedSinceSeam = finishedSinceSeam
+	if lastStationIDAgo > 0 {
+		dr.lastStationID = now.Add(-lastStationIDAgo)
+	} else {
+		dr.lastStationID = now
+	}
+	return dr.dueKindLocked(now, dj)
+}
+
 // cancelPendingLocked discards a prepared-but-unaired clip (operator paused
 // the DJ or the station went off-air). Caller holds mu.
 func (dr *Director) cancelPendingLocked(reason string) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/director"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
@@ -230,6 +231,78 @@ func TestProjectMatchesPeekNext(t *testing.T) {
 				"certainty mismatch at %q", first.Title)
 			require.Equal(t, up.Track.Title, first.Title,
 				"title mismatch: PeekNext=%q projector=%q", up.Track.Title, first.Title)
+		})
+	}
+}
+
+// newConformanceState is the same on-air, music-aired, gate-OK state as
+// liveState, parameterised by the DJSettings under test.
+func newConformanceState(t *testing.T, dj station.DJSettings) timeline.State {
+	t.Helper()
+	s := liveState()
+	s.Station.DJ = dj
+	return s
+}
+
+// TestSeamArmMatchesDueKind pins walk.go's break arm to the director's own
+// dueKindLocked. The two are hand-written copies of one rule; without this
+// they drift silently and the console projects a break the engine will not
+// air, or misses one it will.
+func TestSeamArmMatchesDueKind(t *testing.T) {
+	cases := []struct {
+		name              string
+		forced            bool
+		finishedSinceSeam int
+		breakEvery        int
+		stationIDMin      int
+		idsAvailable      bool
+		lastStationIDAgo  time.Duration
+	}{
+		{name: "idle", breakEvery: 4, finishedSinceSeam: 0},
+		{name: "cadence owed", breakEvery: 4, finishedSinceSeam: 3},
+		{name: "forced", forced: true, breakEvery: 8, finishedSinceSeam: 0},
+		{name: "forced and cadence owed", forced: true, breakEvery: 2, finishedSinceSeam: 1},
+		{
+			name: "station id outranks a forced seam", forced: true, breakEvery: 8,
+			stationIDMin: 1, idsAvailable: true, lastStationIDAgo: 2 * time.Minute,
+		},
+		{name: "cadence off", breakEvery: 0, finishedSinceSeam: 9},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dj := station.DJSettings{BreakEvery: tc.breakEvery, StationIDMin: tc.stationIDMin}
+			engine := director.DueKindForTest(
+				tc.forced, tc.finishedSinceSeam, tc.lastStationIDAgo, tc.idsAvailable, dj)
+
+			s := newConformanceState(t, dj)
+			s.Dir.Forced = tc.forced
+			s.Dir.FinishedSinceSeam = tc.finishedSinceSeam
+			s.Dir.StationIDsAvailable = tc.idsAvailable
+			if tc.lastStationIDAgo > 0 {
+				s.Dir.LastStationID = s.Now.Add(-tc.lastStationIDAgo)
+			}
+
+			up, _, _ := timeline.Project(s)
+			require.NotEmpty(t, up)
+
+			// dueKindLocked answers one instant: is a break due with exactly
+			// these inputs. Only up[0] shares that instant unmodified - a
+			// cadence that is not due yet still recurs later in the walk, so
+			// scanning past up[0] would compare against a state the engine
+			// was never asked about.
+			projected := ""
+			if up[0].Certainty == timeline.CertaintyDue {
+				switch up[0].Kind {
+				case timeline.KindDJ:
+					projected = live.ClipSeam
+				case timeline.KindStationID:
+					projected = live.ClipStationID
+				}
+			}
+
+			require.Equal(t, engine, projected,
+				"walk.go and dueKindLocked disagree about %q", tc.name)
 		})
 	}
 }
