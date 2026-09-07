@@ -506,3 +506,12 @@ func TestGoingOnAirStartsTheSessionSilent(t *testing.T) {
 	require.False(t, slotFilled(f.dr), "no clip is prepared before the session's first track")
 	require.Zero(t, f.model.calls, "and nothing is paid for one")
 }
+
+func TestSnapshotCarriesSessionHasMusic(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+
+	require.False(t, dr.Snapshot().SessionHasMusic)
+	dr.TrackFinished(live.Entry{YTID: "y1"})
+	require.True(t, dr.Snapshot().SessionHasMusic,
+		"the projector re-implements the due test and needs this term")
+}

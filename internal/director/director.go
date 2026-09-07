@@ -107,6 +107,11 @@ type Snapshot struct {
 	// re-implements the due test off this snapshot, so omitting it leaves the
 	// console blind to a forced break until the clip is prepared a tick later.
 	Forced bool
+
+	// SessionHasMusic mirrors the gate of the same name in cadence.DueKind.
+	// Without it the projector cannot tell a session that has aired music
+	// from one that has not, and promises a seam the engine will not make.
+	SessionHasMusic bool
 }
 
 // Director prepares talk breaks ahead of air and hands them to the feeder
@@ -359,6 +364,7 @@ func (dr *Director) Snapshot() Snapshot {
 		// is a len() under an uncontended lock — no I/O, no clock read.
 		StationIDsAvailable: dr.ids.available(),
 		Forced:              dr.cad.Forced,
+		SessionHasMusic:     dr.cad.SessionHasMusic,
 	}
 	if dr.slot != nil {
 		c := *dr.slot

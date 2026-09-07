@@ -160,6 +160,11 @@ type DirectorSnapshot struct {
 	// Forced is the operator-armed term of the engine's due test. A break can
 	// be due with the cadence nowhere near owed.
 	Forced bool
+
+	// SessionHasMusic mirrors the gate of the same name in cadence.DueKind.
+	// Without it the projector cannot tell a session that has aired music
+	// from one that has not, and promises a seam the engine will not make.
+	SessionHasMusic bool
 }
 
 // State is everything Project needs, gathered once by the caller.
