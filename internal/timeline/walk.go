@@ -35,6 +35,7 @@ func Project(s State) (upcoming, staging []Segment, gate string) {
 	start := clock
 	finishedSinceSeam := s.Dir.FinishedSinceSeam
 	lastStationID := s.Dir.LastStationID
+	forced := s.Dir.Forced
 	ready := readyOnly(s.Pending)
 	pinConsumed := false
 	lastWasBreak := s.Airing != nil && isBreakKind(s.Airing.Kind)
@@ -43,14 +44,17 @@ func Project(s State) (upcoming, staging []Segment, gate string) {
 
 	for len(upcoming) < MaxSegments && clock.Sub(start) < HorizonS*time.Second {
 		if seg, ok := seamArm(s, gate, clock, first, lastWasBreak, sessionHasMusic,
-			finishedSinceSeam, lastStationID, len(upcoming)); ok {
+			finishedSinceSeam, lastStationID, forced, len(upcoming)); ok {
 			upcoming = append(upcoming, seg)
 			clock = clock.Add(time.Duration(seg.DurationS) * time.Second)
 			lastWasBreak = true
 			if seg.Kind == KindStationID {
 				lastStationID = clock
 			} else {
+				// A forced seam is still owed after a station ID airs - only the
+				// seam branch may clear it, mirroring director.go Take.
 				finishedSinceSeam = 0
+				forced = false
 			}
 			first = false
 			continue // a break is never followed immediately by another
@@ -163,7 +167,7 @@ func buildStaging(s State) []Segment {
 // NOT — a clip already in the director's slot is paid for and Take will
 // still air it regardless of the current gate.
 func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, sessionHasMusic bool,
-	finishedSinceSeam int, lastStationID time.Time, idx int) (Segment, bool) {
+	finishedSinceSeam int, lastStationID time.Time, forced bool, idx int) (Segment, bool) {
 
 	if lastWasBreak {
 		return Segment{}, false
@@ -185,7 +189,7 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 				BacksellTitle: s.Dir.ClipBacksellTitle,
 				PromiseTitle:  s.Dir.ClipPromiseTitle,
 				CorrelationID: s.Dir.ClipCorrelationID,
-				Forced:        s.Dir.Forced,
+				Forced:        forced && kind == KindDJ,
 			}, true
 		}
 	}
@@ -224,14 +228,14 @@ func seamArm(s State, gate string, clock time.Time, first, lastWasBreak, session
 	if !sessionHasMusic {
 		return Segment{}, false
 	}
-	if s.Dir.Forced || (s.Station.DJ.BreakEvery > 0 && finishedSinceSeam+1 >= s.Station.DJ.BreakEvery) {
+	if forced || (s.Station.DJ.BreakEvery > 0 && finishedSinceSeam+1 >= s.Station.DJ.BreakEvery) {
 		return Segment{
 			SegmentID: fmt.Sprintf("proj:due:%d", idx),
 			Kind:      KindDJ,
 			Certainty: CertaintyDue,
 			DurationS: EstSeamS,
 			StartedAt: clock,
-			Forced:    s.Dir.Forced,
+			Forced:    forced,
 		}, true
 	}
 

@@ -320,6 +320,20 @@ func TestSnapshotIsRaceFreeWithTake(t *testing.T) {
 		}
 		close(done)
 	}()
+	forceDone := make(chan struct{})
+	go func() {
+		for range 200 {
+			_ = dr.ForceBreak()
+		}
+		close(forceDone)
+	}()
+	cancelDone := make(chan struct{})
+	go func() {
+		for range 200 {
+			_ = dr.CancelPrepared()
+		}
+		close(cancelDone)
+	}()
 	for range 200 {
 		dr.mu.Lock()
 		dr.slot = &live.Clip{Path: "/nonexistent", Kind: live.ClipStationID}
@@ -327,6 +341,8 @@ func TestSnapshotIsRaceFreeWithTake(t *testing.T) {
 		_, _ = dr.Take(live.Entry{})
 	}
 	<-done
+	<-forceDone
+	<-cancelDone
 }
 
 func TestRunExitsOnCancel(t *testing.T) {

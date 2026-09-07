@@ -480,8 +480,11 @@ func TestCadenceDueIsNotMarkedForced(t *testing.T) {
 func TestPreparedClipCarriesForcedWhenArmed(t *testing.T) {
 	s := liveState()
 	s.Dir.HasClip = true
-	s.Dir.ClipKind = live.ClipStationID // always fresh, no anchor needed
+	s.Dir.ClipKind = live.ClipSeam
 	s.Dir.ClipDurationS = 8
+	s.Dir.ClipAnchorYTID = "y1"
+	s.Dir.ClipAnchorStartedAt = base
+	s.Airing.YTID = "y1"
 	s.Dir.Forced = true
 
 	up, _, _ := timeline.Project(s)
@@ -526,6 +529,27 @@ func TestGateSuppressesAForcedDueBreak(t *testing.T) {
 		require.NotEqual(t, timeline.CertaintyDue, seg.Certainty,
 			"ForceBreak bypasses cadence only, never the listener gate")
 	}
+}
+
+// A cadence break can legitimately recur later in the 30-minute horizon once
+// finishedSinceSeam resets - that is correct behaviour, matching the engine.
+// What must not recur is the operator's SINGLE arming, so this counts rows
+// carrying Forced, not every KindDJ row.
+func TestForcedBreakFiresExactlyOnceAcrossTheHorizon(t *testing.T) {
+	s := liveState()
+	s.Station.DJ.BreakEvery = 8
+	s.Station.DJ.StationIDMin = 0
+	s.Dir.Forced = true
+
+	up, _, _ := timeline.Project(s)
+
+	count := 0
+	for _, seg := range up {
+		if seg.Kind == timeline.KindDJ && seg.Forced {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "an armed forced break must fire once, not at every seam")
 }
 
 func firstOfKind(t *testing.T, segs []timeline.Segment, kinds ...string) timeline.Segment {
