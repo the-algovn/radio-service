@@ -96,3 +96,37 @@ func DueKind(s State, dj station.DJSettings) string {
 	}
 	return ""
 }
+
+// Advance is what airing a talk segment does to the format clock. Every kind
+// she authored resets the seam counter; a station ID does not, because it is a
+// pre-written line rather than a break.
+//
+// Forced is cleared by KindSeam ALONE, not by every non-station-id kind.
+// Forced only ever makes a seam due, so letting a musing or a greeting consume
+// the arming would swallow an operator's forced break silently.
+func Advance(s State, kind string, at time.Time) State {
+	switch kind {
+	case KindStationID:
+		s.LastStationID = at
+		return s
+	case KindSeam:
+		s.Forced = false
+	case KindMusing:
+		s.LastMusing = at
+	case KindDaypartTransition:
+		s.PendingDaypart = time.Time{}
+	case KindWakeGreeting:
+		s.PendingWake = false
+	default:
+		return s
+	}
+	s.FinishedSinceSeam = 0
+	return s
+}
+
+// AdvanceMusic is what one aired music item does to the format clock.
+func AdvanceMusic(s State) State {
+	s.FinishedSinceSeam++
+	s.SessionHasMusic = true
+	return s
+}

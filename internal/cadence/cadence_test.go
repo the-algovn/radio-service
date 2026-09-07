@@ -190,3 +190,83 @@ func TestDueKind(t *testing.T) {
 		})
 	}
 }
+
+func TestAdvance(t *testing.T) {
+	later := now.Add(time.Hour)
+
+	t.Run("a station id stamps only its own timer", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		s.Forced = true
+		got := cadence.Advance(s, cadence.KindStationID, later)
+		require.Equal(t, later, got.LastStationID)
+		require.Equal(t, 3, got.FinishedSinceSeam, "a station id is not a break she wrote")
+		require.True(t, got.Forced, "a forced seam is still owed after a station id airs")
+	})
+
+	t.Run("a seam resets the counter and consumes the arming", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		s.Forced = true
+		got := cadence.Advance(s, cadence.KindSeam, later)
+		require.Equal(t, 0, got.FinishedSinceSeam)
+		require.False(t, got.Forced)
+	})
+
+	t.Run("a musing resets the counter, stamps its timer, and leaves the arming", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		s.Forced = true
+		got := cadence.Advance(s, cadence.KindMusing, later)
+		require.Equal(t, 0, got.FinishedSinceSeam)
+		require.Equal(t, later, got.LastMusing)
+		require.True(t, got.Forced,
+			"Forced only ever makes a seam due, so only a seam may consume it")
+	})
+
+	t.Run("a daypart transition clears its pending and leaves the arming", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		s.Forced = true
+		s.PendingDaypart = now.Add(-time.Minute)
+		got := cadence.Advance(s, cadence.KindDaypartTransition, later)
+		require.Equal(t, 0, got.FinishedSinceSeam)
+		require.True(t, got.PendingDaypart.IsZero())
+		require.True(t, got.Forced)
+	})
+
+	t.Run("a wake greeting clears its flag and leaves the arming", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		s.Forced = true
+		s.PendingWake = true
+		got := cadence.Advance(s, cadence.KindWakeGreeting, later)
+		require.Equal(t, 0, got.FinishedSinceSeam)
+		require.False(t, got.PendingWake)
+		require.True(t, got.Forced)
+	})
+
+	t.Run("an unknown kind changes nothing", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		require.Equal(t, s, cadence.Advance(s, "not_a_kind", later))
+	})
+
+	t.Run("the argument is not mutated", func(t *testing.T) {
+		s := live()
+		s.FinishedSinceSeam = 3
+		_ = cadence.Advance(s, cadence.KindSeam, later)
+		require.Equal(t, 3, s.FinishedSinceSeam)
+	})
+}
+
+func TestAdvanceMusic(t *testing.T) {
+	s := live()
+	s.SessionHasMusic = false
+	s.FinishedSinceSeam = 1
+
+	got := cadence.AdvanceMusic(s)
+	require.Equal(t, 2, got.FinishedSinceSeam)
+	require.True(t, got.SessionHasMusic)
+	require.Equal(t, 1, s.FinishedSinceSeam, "the argument is not mutated")
+}
