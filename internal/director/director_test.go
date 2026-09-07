@@ -146,11 +146,11 @@ func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
 func TestDueKindArithmetic(t *testing.T) {
 	dr, clk := newCoreDirector(t)
 	dj := station.DJSettings{BreakEvery: 2}
+	dr.cad.SessionHasMusic = true
 	dr.mu.Lock()
 	require.Equal(t, "", dr.dueKindLocked(clk.Now(), dj), "0 finished + current = 1 < 2")
 	dr.mu.Unlock()
 	dr.TrackFinished(live.Entry{YTID: "a"})
-	dr.cad.SessionHasMusic = true
 	dr.mu.Lock()
 	require.Equal(t, live.ClipSeam, dr.dueKindLocked(clk.Now(), dj), "1 finished + current = 2 >= 2")
 	dr.mu.Unlock()

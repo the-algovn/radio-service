@@ -91,6 +91,8 @@ func DueKind(s State, dj station.DJSettings) string {
 		s.Now.Sub(s.LastMusing) >= time.Duration(dj.MusingEveryMin)*time.Minute {
 		return KindMusing
 	}
+	// The +1 counts the currently-airing track - the one the break will
+	// describe - so the default cadence is truly every BreakEvery tracks.
 	if s.Forced || (dj.BreakEvery > 0 && s.FinishedSinceSeam+1 >= dj.BreakEvery) {
 		return KindSeam
 	}
