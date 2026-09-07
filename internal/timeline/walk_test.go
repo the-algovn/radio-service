@@ -434,6 +434,24 @@ func TestSeamDueIsSkippedWhenNoMusicHasAired(t *testing.T) {
 	require.NotEqual(t, timeline.KindStationID, up[0].Kind)
 }
 
+// TestDirSessionHasMusicArmsASeamWithNothingAiring pins the left operand of
+// walk.go's `s.Dir.SessionHasMusic || (s.Airing != nil && ...)`. Nothing is
+// airing here, so the right operand is false throughout - only the
+// director's own SessionHasMusic can make the seam due. Without reading
+// s.Dir.SessionHasMusic at all, the walk would derive session-has-music
+// purely from Airing and wrongly suppress this seam.
+func TestDirSessionHasMusicArmsASeamWithNothingAiring(t *testing.T) {
+	s := liveState()
+	s.Airing = nil
+	s.Dir.SessionHasMusic = true
+	s.Dir.FinishedSinceSeam = 1 // +1 == BreakEvery(2): owed
+
+	up, _, _ := timeline.Project(s)
+
+	require.Equal(t, timeline.KindDJ, up[0].Kind)
+	require.Equal(t, timeline.CertaintyDue, up[0].Certainty)
+}
+
 // helpers
 
 func isBreak(s timeline.Segment) bool {

@@ -78,7 +78,9 @@ func Project(s State) (upcoming, staging []Segment, gate string) {
 	return upcoming, staging, gate
 }
 
-func isBreakKind(k string) bool { return k == KindDJ || k == KindStationID }
+// isBreakKind is an exclusion, not an enumeration, so it stays correct as the
+// wire vocabulary grows without this call site having to know every kind.
+func isBreakKind(k string) bool { return k != KindTrack && k != KindUnknown }
 
 func readyOnly(items []request.Item) []request.Item {
 	out := make([]request.Item, 0, len(items))

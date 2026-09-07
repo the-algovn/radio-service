@@ -6,8 +6,8 @@
 // it live against its own state; internal/timeline evaluates it repeatedly
 // against synthetic state while projecting the console's forward running
 // order. Those were independent hand-written copies pinned together by a
-// director export named DueKindForTest, whose own comment called the
-// arrangement a drift risk. This package is the single copy.
+// test-only director export whose own comment called the arrangement a
+// drift risk. This package is the single copy.
 //
 // Pure by construction: no I/O, no logging, and no time.Now() - State.Now is
 // the only "now", so the projector can ask about an instant that has not
