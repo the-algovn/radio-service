@@ -20,6 +20,7 @@ type AirLog struct {
 	Source          string
 	RequestedByName string
 	Reason          string
+	Dedication      string
 }
 
 type BroadcastSession struct {
@@ -89,6 +90,7 @@ type Request struct {
 	AiredAt      *time.Time
 	Reason       string
 	Position     pgtype.Int4
+	Dedication   string
 }
 
 type Station struct {

@@ -141,6 +141,7 @@ type airItem struct {
 	source          string
 	requestedByName string
 	reason          string
+	dedication      string
 }
 
 const shuffleWindowCap = 50
@@ -305,7 +306,8 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 				return plan{skip: true, consumedNextUp: true}, nil
 			}
 			it = airItem{track: track, requestID: req.ID, source: req.Source,
-				requestedByName: req.DisplayName, reason: req.Reason}
+				requestedByName: req.DisplayName, reason: req.Reason,
+				dedication: req.Dedication}
 		}
 		return plan{item: it, consumedNextUp: true}, nil
 	}
@@ -323,7 +325,8 @@ func (f *Feeder) planNext(ctx context.Context) (plan, error) {
 			return plan{skip: true, failRequestID: req.ID}, nil
 		}
 		return plan{item: airItem{track: track, requestID: req.ID,
-			source: req.Source, requestedByName: req.DisplayName, reason: req.Reason}}, nil
+			source: req.Source, requestedByName: req.DisplayName, reason: req.Reason,
+			dedication: req.Dedication}}, nil
 	}
 
 	ids, err := f.d.Library.AllIDs(ctx)
@@ -803,7 +806,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 			startedAt := f.startedAt(samplesFed)
 			cur.entry = Entry{YTID: cur.track.YTID, Title: cur.track.Title, Artist: cur.track.Channel,
 				StartedAt: startedAt, DurationS: int(cur.track.DurationS),
-				Source: cur.item.source, RequestedByName: cur.item.requestedByName, Reason: cur.item.reason}
+				Source: cur.item.source, RequestedByName: cur.item.requestedByName,
+				Reason: cur.item.reason, Dedication: cur.item.dedication}
 			if err := f.d.Log.Append(ctx, cur.entry); err != nil {
 				f.d.Logger.ErrorContext(ctx, "air log append failed", "err", err)
 			}

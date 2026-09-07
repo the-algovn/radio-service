@@ -199,3 +199,50 @@ func TestGoOnAirNeedsNonEmptyLibrary(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, on.GetStation().GetOnAir())
 }
+
+func TestRequestTrackDedication(t *testing.T) {
+	s := newTestServer(t)
+	ctx := authCtx(t, map[string]string{"sub": "u1", "name": "Ngọc"})
+
+	resp, err := s.RequestTrack(ctx, &radiov1.RequestTrackRequest{
+		Candidate: cand("ded1", 240), Dedication: "  gửi mẹ, sinh nhật vui vẻ  ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "gửi mẹ, sinh nhật vui vẻ", resp.GetRequest().GetDedication())
+
+	mine, err := s.ListMyRequests(ctx, &radiov1.ListMyRequestsRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "gửi mẹ, sinh nhật vui vẻ", mine.GetRequests()[0].GetDedication())
+}
+
+// The queue is world-readable and the track has not aired yet, so it reports
+// only that a note exists - never the words.
+func TestQueueWithholdsDedicationText(t *testing.T) {
+	s := newTestServer(t)
+	ctx := authCtx(t, map[string]string{"sub": "u1", "name": "Ngọc"})
+	_, err := s.RequestTrack(ctx, &radiov1.RequestTrackRequest{
+		Candidate: cand("ded2", 240), Dedication: "bí mật",
+	})
+	require.NoError(t, err)
+
+	q, err := s.GetQueue(context.Background(), &radiov1.GetQueueRequest{})
+	require.NoError(t, err)
+	require.Len(t, q.GetItems(), 1)
+	require.True(t, q.GetItems()[0].GetHasDedication())
+	require.NotContains(t, q.String(), "bí mật")
+}
+
+func TestRequestTrackDedicationLengthCap(t *testing.T) {
+	s := newTestServer(t)
+	ctx := authCtx(t, map[string]string{"sub": "u1"})
+	_, err := s.RequestTrack(ctx, &radiov1.RequestTrackRequest{
+		Candidate: cand("ded3", 240), Dedication: strings.Repeat("ữ", 401),
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "lời nhắn dài quá bốn trăm chữ")
+
+	_, err = s.RequestTrack(ctx, &radiov1.RequestTrackRequest{
+		Candidate: cand("ded4", 240), Dedication: strings.Repeat("ữ", 400),
+	})
+	require.NoError(t, err)
+}

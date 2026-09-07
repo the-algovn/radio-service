@@ -67,15 +67,15 @@ RETURNING on_air, on_air_since, ai_enabled,
           dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars;
 
 -- name: AppendAirLog :exec
-INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
 
 -- name: LatestAirLog :one
-SELECT id, yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
+SELECT id, yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication
 FROM air_log ORDER BY started_at DESC, id DESC LIMIT 1;
 
 -- name: AirHistory :many
-SELECT yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
+SELECT yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication
 FROM air_log
 WHERE started_at + make_interval(secs => duration_s) < now()
 ORDER BY started_at DESC
@@ -93,34 +93,34 @@ WHERE last_seen > now() - interval '75 seconds';
 DELETE FROM radio_listener WHERE last_seen < now() - interval '10 minutes';
 
 -- name: CreateRequest :one
-INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status, reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status, reason, dedication)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason;
+          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication;
 
 -- Air order: listener requests FIFO, then AI picks FIFO — (source = 'ai')
 -- sorts false (listener) before true.
 -- name: NextReadyRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status = 'ready'
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id LIMIT 1;
 
 -- name: OldestApprovedRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status = 'approved'
 ORDER BY created_at, id LIMIT 1;
 
 -- name: PendingRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status IN ('approved', 'ready')
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id;
 
 -- name: RequestsByUser :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE requested_by = $1
 ORDER BY created_at DESC, id DESC LIMIT $2;
 
@@ -185,7 +185,7 @@ UPDATE request SET position = $2 WHERE id = $1;
 
 -- name: RecentTerminalRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status IN ('aired', 'failed')
 ORDER BY COALESCE(aired_at, created_at) DESC, id DESC
 LIMIT $1;
@@ -266,7 +266,7 @@ DELETE FROM talk_memory WHERE created_at < $1;
 
 -- name: GetRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE id = $1;
 
 -- name: InsertTalkSegment :exec

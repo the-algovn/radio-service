@@ -17,6 +17,7 @@ type Upcoming struct {
 	Source          string
 	RequestedByName string
 	Reason          string
+	Dedication      string
 	Committed       bool
 }
 
@@ -61,6 +62,7 @@ func PeekNext(ctx context.Context, sched schedule.Store, reqs request.Store,
 				return Upcoming{}, false, nil
 			}
 			up.Source, up.RequestedByName, up.Reason = req.Source, req.DisplayName, req.Reason
+			up.Dedication = req.Dedication
 		}
 		return up, true, nil
 	}
@@ -80,5 +82,6 @@ func PeekNext(ctx context.Context, sched schedule.Store, reqs request.Store,
 		return Upcoming{}, false, nil
 	}
 	return Upcoming{Track: track, RequestID: req.ID, Source: req.Source,
-		RequestedByName: req.DisplayName, Reason: req.Reason}, true, nil
+		RequestedByName: req.DisplayName, Reason: req.Reason,
+		Dedication: req.Dedication}, true, nil
 }

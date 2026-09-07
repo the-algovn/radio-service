@@ -25,13 +25,13 @@ func notFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 // site passes the fields explicitly through this one constructor.
 func itemOf(id, source, requestedBy, displayName, ytID, title, channel string,
 	durationS int64, thumbnailURL, status, failReason string, attempts int32,
-	createdAt time.Time, airedAt *time.Time, reason string) Item {
+	createdAt time.Time, airedAt *time.Time, reason, dedication string) Item {
 	return Item{
 		ID: id, Source: source, RequestedBy: requestedBy, DisplayName: displayName,
 		YTID: ytID, Title: title, Channel: channel, DurationS: durationS,
 		ThumbnailURL: thumbnailURL, Status: status, FailReason: failReason,
 		Attempts: int(attempts), CreatedAt: createdAt, AiredAt: airedAt,
-		Reason: reason,
+		Reason: reason, Dedication: dedication,
 	}
 }
 
@@ -40,14 +40,14 @@ func (s *PGStore) Create(ctx context.Context, it Item) (Item, error) {
 		Source: it.Source, RequestedBy: it.RequestedBy, DisplayName: it.DisplayName,
 		YtID: it.YTID, Title: it.Title, Channel: it.Channel,
 		DurationS: it.DurationS, ThumbnailUrl: it.ThumbnailURL, Status: it.Status,
-		Reason: it.Reason,
+		Reason: it.Reason, Dedication: it.Dedication,
 	})
 	if err != nil {
 		return Item{}, err
 	}
 	return itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName, r.YtID, r.Title,
 		r.Channel, r.DurationS, r.ThumbnailUrl, r.Status, r.FailReason,
-		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), nil
+		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication), nil
 }
 
 func (s *PGStore) NextReady(ctx context.Context) (Item, bool, error) {
@@ -60,7 +60,7 @@ func (s *PGStore) NextReady(ctx context.Context) (Item, bool, error) {
 	}
 	return itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName, r.YtID, r.Title,
 		r.Channel, r.DurationS, r.ThumbnailUrl, r.Status, r.FailReason,
-		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), true, nil
+		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication), true, nil
 }
 
 func (s *PGStore) Get(ctx context.Context, id string) (Item, bool, error) {
@@ -73,7 +73,7 @@ func (s *PGStore) Get(ctx context.Context, id string) (Item, bool, error) {
 	}
 	return itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName, r.YtID, r.Title,
 		r.Channel, r.DurationS, r.ThumbnailUrl, r.Status, r.FailReason,
-		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), true, nil
+		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication), true, nil
 }
 
 func (s *PGStore) OldestApproved(ctx context.Context) (Item, bool, error) {
@@ -86,7 +86,7 @@ func (s *PGStore) OldestApproved(ctx context.Context) (Item, bool, error) {
 	}
 	return itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName, r.YtID, r.Title,
 		r.Channel, r.DurationS, r.ThumbnailUrl, r.Status, r.FailReason,
-		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason), true, nil
+		r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication), true, nil
 }
 
 func (s *PGStore) Pending(ctx context.Context) ([]Item, error) {
@@ -98,7 +98,7 @@ func (s *PGStore) Pending(ctx context.Context) ([]Item, error) {
 	for _, r := range rows {
 		out = append(out, itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName,
 			r.YtID, r.Title, r.Channel, r.DurationS, r.ThumbnailUrl, r.Status,
-			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason))
+			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication))
 	}
 	return out, nil
 }
@@ -114,7 +114,7 @@ func (s *PGStore) ByUser(ctx context.Context, sub string, limit int) ([]Item, er
 	for _, r := range rows {
 		out = append(out, itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName,
 			r.YtID, r.Title, r.Channel, r.DurationS, r.ThumbnailUrl, r.Status,
-			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason))
+			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication))
 	}
 	return out, nil
 }
@@ -232,7 +232,7 @@ func (s *PGStore) RecentTerminal(ctx context.Context, n int) ([]Item, error) {
 	for _, r := range rows {
 		out = append(out, itemOf(r.ID, r.Source, r.RequestedBy, r.DisplayName,
 			r.YtID, r.Title, r.Channel, r.DurationS, r.ThumbnailUrl, r.Status,
-			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason))
+			r.FailReason, r.Attempts, r.CreatedAt, r.AiredAt, r.Reason, r.Dedication))
 	}
 	return out, nil
 }

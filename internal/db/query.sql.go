@@ -13,7 +13,7 @@ import (
 )
 
 const airHistory = `-- name: AirHistory :many
-SELECT yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
+SELECT yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication
 FROM air_log
 WHERE started_at + make_interval(secs => duration_s) < now()
 ORDER BY started_at DESC
@@ -29,6 +29,7 @@ type AirHistoryRow struct {
 	Source          string
 	RequestedByName string
 	Reason          string
+	Dedication      string
 }
 
 func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow, error) {
@@ -49,6 +50,7 @@ func (q *Queries) AirHistory(ctx context.Context, limit int32) ([]AirHistoryRow,
 			&i.Source,
 			&i.RequestedByName,
 			&i.Reason,
+			&i.Dedication,
 		); err != nil {
 			return nil, err
 		}
@@ -103,8 +105,8 @@ func (q *Queries) AllTrackIDs(ctx context.Context) ([]string, error) {
 }
 
 const appendAirLog = `-- name: AppendAirLog :exec
-INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO air_log (yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 `
 
 type AppendAirLogParams struct {
@@ -116,6 +118,7 @@ type AppendAirLogParams struct {
 	Source          string
 	RequestedByName string
 	Reason          string
+	Dedication      string
 }
 
 func (q *Queries) AppendAirLog(ctx context.Context, arg AppendAirLogParams) error {
@@ -128,6 +131,7 @@ func (q *Queries) AppendAirLog(ctx context.Context, arg AppendAirLogParams) erro
 		arg.Source,
 		arg.RequestedByName,
 		arg.Reason,
+		arg.Dedication,
 	)
 	return err
 }
@@ -306,10 +310,10 @@ func (q *Queries) CountTracks(ctx context.Context, dollar_1 interface{}) (int64,
 }
 
 const createRequest = `-- name: CreateRequest :one
-INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status, reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO request (source, requested_by, display_name, yt_id, title, channel, duration_s, thumbnail_url, status, reason, dedication)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+          duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 `
 
 type CreateRequestParams struct {
@@ -323,6 +327,7 @@ type CreateRequestParams struct {
 	ThumbnailUrl string
 	Status       string
 	Reason       string
+	Dedication   string
 }
 
 type CreateRequestRow struct {
@@ -341,6 +346,7 @@ type CreateRequestRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (CreateRequestRow, error) {
@@ -355,6 +361,7 @@ func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (C
 		arg.ThumbnailUrl,
 		arg.Status,
 		arg.Reason,
+		arg.Dedication,
 	)
 	var i CreateRequestRow
 	err := row.Scan(
@@ -373,6 +380,7 @@ func (q *Queries) CreateRequest(ctx context.Context, arg CreateRequestParams) (C
 		&i.CreatedAt,
 		&i.AiredAt,
 		&i.Reason,
+		&i.Dedication,
 	)
 	return i, err
 }
@@ -413,7 +421,7 @@ func (q *Queries) GetNextUp(ctx context.Context) (GetNextUpRow, error) {
 
 const getRequest = `-- name: GetRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE id = $1
 `
 
@@ -433,6 +441,7 @@ type GetRequestRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) GetRequest(ctx context.Context, id string) (GetRequestRow, error) {
@@ -454,6 +463,7 @@ func (q *Queries) GetRequest(ctx context.Context, id string) (GetRequestRow, err
 		&i.CreatedAt,
 		&i.AiredAt,
 		&i.Reason,
+		&i.Dedication,
 	)
 	return i, err
 }
@@ -685,7 +695,7 @@ func (q *Queries) InsertTrack(ctx context.Context, arg InsertTrackParams) error 
 }
 
 const latestAirLog = `-- name: LatestAirLog :one
-SELECT id, yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason
+SELECT id, yt_id, title, artist, started_at, duration_s, source, requested_by_name, reason, dedication
 FROM air_log ORDER BY started_at DESC, id DESC LIMIT 1
 `
 
@@ -702,6 +712,7 @@ func (q *Queries) LatestAirLog(ctx context.Context) (AirLog, error) {
 		&i.Source,
 		&i.RequestedByName,
 		&i.Reason,
+		&i.Dedication,
 	)
 	return i, err
 }
@@ -1025,7 +1036,7 @@ func (q *Queries) MarkRequestReady(ctx context.Context, id string) (int64, error
 
 const nextReadyRequest = `-- name: NextReadyRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status = 'ready'
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id LIMIT 1
 `
@@ -1046,6 +1057,7 @@ type NextReadyRequestRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 // Air order: listener requests FIFO, then AI picks FIFO — (source = 'ai')
@@ -1069,13 +1081,14 @@ func (q *Queries) NextReadyRequest(ctx context.Context) (NextReadyRequestRow, er
 		&i.CreatedAt,
 		&i.AiredAt,
 		&i.Reason,
+		&i.Dedication,
 	)
 	return i, err
 }
 
 const oldestApprovedRequest = `-- name: OldestApprovedRequest :one
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status = 'approved'
 ORDER BY created_at, id LIMIT 1
 `
@@ -1096,6 +1109,7 @@ type OldestApprovedRequestRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequestRow, error) {
@@ -1117,6 +1131,7 @@ func (q *Queries) OldestApprovedRequest(ctx context.Context) (OldestApprovedRequ
 		&i.CreatedAt,
 		&i.AiredAt,
 		&i.Reason,
+		&i.Dedication,
 	)
 	return i, err
 }
@@ -1191,7 +1206,7 @@ func (q *Queries) PendingRequestIDs(ctx context.Context) ([]string, error) {
 
 const pendingRequests = `-- name: PendingRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status IN ('approved', 'ready')
 ORDER BY position IS NULL, position, (source = 'ai'), created_at, id
 `
@@ -1212,6 +1227,7 @@ type PendingRequestsRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, error) {
@@ -1239,6 +1255,7 @@ func (q *Queries) PendingRequests(ctx context.Context) ([]PendingRequestsRow, er
 			&i.CreatedAt,
 			&i.AiredAt,
 			&i.Reason,
+			&i.Dedication,
 		); err != nil {
 			return nil, err
 		}
@@ -1468,7 +1485,7 @@ func (q *Queries) RecentTalkMemory(ctx context.Context, arg RecentTalkMemoryPara
 
 const recentTerminalRequests = `-- name: RecentTerminalRequests :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE status IN ('aired', 'failed')
 ORDER BY COALESCE(aired_at, created_at) DESC, id DESC
 LIMIT $1
@@ -1490,6 +1507,7 @@ type RecentTerminalRequestsRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) RecentTerminalRequests(ctx context.Context, limit int32) ([]RecentTerminalRequestsRow, error) {
@@ -1517,6 +1535,7 @@ func (q *Queries) RecentTerminalRequests(ctx context.Context, limit int32) ([]Re
 			&i.CreatedAt,
 			&i.AiredAt,
 			&i.Reason,
+			&i.Dedication,
 		); err != nil {
 			return nil, err
 		}
@@ -1530,7 +1549,7 @@ func (q *Queries) RecentTerminalRequests(ctx context.Context, limit int32) ([]Re
 
 const requestsByUser = `-- name: RequestsByUser :many
 SELECT id::text AS id, source, requested_by, display_name, yt_id, title, channel,
-       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason
+       duration_s, thumbnail_url, status, fail_reason, attempts, created_at, aired_at, reason, dedication
 FROM request WHERE requested_by = $1
 ORDER BY created_at DESC, id DESC LIMIT $2
 `
@@ -1556,6 +1575,7 @@ type RequestsByUserRow struct {
 	CreatedAt    time.Time
 	AiredAt      *time.Time
 	Reason       string
+	Dedication   string
 }
 
 func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) ([]RequestsByUserRow, error) {
@@ -1583,6 +1603,7 @@ func (q *Queries) RequestsByUser(ctx context.Context, arg RequestsByUserParams) 
 			&i.CreatedAt,
 			&i.AiredAt,
 			&i.Reason,
+			&i.Dedication,
 		); err != nil {
 			return nil, err
 		}

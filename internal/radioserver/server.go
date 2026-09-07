@@ -35,17 +35,19 @@ const (
 	maxNameRunes    = 200
 	maxSessionIDLen = 100
 
-	maxPendingPerUser = 3
-	maxPerDay         = 10
-	recentAirWindow   = 2 * time.Hour
-	maxRequestSeconds = 600
-	myRequestsCap     = 50
+	maxPendingPerUser  = 3
+	maxPerDay          = 10
+	recentAirWindow    = 2 * time.Hour
+	maxRequestSeconds  = 600
+	myRequestsCap      = 50
+	maxDedicationRunes = 400
 
-	msgPendingQuota = "bạn đang có ba bài chờ phát rồi, đợi chút nha"
-	msgDailyQuota   = "hôm nay bạn yêu cầu đủ mười bài rồi, mai lại nhé"
-	msgDupQueued    = "bài này đang trong hàng đợi rồi, sắp phát thôi"
-	msgRecentAired  = "vừa phát xong, để khuya nhé"
-	msgTooLong      = "bài dài quá mười phút, đài không phát được"
+	msgPendingQuota   = "bạn đang có ba bài chờ phát rồi, đợi chút nha"
+	msgDailyQuota     = "hôm nay bạn yêu cầu đủ mười bài rồi, mai lại nhé"
+	msgDupQueued      = "bài này đang trong hàng đợi rồi, sắp phát thôi"
+	msgRecentAired    = "vừa phát xong, để khuya nhé"
+	msgTooLong        = "bài dài quá mười phút, đài không phát được"
+	msgDedicationLong = "lời nhắn dài quá bốn trăm chữ, viết ngắn lại nhé"
 
 	msgOperatorRemoved = "đài đã gỡ yêu cầu này"
 	recentTerminalCap  = 20
@@ -275,6 +277,7 @@ func (s *Server) GetNowPlaying(ctx context.Context, _ *radiov1.GetNowPlayingRequ
 		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
 		DurationSeconds: int32(e.DurationS), Listeners: int32(n),
 		Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
+		Dedication: e.Dedication,
 	}}, nil
 }
 
@@ -287,7 +290,8 @@ func (s *Server) GetQueue(ctx context.Context, _ *radiov1.GetQueueRequest) (*rad
 	for _, it := range items {
 		resp.Items = append(resp.Items, &radiov1.QueueItem{
 			Title: it.Title, Artist: it.Channel, ThumbnailUrl: it.ThumbnailURL,
-			Source: it.Source, RequestedByName: it.DisplayName,
+			HasDedication: it.Dedication != "",
+			Source:        it.Source, RequestedByName: it.DisplayName,
 			Reason: it.Reason,
 		})
 	}
@@ -305,6 +309,7 @@ func (s *Server) GetHistory(ctx context.Context, _ *radiov1.GetHistoryRequest) (
 			Title: e.Title, Artist: e.Artist,
 			AiredAt: e.StartedAt.UTC().Format(time.RFC3339Nano),
 			Source:  e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
+			Dedication: e.Dedication,
 		})
 	}
 	return resp, nil
@@ -361,8 +366,9 @@ func requestProto(it request.Item) *radiov1.TrackRequest {
 		YtId: it.YTID, Title: it.Title, Channel: it.Channel,
 		DurationS: int32(it.DurationS), ThumbnailUrl: it.ThumbnailURL,
 		Status: it.Status, FailReason: it.FailReason,
-		CreatedAt: it.CreatedAt.Format(time.RFC3339),
-		Reason:    it.Reason,
+		CreatedAt:  it.CreatedAt.Format(time.RFC3339),
+		Reason:     it.Reason,
+		Dedication: it.Dedication,
 	}
 }
 
@@ -386,6 +392,10 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 	}
 	if c.GetDurationS() > maxRequestSeconds {
 		return nil, status.Error(codes.InvalidArgument, msgTooLong)
+	}
+	dedication := strings.TrimSpace(req.GetDedication())
+	if utf8.RuneCountInString(dedication) > maxDedicationRunes {
+		return nil, status.Error(codes.InvalidArgument, msgDedicationLong)
 	}
 	pending, err := s.deps.Requests.CountPendingByUser(ctx, sub)
 	if err != nil {
@@ -430,6 +440,7 @@ func (s *Server) RequestTrack(ctx context.Context, req *radiov1.RequestTrackRequ
 		Source: request.SourceListener, RequestedBy: sub, DisplayName: name,
 		YTID: c.GetYtId(), Title: c.GetTitle(), Channel: c.GetChannel(),
 		DurationS: int64(c.GetDurationS()), ThumbnailURL: c.GetThumbnailUrl(), Status: st,
+		Dedication: dedication,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create request: %v", err)

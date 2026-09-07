@@ -60,6 +60,7 @@ type nowPlayingJSON struct {
 	Source          string `json:"source,omitempty"`
 	RequestedByName string `json:"requestedByName,omitempty"`
 	Reason          string `json:"reason,omitempty"`
+	Dedication      string `json:"dedication,omitempty"`
 }
 
 func NowPlayingPayload(e Entry, listeners int) []byte {
@@ -69,6 +70,7 @@ func NowPlayingPayload(e Entry, listeners int) []byte {
 		StartedAt:       e.StartedAt.UTC().Format(time.RFC3339Nano),
 		DurationSeconds: e.DurationS, Listeners: listeners,
 		Source: e.Source, RequestedByName: e.RequestedByName, Reason: e.Reason,
+		Dedication: e.Dedication,
 	})
 	return b
 }
@@ -133,7 +135,8 @@ func RequestQueuePayload(items []request.Item, next *schedule.NextUp) []byte {
 func itemJSON(it request.Item) requestQueueItemJSON {
 	return requestQueueItemJSON{
 		Title: it.Title, Artist: it.Channel, ThumbnailURL: it.ThumbnailURL,
-		Source: it.Source, RequestedByName: it.DisplayName, Reason: it.Reason,
+		HasDedication: it.Dedication != "",
+		Source:        it.Source, RequestedByName: it.DisplayName, Reason: it.Reason,
 	}
 }
 

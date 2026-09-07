@@ -38,7 +38,10 @@ type Item struct {
 	// Reason is the DJ's stated pick reason (AI-only vocabulary; "" for
 	// listener requests and fake-mode picks). Capped at 200 runes by the
 	// programmer at enqueue.
-	Reason     string
+	Reason string
+	// Dedication is the note the listener sent with the request for the DJ
+	// to read on air ("" when none). Capped at 400 runes at the RPC edge.
+	Dedication string
 	Status     string
 	FailReason string
 	Attempts   int
@@ -50,8 +53,8 @@ type Item struct {
 // listener requests FIFO first, then AI picks FIFO.
 type Store interface {
 	// Create persists it (Source, RequestedBy, DisplayName, YTID, Title,
-	// Channel, DurationS, ThumbnailURL, Reason, Status are read from it) and
-	// returns the stored item with ID and CreatedAt filled.
+	// Channel, DurationS, ThumbnailURL, Reason, Dedication, Status are read
+	// from it) and returns the stored item with ID and CreatedAt filled.
 	Create(ctx context.Context, it Item) (Item, error)
 	// NextReady returns what should air next: the head of the ready queue
 	// under the order `position IS NULL, position, (source = 'ai'),

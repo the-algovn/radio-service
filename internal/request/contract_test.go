@@ -18,7 +18,7 @@ func mk(source, sub, ytID, status string) request.Item {
 		Source: source, RequestedBy: sub, DisplayName: "tên-" + sub,
 		YTID: ytID, Title: "t-" + ytID, Channel: "c-" + ytID,
 		DurationS: 240, ThumbnailURL: "https://img/" + ytID, Status: status,
-		Reason: "lý-do-" + ytID,
+		Reason: "lý-do-" + ytID, Dedication: "gửi-" + ytID,
 	}
 }
 
@@ -43,6 +43,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Zero(t, it.Attempts)
 		require.Nil(t, it.AiredAt)
 		require.Equal(t, "lý-do-yta", it.Reason)
+		require.Equal(t, "gửi-yta", it.Dedication)
 	})
 
 	t.Run("air order: ready listener before ready ai, FIFO within source", func(t *testing.T) {
@@ -278,6 +279,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Equal(t, "tên-sub-9", got.DisplayName)
 		require.Equal(t, "ytg", got.YTID)
 		require.Equal(t, "lý-do-ytg", got.Reason)
+		require.Equal(t, "gửi-ytg", got.Dedication)
 		require.Equal(t, request.StatusReady, got.Status)
 	})
 
