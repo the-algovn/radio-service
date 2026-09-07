@@ -101,6 +101,11 @@ type Snapshot struct {
 	// station-ID lines the engine falls through to BreakEvery and airs a seam
 	// where a reader would expect a station_id.
 	StationIDsAvailable bool
+
+	// Forced mirrors the operator-armed term of dueKindLocked. internal/timeline
+	// re-implements the due test off this snapshot, so omitting it leaves the
+	// console blind to a forced break until the clip is prepared a tick later.
+	Forced bool
 }
 
 // Director prepares talk breaks ahead of air and hands them to the feeder
@@ -116,6 +121,7 @@ type Director struct {
 	finishedSinceSeam int
 	lastStationID     time.Time
 	wasOnAir          bool
+	forcedBreak       bool
 }
 
 func New(d Deps) *Director {
@@ -163,8 +169,34 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		dr.lastStationID = dr.d.Clock.Now()
 	} else {
 		dr.finishedSinceSeam = 0
+		dr.forcedBreak = false
 	}
 	return c, true
+}
+
+// ForceBreak arms a seam break for the next wake tick, bypassing the CADENCE
+// gate only - budget, listeners and on-air still apply, because spending
+// money on a break nobody can hear is what the wake gates exist to prevent.
+// Reports whether a break is now due; false means a clip was already
+// prepared, so there was nothing to arm.
+func (dr *Director) ForceBreak() bool {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	if dr.slot != nil {
+		return false
+	}
+	dr.forcedBreak = true
+	return true
+}
+
+// CancelPrepared discards a prepared-but-unaired clip AND clears an arming
+// that has not been prepared yet. Reports whether either existed.
+func (dr *Director) CancelPrepared() bool {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	had := dr.slot != nil || dr.forcedBreak
+	dr.cancelPendingLocked("operator cancelled")
+	return had
 }
 
 // anchorFreshTolerance bounds the StartedAt comparison in anchorFresh.
@@ -196,6 +228,9 @@ func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
 		now.Sub(dr.lastStationID) >= time.Duration(dj.StationIDMin)*time.Minute {
 		return live.ClipStationID
 	}
+	if dr.forcedBreak {
+		return live.ClipSeam
+	}
 	if dj.BreakEvery > 0 && dr.finishedSinceSeam+1 >= dj.BreakEvery {
 		return live.ClipSeam
 	}
@@ -205,6 +240,9 @@ func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
 // cancelPendingLocked discards a prepared-but-unaired clip (operator paused
 // the DJ or the station went off-air). Caller holds mu.
 func (dr *Director) cancelPendingLocked(reason string) {
+	// Above the nil check on purpose: an arming with no clip yet is still
+	// something an operator can cancel, and pause/off-air must disarm too.
+	dr.forcedBreak = false
 	if dr.slot == nil {
 		return
 	}
@@ -245,6 +283,7 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	}
 	if st.OnAir && !dr.wasOnAir {
 		dr.lastStationID = now
+		dr.forcedBreak = false
 	}
 	dr.wasOnAir = st.OnAir
 	dr.mu.Unlock()
@@ -307,6 +346,7 @@ func (dr *Director) Snapshot() Snapshot {
 		// ids has its own mutex and is never held while taking dr.mu, so this
 		// is a len() under an uncontended lock — no I/O, no clock read.
 		StationIDsAvailable: dr.ids.available(),
+		Forced:              dr.forcedBreak,
 	}
 	if dr.slot != nil {
 		c := *dr.slot

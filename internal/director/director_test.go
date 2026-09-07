@@ -342,3 +342,107 @@ func TestRunExitsOnCancel(t *testing.T) {
 		t.Fatal("Run did not exit on cancel")
 	}
 }
+
+func TestForceBreakArmsTheSeam(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	dj := station.DJSettings{BreakEvery: 4, StationIDMin: 0}
+
+	require.Equal(t, "", dr.dueKindLocked(time.Now(), dj), "not due before forcing")
+	require.True(t, dr.ForceBreak(), "arming an empty slot returns armed")
+	require.Equal(t, live.ClipSeam, dr.dueKindLocked(time.Now(), dj), "forced seam is due")
+}
+
+func TestForceBreakNeverPreemptsAnOwedStationID(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	// StationIDMin elapsed and IDs loaded: the station ID is owed.
+	dj := station.DJSettings{BreakEvery: 4, StationIDMin: 1}
+	dr.lastStationID = time.Now().Add(-2 * time.Minute)
+
+	require.True(t, dr.ForceBreak())
+	require.Equal(t, live.ClipStationID, dr.dueKindLocked(time.Now(), dj),
+		"the forced check sits BELOW the station-ID check")
+}
+
+func TestForceBreakIsIdempotent(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	require.True(t, dr.ForceBreak())
+	require.True(t, dr.ForceBreak(), "already armed is still 'a break is now due'")
+}
+
+func TestForceBreakNoOpsAgainstAPreparedClip(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	slotClip(t, dr, live.Clip{Kind: live.ClipSeam})
+
+	require.False(t, dr.ForceBreak(), "a clip is already rendered; nothing to arm")
+	require.False(t, dr.Snapshot().Forced)
+}
+
+func TestSeamTakeClearsTheFlag(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	entry := live.Entry{YTID: "abc", StartedAt: time.Now()}
+	slotClip(t, dr, live.Clip{
+		Kind: live.ClipSeam, AnchorYTID: entry.YTID, AnchorStartedAt: entry.StartedAt,
+	})
+	dr.forcedBreak = true
+
+	_, ok := dr.Take(entry)
+	require.True(t, ok)
+	require.False(t, dr.Snapshot().Forced, "a forced break fires exactly once")
+}
+
+func TestStationIDTakeDoesNotClearTheFlag(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	slotClip(t, dr, live.Clip{Kind: live.ClipStationID})
+	dr.forcedBreak = true
+
+	_, ok := dr.Take(live.Entry{YTID: "abc", StartedAt: time.Now()})
+	require.True(t, ok)
+	require.True(t, dr.Snapshot().Forced, "a forced seam is still owed after an ID airs")
+}
+
+func TestStaleDiscardDoesNotClearTheFlag(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	slotClip(t, dr, live.Clip{
+		Kind: live.ClipSeam, AnchorYTID: "stale", AnchorStartedAt: time.Now().Add(-time.Hour),
+	})
+	dr.forcedBreak = true
+
+	_, ok := dr.Take(live.Entry{YTID: "fresh", StartedAt: time.Now()})
+	require.False(t, ok, "anchor drifted; the clip is discarded")
+	require.True(t, dr.Snapshot().Forced, "the break is still owed and re-preps")
+}
+
+// The early-return trap. cancelPendingLocked returns immediately on an empty
+// slot, so a clear written below that return would leave the station armed
+// and the operator's Cancel would do nothing for a full 20s tick.
+func TestCancelClearsTheFlagWithAnEmptySlot(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	require.True(t, dr.ForceBreak())
+	require.Nil(t, dr.slot, "armed, nothing prepared yet")
+
+	require.True(t, dr.CancelPrepared(), "an arming is a thing to cancel")
+	require.False(t, dr.Snapshot().Forced)
+}
+
+func TestCancelWithNothingArmedOrPrepared(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	require.False(t, dr.CancelPrepared(), "nothing to cancel")
+}
+
+func TestCancelDiscardsAPreparedClipAndTheFlag(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	path := slotClip(t, dr, live.Clip{Kind: live.ClipSeam})
+	dr.forcedBreak = true
+
+	require.True(t, dr.CancelPrepared())
+	require.Nil(t, dr.slot)
+	require.False(t, dr.Snapshot().Forced)
+	require.NoFileExists(t, path)
+}
+
+func TestSnapshotCarriesForced(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+	require.False(t, dr.Snapshot().Forced)
+	require.True(t, dr.ForceBreak())
+	require.True(t, dr.Snapshot().Forced)
+}
