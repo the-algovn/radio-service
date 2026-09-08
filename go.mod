@@ -15,7 +15,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	github.com/the-algovn/gopkg v0.1.0
-	github.com/the-algovn/protos/gen/go v0.24.0
+	github.com/the-algovn/protos/gen/go v0.25.0
 	github.com/twmb/franz-go v1.21.5
 	golang.org/x/text v0.37.0
 	google.golang.org/genai v1.36.0
@@ -160,5 +160,3 @@ require (
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/the-algovn/protos/gen/go => /Users/duclm27/the-algovn/protos/gen/go
