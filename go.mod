@@ -160,3 +160,5 @@ require (
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/the-algovn/protos/gen/go => /Users/duclm27/the-algovn/protos/gen/go
