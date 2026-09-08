@@ -22,22 +22,25 @@ func TestUpdateDJSettings(t *testing.T) {
 	require.Equal(t, 1.0, st.GetDj().GetSpeakingRate())
 	require.Equal(t, int32(2), st.GetDj().GetBreakEvery())
 	require.Equal(t, int32(60), st.GetDj().GetStationIdMin())
+	require.Equal(t, int32(10), st.GetDj().GetMusingEveryMin())
 	require.Equal(t, int32(1500), st.GetDj().GetMaxChars())
 
 	// Update to a different voice (proves a real change off the default).
 	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
 		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Chirp3-HD-Aoede", SpeakingRate: 1.2,
-			BreakEvery: 3, StationIdMin: 0, MaxChars: 300},
+			BreakEvery: 3, StationIdMin: 0, MusingEveryMin: 25, MaxChars: 300},
 	})
 	require.NoError(t, err)
 	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", resp.GetSettings().GetVoiceId())
 	require.Equal(t, int32(0), resp.GetSettings().GetStationIdMin(), "0 = disabled is legal")
+	require.Equal(t, int32(25), resp.GetSettings().GetMusingEveryMin())
 
 	st, err = s.GetStation(ctx, &radiov1.GetStationRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", st.GetDj().GetVoiceId())
 	require.Equal(t, 1.2, st.GetDj().GetSpeakingRate())
 	require.Equal(t, int32(300), st.GetDj().GetMaxChars())
+	require.Equal(t, int32(25), st.GetDj().GetMusingEveryMin(), "persisted, not just echoed")
 }
 
 func TestUpdateDJSettingsValidation(t *testing.T) {
@@ -45,7 +48,7 @@ func TestUpdateDJSettingsValidation(t *testing.T) {
 	ctx := context.Background()
 	base := func() *radiov1.DJSettings {
 		return &radiov1.DJSettings{VoiceId: "vi-VN-Neural2-A", SpeakingRate: 1.0,
-			BreakEvery: 1, StationIdMin: 60, MaxChars: 1024}
+			BreakEvery: 1, StationIdMin: 60, MusingEveryMin: 10, MaxChars: 1024}
 	}
 	cases := []struct {
 		name   string
@@ -60,6 +63,7 @@ func TestUpdateDJSettingsValidation(t *testing.T) {
 		{"rate absent (protojson zero)", func(d *radiov1.DJSettings) { d.SpeakingRate = 0 }},
 		{"negative break_every", func(d *radiov1.DJSettings) { d.BreakEvery = -1 }},
 		{"negative station_id_min", func(d *radiov1.DJSettings) { d.StationIdMin = -1 }},
+		{"negative musing_every_min", func(d *radiov1.DJSettings) { d.MusingEveryMin = -1 }},
 		{"max_chars too small", func(d *radiov1.DJSettings) { d.MaxChars = 10 }},
 		{"max_chars too large", func(d *radiov1.DJSettings) { d.MaxChars = 5000 }},
 	}

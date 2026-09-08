@@ -94,16 +94,17 @@ type Request struct {
 }
 
 type Station struct {
-	ID             bool
-	OnAir          bool
-	OnAirSince     *time.Time
-	UpdatedAt      time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	ID               bool
+	OnAir            bool
+	OnAirSince       *time.Time
+	UpdatedAt        time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 type TalkMemory struct {

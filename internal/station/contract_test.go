@@ -68,7 +68,7 @@ func runStoreContract(t *testing.T, newStore storeFactory) {
 		require.Equal(t, "vi-VN-Neural2-A", st.DJ.VoiceID)
 
 		want := station.DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.15,
-			BreakEvery: 3, StationIDMin: 0, MaxChars: 300}
+			BreakEvery: 3, StationIDMin: 0, MusingEveryMin: 25, MaxChars: 300}
 		st, err = s.UpdateDJSettings(ctx, want)
 		require.NoError(t, err)
 		require.Equal(t, want, st.DJ)

@@ -13,7 +13,7 @@
 --      that never sees the director, so ctx propagation is the only link.
 CREATE TABLE talk_segment (
     id             BIGSERIAL PRIMARY KEY,
-    kind           TEXT        NOT NULL,   -- 'seam' | 'station_id' (live.ClipSeam / ClipStationID)
+    kind           TEXT        NOT NULL,   -- 'seam' | 'station_id' | 'musing' | 'daypart_transition' | 'wake_greeting' (live.Clip*)
     started_at     TIMESTAMPTZ NOT NULL,
     duration_s     INT         NOT NULL,
     script         TEXT        NOT NULL DEFAULT '',

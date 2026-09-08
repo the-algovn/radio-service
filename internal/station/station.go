@@ -15,23 +15,21 @@ import (
 // disables seam breaks. Persisted on the station row; the director re-reads
 // them every tick.
 type DJSettings struct {
-	VoiceID      string
-	Rate         float64
-	BreakEvery   int
-	StationIDMin int // minutes
-	// MusingEveryMin is minutes between musings; 0 disables. Plan 1 declares
-	// it so cadence.DueKind's musing term compiles; the column, the proto
-	// field and the console knob arrive in Plan 2, so it reads 0 until then.
-	MusingEveryMin int
+	VoiceID        string
+	Rate           float64
+	BreakEvery     int
+	StationIDMin   int // minutes
+	MusingEveryMin int // minutes between musings; 0 disables
 	MaxChars       int
 }
 
-// DefaultDJSettings mirrors the 00014 migration column defaults (the current
-// prod values). Keep the two in step: station.NewMemStore seeds from here, so
-// a drift makes MemStore and PGStore disagree about a fresh station.
+// DefaultDJSettings mirrors the migration column defaults (00010, 00014,
+// 00017) - the current prod values. Keep the two in step: station.NewMemStore
+// seeds from here, so a drift makes MemStore and PGStore disagree about a
+// fresh station.
 func DefaultDJSettings() DJSettings {
 	return DJSettings{VoiceID: "vi-VN-Neural2-A", Rate: 1.0,
-		BreakEvery: 2, StationIDMin: 60, MaxChars: 1500}
+		BreakEvery: 2, StationIDMin: 60, MusingEveryMin: 10, MaxChars: 1500}
 }
 
 type Station struct {
