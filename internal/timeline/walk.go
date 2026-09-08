@@ -10,18 +10,29 @@ import (
 )
 
 // Duration estimates for breaks that have not been scripted yet. Only ever
-// applied to `due` segments — a `prepared` clip carries its exact length.
+// applied to `due` segments - a `prepared` clip carries its exact length, so
+// these being a few seconds off shifts a projected start time and nothing more.
+// Each is sized from what its rules actually ask for: a musing is one thought
+// with no track names, a daypart transition is one or two sentences by
+// contract, and a greeting says she is back and gets out of the way.
 const (
 	EstSeamS      = 40
 	EstStationIDS = 12
+	EstMusingS    = 30
+	EstDaypartS   = 15
+	EstWakeS      = 20
 )
 
-// estDurationS sizes a due break that has not been scripted yet. Plan 2 adds
-// the three new kinds; until then everything that is not a station ID is
-// sized as a seam.
 func estDurationS(engineKind string) int {
-	if engineKind == cadence.KindStationID {
+	switch engineKind {
+	case cadence.KindStationID:
 		return EstStationIDS
+	case cadence.KindMusing:
+		return EstMusingS
+	case cadence.KindDaypartTransition:
+		return EstDaypartS
+	case cadence.KindWakeGreeting:
+		return EstWakeS
 	}
 	return EstSeamS
 }
@@ -53,6 +64,9 @@ func Project(s State) (upcoming, staging []Segment, gate string) {
 		SessionHasMusic:     s.Dir.SessionHasMusic || (s.Airing != nil && s.Airing.Kind == KindTrack),
 		FinishedSinceSeam:   s.Dir.FinishedSinceSeam,
 		LastStationID:       s.Dir.LastStationID,
+		LastMusing:          s.Dir.LastMusing,
+		PendingDaypart:      s.Dir.PendingDaypart,
+		PendingWake:         s.Dir.PendingWake,
 		Forced:              s.Dir.Forced,
 		StationIDsAvailable: s.Dir.StationIDsAvailable,
 	}

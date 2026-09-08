@@ -790,6 +790,9 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 			StationIDsAvailable: snap.StationIDsAvailable,
 			Forced:              snap.Forced,
 			SessionHasMusic:     snap.SessionHasMusic,
+			LastMusing:          snap.LastMusing,
+			PendingDaypart:      snap.PendingDaypart,
+			PendingWake:         snap.PendingWake,
 		}
 	}
 

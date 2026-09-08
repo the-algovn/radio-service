@@ -24,6 +24,9 @@ import (
 //	stored (talk_segment.kind)   wire (here)
 //	"seam"                    -> KindDJ        "dj"      <- a deliberate RENAME
 //	"station_id"              -> KindStationID "station_id"  <- same value
+//	"musing"                  -> KindMusing            <- same value
+//	"daypart_transition"      -> KindDaypartTransition <- same value
+//	"wake_greeting"           -> KindWakeGreeting      <- same value
 //	(air_log rows)            -> KindTrack     "track"
 //	(synthesised by the walk) -> KindUnknown   "unknown"
 //
@@ -35,10 +38,13 @@ import (
 // Redeclared rather than imported so this package depends on neither live nor
 // showlog.
 const (
-	KindTrack     = "track"
-	KindDJ        = "dj"
-	KindStationID = "station_id"
-	KindUnknown   = "unknown"
+	KindTrack             = "track"
+	KindDJ                = "dj"
+	KindStationID         = "station_id"
+	KindMusing            = "musing"
+	KindDaypartTransition = "daypart_transition"
+	KindWakeGreeting      = "wake_greeting"
+	KindUnknown           = "unknown"
 )
 
 // KindFromEngine translates an engine/stored talk kind (live.ClipSeam,
@@ -52,6 +58,12 @@ func KindFromEngine(kind string) string {
 		return KindDJ
 	case KindStationID:
 		return KindStationID
+	case KindMusing:
+		return KindMusing
+	case KindDaypartTransition:
+		return KindDaypartTransition
+	case KindWakeGreeting:
+		return KindWakeGreeting
 	default:
 		return KindUnknown
 	}
@@ -165,6 +177,14 @@ type DirectorSnapshot struct {
 	// Without it the projector cannot tell a session that has aired music
 	// from one that has not, and promises a seam the engine will not make.
 	SessionHasMusic bool
+
+	// LastMusing, PendingDaypart and PendingWake are the remaining terms of
+	// cadence.DueKind. A term left out here is not merely a segment the console
+	// never projects: the walk projects a SEAM in its place, because the ladder
+	// falls through to the term below.
+	LastMusing     time.Time
+	PendingDaypart time.Time
+	PendingWake    bool
 }
 
 // State is everything Project needs, gathered once by the caller.
