@@ -245,7 +245,7 @@ func TestBuildBriefContents(t *testing.T) {
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
 	just := live.Entry{Title: "Bài A", Artist: "Ca sĩ", Source: "listener", RequestedByName: "Minh"}
 
-	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &just, nil, 450)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &just, nil, 450, "", 0)
 	require.Equal(t, "seam", b.Type)
 	require.NotNil(t, b.JustPlayed)
 	require.Equal(t, "Bài A", b.JustPlayed.Title)
@@ -277,7 +277,7 @@ func TestBuildBriefScopesTonightToTheSession(t *testing.T) {
 	}
 
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
-	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 
 	var titles []string
 	for _, tr := range b.Tonight {
@@ -300,7 +300,7 @@ func TestBuildBriefIncludesTheThreadOldestFirst(t *testing.T) {
 		Summary: "nhắc bạn Ngọc"}))
 
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
-	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 
 	require.Equal(t, []string{"kể về mưa", "nhắc bạn Ngọc"}, b.Thread)
 	require.Equal(t, []string{"khuya rồi"}, b.RecentPhrases)
@@ -320,7 +320,7 @@ func TestBuildBriefCarriesComingUpProvenance(t *testing.T) {
 		Reason:          "vì trời mưa",
 	}
 
-	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, up, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, up, 1500, "", 0)
 
 	require.NotNil(t, b.ComingUp)
 	require.Equal(t, "Em Của Ngày Hôm Qua", b.ComingUp.Title)
@@ -343,13 +343,42 @@ func TestBuildBriefOmitsListenersOnReadFailure(t *testing.T) {
 	onAir := f.clk.Now().Add(-time.Hour)
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
 
-	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 	require.Zero(t, b.Listeners)
 
 	j, err := json.Marshal(b)
 	require.NoError(t, err)
 	require.NotContains(t, string(j), "listeners",
 		"a failed listener read must not ship a false zero as fact")
+}
+
+func TestBriefCarriesDaypartFromOnlyForTheTransition(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+
+	b := f.dr.buildBrief(ctx, testStation, live.ClipDaypartTransition, nil, nil, 450, "đêm", 0)
+	require.Equal(t, "đêm", b.DaypartFrom)
+
+	b = f.dr.buildBrief(ctx, testStation, live.ClipMusing, nil, nil, 450, "đêm", 0)
+	require.Empty(t, b.DaypartFrom, "a musing is not a hinge, and the value is never cleared")
+}
+
+func TestBriefCarriesSilentForMinOnlyForTheGreeting(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+
+	b := f.dr.buildBrief(ctx, testStation, live.ClipWakeGreeting, nil, nil, 450, "", 42)
+	require.Equal(t, 42, b.SilentForMin)
+
+	b = f.dr.buildBrief(ctx, testStation, live.ClipMusing, nil, nil, 450, "", 42)
+	require.Zero(t, b.SilentForMin)
+
+	// A fresh session gives zero, and omitempty must keep it off the wire -
+	// "silent_for_min": 0 would have her announce a silence that never happened.
+	b = f.dr.buildBrief(ctx, testStation, live.ClipWakeGreeting, nil, nil, 450, "", 0)
+	j, err := json.Marshal(b)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "silent_for_min")
 }
 
 // recVoice records the last Synthesize arguments.
@@ -669,6 +698,8 @@ func TestPrepareAnchorFreeKindsNeverPeekOrPin(t *testing.T) {
 			require.False(t, peeked, "an anchor-free kind has no coming_up in its brief")
 			require.Equal(t, 0, sf.pin.calls)
 			require.Empty(t, clip.PromiseTitle)
+			require.NotContains(t, sf.model.lastUser, "just_played",
+				"an anchor-free kind's brief must not carry the field at all")
 		})
 	}
 }

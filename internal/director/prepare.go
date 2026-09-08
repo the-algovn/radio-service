@@ -101,7 +101,8 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 			dr.d.Logger.ErrorContext(ctx, "director: no rules for kind", "kind", kind)
 			return live.Clip{}, false
 		}
-		briefJSON, merr := json.Marshal(dr.buildBrief(ctx, st, kind, just, promised, dj.MaxChars))
+		from, silent := dr.briefFacts()
+		briefJSON, merr := json.Marshal(dr.buildBrief(ctx, st, kind, just, promised, dj.MaxChars, from, silent))
 		if merr != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", merr)
 			return live.Clip{}, false
@@ -214,7 +215,8 @@ const (
 // music covering the air because show memory was unreadable would be a bad
 // trade.
 func (dr *Director) buildBrief(ctx context.Context, st station.Station, kind string,
-	just *live.Entry, up *live.Upcoming, maxChars int) Brief {
+	just *live.Entry, up *live.Upcoming, maxChars int,
+	daypartFrom string, silentForMin int) Brief {
 
 	now := dr.d.Clock.Now().In(dr.d.Location)
 	b := Brief{
@@ -225,6 +227,12 @@ func (dr *Director) buildBrief(ctx context.Context, st station.Station, kind str
 	if just != nil {
 		b.JustPlayed = &BriefTrack{Title: just.Title, Artist: just.Artist, Source: just.Source,
 			RequestedByName: just.RequestedByName, Reason: just.Reason}
+	}
+	switch kind {
+	case live.ClipDaypartTransition:
+		b.DaypartFrom = daypartFrom
+	case live.ClipWakeGreeting:
+		b.SilentForMin = silentForMin
 	}
 
 	var sessionStart time.Time
@@ -269,6 +277,15 @@ func (dr *Director) buildBrief(ctx context.Context, st station.Station, kind str
 		}
 	}
 	return b
+}
+
+// briefFacts reads the two mu-guarded values the brief needs that are not on
+// the station row. prepare runs off the audio hot path, so one uncontended
+// lock acquisition here is cheaper than threading them through RunOnce.
+func (dr *Director) briefFacts() (daypartFrom string, silentForMin int) {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	return dr.daypartFrom, dr.silentForMin
 }
 
 // newCorrelationID returns a random hex id grouping one prepare's LLM calls.

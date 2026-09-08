@@ -36,7 +36,14 @@ type Brief struct {
 	Thread []string `json:"thread,omitempty"`
 	// RecentPhrases stays a don't-repeat blocklist, NOT material.
 	RecentPhrases []string `json:"recent_phrases,omitempty"`
-	MaxChars      int      `json:"max_chars"`
+	// DaypartFrom is the daypart the night just left. Present on a
+	// daypart_transition only, so she can name both sides of the hinge.
+	DaypartFrom string `json:"daypart_from,omitempty"`
+	// SilentForMin is how long she was paused. Present on a wake_greeting
+	// only, and absent on a fresh session where the station itself was off -
+	// without it the greeting cannot tell three minutes from three hours.
+	SilentForMin int `json:"silent_for_min,omitempty"`
+	MaxChars     int `json:"max_chars"`
 }
 
 // BriefTrack is one track in the brief. Source/Reason/RequestedByName carry
