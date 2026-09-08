@@ -258,9 +258,14 @@ func (s *Server) GenerateScript(ctx context.Context, req *radiolabv1.GenerateScr
 		return nil, err
 	}
 
+	rules, ok := brain.RulesFor(briefType)
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"brief type %q has no rules; expected seam, musing, daypart_transition or wake_greeting", briefType)
+	}
 	// The SAME assembly the director uses. A bench that builds its own prompt
-	// auditions a voice that never airs (spec §6).
-	system, user := brain.BuildScriptPrompts(pers, briefJSON)
+	// auditions a voice that never airs (spec 2026-07-29 section 6).
+	system, user := brain.BuildScriptPrompts(pers, rules, briefJSON)
 	ctx = audit.WithLabel(ctx, "script:"+briefType)
 	raw, err := m.Generate(ctx, system, user, brain.ScriptSchema)
 	if err != nil {

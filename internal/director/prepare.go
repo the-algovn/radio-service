@@ -43,37 +43,46 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 	ctx, cancel := context.WithTimeout(ctx, prepDeadline)
 	defer cancel()
 
+	sp, known := specFor(kind)
+	if !known {
+		dr.d.Logger.ErrorContext(ctx, "director: unknown segment kind", "kind", kind)
+		return live.Clip{}, false
+	}
+
 	var script, anchorYTID string
 	var correlationID, backsellTitle, promiseTitle string
 	var anchorStartedAt time.Time
 	var out brain.Output
 	var promised *live.Upcoming
+	var just *live.Entry
 
-	switch kind {
-	case live.ClipStationID:
+	if !sp.Generated {
 		line, ok := dr.ids.next()
 		if !ok {
 			return live.Clip{}, false
 		}
 		script = line
-	default: // live.ClipSeam
-		entry, found, err := dr.d.AirLog.Latest(ctx)
-		if err != nil || !found {
-			if err != nil {
-				dr.d.Logger.ErrorContext(ctx, "director: air log read failed", "err", err)
-			}
-			return live.Clip{}, false // nothing airing → nothing to talk about
-		}
-		anchorYTID, anchorStartedAt = entry.YTID, entry.StartedAt
-		backsellTitle = entry.Title
+	} else {
 		pers, err := persona.Load(dr.d.PersonaDir)
 		if err != nil {
 			dr.d.Logger.ErrorContext(ctx, "director: persona load failed", "err", err)
 			return live.Clip{}, false
 		}
+		if sp.Anchored {
+			entry, found, aerr := dr.d.AirLog.Latest(ctx)
+			if aerr != nil || !found {
+				if aerr != nil {
+					dr.d.Logger.ErrorContext(ctx, "director: air log read failed", "err", aerr)
+				}
+				return live.Clip{}, false // nothing airing -> nothing to backsell
+			}
+			just = &entry
+			anchorYTID, anchorStartedAt = entry.YTID, entry.StartedAt
+			backsellTitle = entry.Title
+		}
 		// Peek BEFORE generating: the brief needs coming_up. Pin AFTER
 		// rendering (below) so a failed preparation never reorders the queue.
-		if dr.d.Peek != nil && dr.d.Sched != nil {
+		if sp.Promises && dr.d.Peek != nil && dr.d.Sched != nil {
 			if up, found, perr := dr.d.Peek(ctx); perr != nil {
 				dr.d.Logger.WarnContext(ctx, "director: peek failed; backsell only", "err", perr)
 			} else if found {
@@ -81,20 +90,25 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 				promiseTitle = up.Track.Title
 			}
 		}
-		// Mint BEFORE generateValid — that function rebinds ctx with
+		// Mint BEFORE generateValid - that function rebinds ctx with
 		// audit.WithLabel, deriving from whatever it is handed, so an id set
 		// afterwards would never reach the audit callback.
 		correlationID = newCorrelationID()
 		ctx = audit.WithCorrelation(ctx, correlationID)
 
-		briefJSON, err := json.Marshal(dr.buildBrief(ctx, st, entry, promised, dj.MaxChars))
-		if err != nil {
-			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", err)
+		rules, ok := brain.RulesFor(kind)
+		if !ok {
+			dr.d.Logger.ErrorContext(ctx, "director: no rules for kind", "kind", kind)
 			return live.Clip{}, false
 		}
-		system, user := brain.BuildScriptPrompts(pers, string(briefJSON))
-		var ok bool
-		out, ok = dr.generateValid(ctx, system, user, dj.MaxChars)
+		from, silent := dr.briefFacts()
+		briefJSON, merr := json.Marshal(dr.buildBrief(ctx, st, kind, just, promised, dj.MaxChars, from, silent))
+		if merr != nil {
+			dr.d.Logger.ErrorContext(ctx, "director: brief marshal failed", "err", merr)
+			return live.Clip{}, false
+		}
+		system, user := brain.BuildScriptPrompts(pers, rules, string(briefJSON))
+		out, ok = dr.generateValid(ctx, kind, system, user, dj.MaxChars)
 		if !ok {
 			return live.Clip{}, false
 		}
@@ -145,7 +159,7 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 		}
 	}
 
-	if kind == live.ClipSeam && dr.d.TalkMem != nil {
+	if sp.Generated && dr.d.TalkMem != nil {
 		// Best-effort: the clip is rendered and paid for, so a memory write
 		// failure must not lose the break.
 		if merr := dr.d.TalkMem.Append(ctx, talkmem.Entry{
@@ -165,8 +179,8 @@ func (dr *Director) prepare(ctx context.Context, kind string, st station.Station
 // failure aborts; validation violations get ONE retry with the violations
 // appended. Cost and the spend ledger are handled by the Eino audit callback,
 // so this loop no longer prices anything itself.
-func (dr *Director) generateValid(ctx context.Context, system, user string, maxChars int) (brain.Output, bool) {
-	ctx = audit.WithLabel(ctx, "director:seam")
+func (dr *Director) generateValid(ctx context.Context, kind, system, user string, maxChars int) (brain.Output, bool) {
+	ctx = audit.WithLabel(ctx, "director:"+kind)
 	for attempt := 0; ; attempt++ {
 		raw, err := dr.d.Model.Generate(ctx, system, user, brain.ScriptSchema)
 		if err != nil {
@@ -195,20 +209,30 @@ const (
 	threadCap  = 8
 )
 
-// buildBrief assembles the seam-break data block. up is nil when nothing could
-// be promised. Every read here is best-effort: a failure degrades one FIELD,
-// never the break — music covering the air because show memory was unreadable
-// would be a bad trade.
-func (dr *Director) buildBrief(ctx context.Context, st station.Station,
-	just live.Entry, up *live.Upcoming, maxChars int) Brief {
+// buildBrief assembles the data block for one authored break. just is nil for
+// every kind but the seam, and up is nil when nothing could be promised. Every
+// read here is best-effort: a failure degrades one FIELD, never the break -
+// music covering the air because show memory was unreadable would be a bad
+// trade.
+func (dr *Director) buildBrief(ctx context.Context, st station.Station, kind string,
+	just *live.Entry, up *live.Upcoming, maxChars int,
+	daypartFrom string, silentForMin int) Brief {
 
 	now := dr.d.Clock.Now().In(dr.d.Location)
 	b := Brief{
-		Type: live.ClipSeam, LocalTime: now.Format("Monday 15:04"),
-		Daypart: daypart(now.Hour()),
-		JustPlayed: BriefTrack{Title: just.Title, Artist: just.Artist, Source: just.Source,
-			RequestedByName: just.RequestedByName, Reason: just.Reason},
+		Type: kind, LocalTime: now.Format("Monday 15:04"),
+		Daypart:  daypart(now.Hour()),
 		MaxChars: maxChars,
+	}
+	if just != nil {
+		b.JustPlayed = &BriefTrack{Title: just.Title, Artist: just.Artist, Source: just.Source,
+			RequestedByName: just.RequestedByName, Reason: just.Reason}
+	}
+	switch kind {
+	case live.ClipDaypartTransition:
+		b.DaypartFrom = daypartFrom
+	case live.ClipWakeGreeting:
+		b.SilentForMin = silentForMin
 	}
 
 	var sessionStart time.Time
@@ -253,6 +277,15 @@ func (dr *Director) buildBrief(ctx context.Context, st station.Station,
 		}
 	}
 	return b
+}
+
+// briefFacts reads the two mu-guarded values the brief needs that are not on
+// the station row. prepare runs off the audio hot path, so one uncontended
+// lock acquisition here is cheaper than threading them through RunOnce.
+func (dr *Director) briefFacts() (daypartFrom string, silentForMin int) {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+	return dr.daypartFrom, dr.silentForMin
 }
 
 // newCorrelationID returns a random hex id grouping one prepare's LLM calls.

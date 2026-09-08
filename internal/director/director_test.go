@@ -515,3 +515,207 @@ func TestSnapshotCarriesSessionHasMusic(t *testing.T) {
 	require.True(t, dr.Snapshot().SessionHasMusic,
 		"the projector re-implements the due test and needs this term")
 }
+
+func TestGoingOnAirArmsTheGreetingAndSeedsTheDaypart(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+
+	f.dr.RunOnce(context.Background())
+
+	require.True(t, f.dr.cad.PendingWake, "a new broadcast owes a greeting")
+	require.NotEmpty(t, f.dr.lastDaypart, "seeded, so the first tick cannot fire a bogus rollover")
+	require.True(t, f.dr.cad.PendingDaypart.IsZero(), "and owes no rollover it never saw")
+	require.Zero(t, f.dr.silentForMin, "she was not silent; the station was off")
+}
+
+// The greeting is what the session-open waste turns into. Before the fix a
+// carried counter bought an LLM call for a seam Take was guaranteed to
+// discard; now the first finished track opens a greeting instead.
+func TestTheFirstTrackOfASessionOpensAGreetingNotASeam(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(context.Background())
+
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	require.Equal(t, live.ClipWakeGreeting,
+		f.dr.dueKindLocked(f.clk.Now(), station.DJSettings{BreakEvery: 2}))
+}
+
+// An AIEnabled resume is NOT a new session. The station stayed on air and the
+// feeder kept calling TrackFinished, so the counter and SessionHasMusic must
+// survive - the greeting outranks the owed seam in the ladder and Advance
+// resets the counter when it airs, with no special case anywhere.
+func TestAIEnabledResumeKeepsTheSessionButArmsTheGreeting(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx)
+
+	for i := 0; i < 9; i++ {
+		f.dr.TrackFinished(live.Entry{YTID: "y"})
+	}
+	_, err := f.dr.d.Station.SetAIEnabled(ctx, false)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx)
+	f.clk.advance(42 * time.Minute)
+	_, err = f.dr.d.Station.SetAIEnabled(ctx, true)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx)
+
+	require.True(t, f.dr.cad.PendingWake)
+	require.True(t, f.dr.cad.SessionHasMusic, "music kept playing while she was quiet")
+	require.Equal(t, 9, f.dr.cad.FinishedSinceSeam, "a resume is not a new session")
+	require.Equal(t, 42, f.dr.silentForMin)
+	require.True(t, f.dr.aiDisabledSince.IsZero(), "consumed once it has an answer")
+	require.Equal(t, live.ClipWakeGreeting,
+		f.dr.dueKindLocked(f.clk.Now(), station.DJSettings{BreakEvery: 2}),
+		"the greeting outranks the seam the counter owes")
+}
+
+// AI can go quiet, then the station itself go dark, then BOTH come back on
+// the same tick. Without clearing aiDisabledSince in the on-air block, the
+// resume block below it would still see the stale timestamp and report the
+// whole dead-air span as silence - a false statement, since the station
+// itself was off for most of it, not merely quiet.
+func TestGoingOnAirSameTickAsAIResumeClearsStaleSilence(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // 22:00
+
+	_, err := f.dr.d.Station.SetAIEnabled(ctx, false)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx) // AI disabled at 22:00; aiDisabledSince stamped
+
+	_, err = f.dr.d.Station.GoOffAir(ctx)
+	require.NoError(t, err)
+	f.clk.advance(5 * time.Minute)
+	f.dr.RunOnce(ctx) // 22:05 - the station itself goes dark too
+
+	f.clk.advance(175 * time.Minute) // 01:00 - three hours since AI went quiet
+	_, err = f.dr.d.Station.SetAIEnabled(ctx, true)
+	require.NoError(t, err)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // on-air and the AI resume land on the SAME tick
+
+	require.Zero(t, f.dr.silentForMin,
+		"the station itself was dark; a new session owes no silence report")
+}
+
+// A stale silentForMin from a PREVIOUS session must not ride into a new
+// session's greeting: a listener would hear "she was quiet for 12 minutes"
+// from a pause that happened last session, not this one.
+func TestGoingOnAirClearsAStaleSilentForMinFromThePreviousSession(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // session 1 opens
+
+	_, err := f.dr.d.Station.SetAIEnabled(ctx, false)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx)
+	f.clk.advance(12 * time.Minute)
+	_, err = f.dr.d.Station.SetAIEnabled(ctx, true)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx) // resume; silentForMin becomes 12
+	require.Equal(t, 12, f.dr.silentForMin)
+
+	_, err = f.dr.d.Station.GoOffAir(ctx)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx) // session 1 ends
+
+	f.clk.advance(time.Hour)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // session 2 opens
+
+	require.Zero(t, f.dr.silentForMin,
+		"a new session owes no silence report carried from the one before it")
+}
+
+func TestDaypartRolloverArmsTheTransitionAndRemembersWhatItLeft(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // seeds lastDaypart at 22:00 UTC == "đêm"
+	require.Equal(t, "đêm", f.dr.lastDaypart)
+
+	f.clk.advance(7 * time.Hour) // 05:00 == "sáng"
+	f.dr.RunOnce(ctx)
+
+	require.Equal(t, f.clk.Now(), f.dr.cad.PendingDaypart)
+	require.Equal(t, "đêm", f.dr.daypartFrom)
+	require.Equal(t, "sáng", f.dr.lastDaypart)
+}
+
+func TestNoRolloverWithinTheSameDaypart(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx)
+
+	f.clk.advance(30 * time.Minute) // 22:30, still "đêm"
+	f.dr.RunOnce(ctx)
+
+	require.True(t, f.dr.cad.PendingDaypart.IsZero())
+}
+
+// A SECOND session opening in a different daypart from the one the previous
+// session ended in must not owe a rollover. The wake greeting already covers
+// a session open; a daypart transition on top of it would have her announce
+// "it has just turned evening" when evening turned two hours ago while the
+// station was dark - a false statement, not a late one.
+func TestGoingOnAirDoesNotOweARolloverThatHappenedOffAir(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // seeds lastDaypart at 22:00 UTC == "đêm"
+
+	_, err := f.dr.d.Station.GoOffAir(ctx)
+	require.NoError(t, err)
+	f.dr.RunOnce(ctx) // dead air; lastDaypart is an edge detector, not cleared
+
+	f.clk.advance(7 * time.Hour) // 05:00 == "sáng", crossed while off air
+	onAir(t, f)
+	f.dr.RunOnce(ctx) // a new broadcast session opens
+
+	require.True(t, f.dr.cad.PendingDaypart.IsZero(),
+		"opening a broadcast must not owe a rollover that happened during dead air")
+}
+
+// Going off air is precisely what should leave a greeting owed. cancelPending
+// disarms the operator's forced break because that is an intent that expires;
+// a greeting is a debt.
+func TestPauseAndOffAirLeaveTheGreetingAndTheRolloverOwed(t *testing.T) {
+	dr, clk := newCoreDirector(t)
+	dr.cad.PendingWake = true
+	dr.cad.PendingDaypart = clk.Now()
+	dr.cad.Forced = true
+
+	dr.mu.Lock()
+	dr.cancelPendingLocked("paused or off-air")
+	dr.mu.Unlock()
+
+	require.False(t, dr.cad.Forced, "an arming is an intent, and it expires")
+	require.True(t, dr.cad.PendingWake, "a greeting is a debt, and it does not")
+	require.False(t, dr.cad.PendingDaypart.IsZero())
+}
+
+func TestSnapshotCarriesTheProjectableCadenceTerms(t *testing.T) {
+	dr, clk := newCoreDirector(t)
+	dr.cad.LastMusing = clk.Now()
+	dr.cad.PendingDaypart = clk.Now().Add(-time.Minute)
+	dr.cad.PendingWake = true
+
+	s := dr.Snapshot()
+	require.Equal(t, dr.cad.LastMusing, s.LastMusing)
+	require.Equal(t, dr.cad.PendingDaypart, s.PendingDaypart)
+	require.True(t, s.PendingWake)
+}

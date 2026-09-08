@@ -14,6 +14,8 @@ import (
 	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/audit"
+	"github.com/the-algovn/radio-service/internal/brain"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/persona"
@@ -58,12 +60,14 @@ type seqModel struct {
 	calls                int
 	err                  error  // non-nil → Generate fails
 	lastSystem, lastUser string // the prompts of the most recent call
+	lastLabel            string // audit.LabelFrom of the most recent call
 }
 
 func (m *seqModel) Name() string     { return "claude-test" }
 func (m *seqModel) Provider() string { return "fake" }
-func (m *seqModel) Generate(_ context.Context, system, user string, _ *jsonschema.Schema) (string, error) {
+func (m *seqModel) Generate(ctx context.Context, system, user string, _ *jsonschema.Schema) (string, error) {
 	m.lastSystem, m.lastUser = system, user
+	m.lastLabel = audit.LabelFrom(ctx)
 	m.calls++
 	if m.err != nil {
 		return "", m.err
@@ -241,8 +245,9 @@ func TestBuildBriefContents(t *testing.T) {
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
 	just := live.Entry{Title: "Bài A", Artist: "Ca sĩ", Source: "listener", RequestedByName: "Minh"}
 
-	b := f.dr.buildBrief(ctx, st, just, nil, 450)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &just, nil, 450, "", 0)
 	require.Equal(t, "seam", b.Type)
+	require.NotNil(t, b.JustPlayed)
 	require.Equal(t, "Bài A", b.JustPlayed.Title)
 	require.Equal(t, "Minh", b.JustPlayed.RequestedByName)
 	require.Equal(t, 90, b.OnAirForMin)
@@ -272,7 +277,7 @@ func TestBuildBriefScopesTonightToTheSession(t *testing.T) {
 	}
 
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
-	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 
 	var titles []string
 	for _, tr := range b.Tonight {
@@ -295,7 +300,7 @@ func TestBuildBriefIncludesTheThreadOldestFirst(t *testing.T) {
 		Summary: "nhắc bạn Ngọc"}))
 
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
-	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 
 	require.Equal(t, []string{"kể về mưa", "nhắc bạn Ngọc"}, b.Thread)
 	require.Equal(t, []string{"khuya rồi"}, b.RecentPhrases)
@@ -315,7 +320,7 @@ func TestBuildBriefCarriesComingUpProvenance(t *testing.T) {
 		Reason:          "vì trời mưa",
 	}
 
-	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, up, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, up, 1500, "", 0)
 
 	require.NotNil(t, b.ComingUp)
 	require.Equal(t, "Em Của Ngày Hôm Qua", b.ComingUp.Title)
@@ -338,13 +343,42 @@ func TestBuildBriefOmitsListenersOnReadFailure(t *testing.T) {
 	onAir := f.clk.Now().Add(-time.Hour)
 	st := station.Station{OnAir: true, AIEnabled: true, OnAirSince: &onAir, DJ: testDJ}
 
-	b := f.dr.buildBrief(ctx, st, live.Entry{Title: "vừa xong"}, nil, 1500)
+	b := f.dr.buildBrief(ctx, st, live.ClipSeam, &live.Entry{Title: "vừa xong"}, nil, 1500, "", 0)
 	require.Zero(t, b.Listeners)
 
 	j, err := json.Marshal(b)
 	require.NoError(t, err)
 	require.NotContains(t, string(j), "listeners",
 		"a failed listener read must not ship a false zero as fact")
+}
+
+func TestBriefCarriesDaypartFromOnlyForTheTransition(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+
+	b := f.dr.buildBrief(ctx, testStation, live.ClipDaypartTransition, nil, nil, 450, "đêm", 0)
+	require.Equal(t, "đêm", b.DaypartFrom)
+
+	b = f.dr.buildBrief(ctx, testStation, live.ClipMusing, nil, nil, 450, "đêm", 0)
+	require.Empty(t, b.DaypartFrom, "a musing is not a hinge, and the value is never cleared")
+}
+
+func TestBriefCarriesSilentForMinOnlyForTheGreeting(t *testing.T) {
+	ctx := context.Background()
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+
+	b := f.dr.buildBrief(ctx, testStation, live.ClipWakeGreeting, nil, nil, 450, "", 42)
+	require.Equal(t, 42, b.SilentForMin)
+
+	b = f.dr.buildBrief(ctx, testStation, live.ClipMusing, nil, nil, 450, "", 42)
+	require.Zero(t, b.SilentForMin)
+
+	// A fresh session gives zero, and omitempty must keep it off the wire -
+	// "silent_for_min": 0 would have her announce a silence that never happened.
+	b = f.dr.buildBrief(ctx, testStation, live.ClipWakeGreeting, nil, nil, 450, "", 0)
+	j, err := json.Marshal(b)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "silent_for_min")
 }
 
 // recVoice records the last Synthesize arguments.
@@ -630,4 +664,98 @@ type failingTalkMem struct{}
 func (failingTalkMem) Append(context.Context, talkmem.Entry) error { return errors.New("db down") }
 func (failingTalkMem) Recent(context.Context, time.Time, int) ([]talkmem.Entry, error) {
 	return nil, errors.New("db down")
+}
+
+// The immunity that makes anchor-free kinds worth having: an empty air log
+// aborts a seam (nothing to talk about) but must not stop a musing, whose
+// material is the hour and the room.
+func TestPrepareMusingNeedsNoAirLogEntry(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{memoryRaw}})
+
+	clip, ok := f.dr.prepare(context.Background(), live.ClipMusing, testStation)
+	require.True(t, ok)
+	require.Equal(t, live.ClipMusing, clip.Kind)
+	require.Empty(t, clip.AnchorYTID, "a musing names no track, so it can never go stale")
+	require.True(t, clip.AnchorStartedAt.IsZero())
+	require.Empty(t, clip.BacksellTitle)
+	require.Empty(t, clip.PromiseTitle)
+}
+
+// A pin reorders the play queue. Only the seam is allowed to, because only the
+// seam's script names the track it is promising.
+func TestPrepareAnchorFreeKindsNeverPeekOrPin(t *testing.T) {
+	for _, kind := range []string{live.ClipMusing, live.ClipDaypartTransition, live.ClipWakeGreeting} {
+		t.Run(kind, func(t *testing.T) {
+			sf := newSeamFixture(t, &seqModel{raws: []string{memoryRaw}})
+			peeked := false
+			sf.peek = func(context.Context) (live.Upcoming, bool, error) {
+				peeked = true
+				return live.Upcoming{Track: library.Track{YTID: "z", Title: "Không được hứa"}}, true, nil
+			}
+
+			clip, ok := sf.dr.prepare(context.Background(), kind, testStation)
+			require.True(t, ok)
+			require.False(t, peeked, "an anchor-free kind has no coming_up in its brief")
+			require.Equal(t, 0, sf.pin.calls)
+			require.Empty(t, clip.PromiseTitle)
+			require.NotContains(t, sf.model.lastUser, "just_played",
+				"an anchor-free kind's brief must not carry the field at all")
+		})
+	}
+}
+
+// Show memory is how she avoids repeating herself. It used to be seam-only, so
+// a musing reusing last musing's closing line was invisible to recent_phrases.
+func TestPrepareRecordsShowMemoryForEveryGeneratedKind(t *testing.T) {
+	for _, kind := range []string{live.ClipMusing, live.ClipDaypartTransition, live.ClipWakeGreeting} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			f := newPrepFixture(t, &seqModel{raws: []string{memoryRaw}})
+
+			_, ok := f.dr.prepare(ctx, kind, testStation)
+			require.True(t, ok)
+
+			got, err := f.dr.d.TalkMem.Recent(ctx, time.Time{}, 8)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			require.Equal(t, kind, got[0].Kind)
+			require.Equal(t, "kể chuyện cơn mưa Sài Gòn", got[0].Summary)
+		})
+	}
+}
+
+// Each kind's brief must carry its own type and its own rules, or the bench
+// auditions one voice and the air gets another.
+func TestPrepareSendsTheKindsOwnRulesAndBriefType(t *testing.T) {
+	for _, kind := range []string{live.ClipSeam, live.ClipMusing,
+		live.ClipDaypartTransition, live.ClipWakeGreeting} {
+		t.Run(kind, func(t *testing.T) {
+			sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+			_, ok := sf.dr.prepare(context.Background(), kind, testStation)
+			require.True(t, ok)
+
+			rules, hasRules := brain.RulesFor(kind)
+			require.True(t, hasRules)
+			require.Contains(t, sf.model.lastSystem, rules)
+			require.Contains(t, sf.model.lastUser, `"type":"`+kind+`"`)
+		})
+	}
+}
+
+// The audit label used to be hardcoded to director:seam, which would file every
+// new kind's model spend under the seam - invisible exactly when the cost of
+// the new kinds is the question being asked. The TTS ledger line already got
+// this right, so the two are asserted together.
+func TestGeneratedKindsLabelTheirOwnSpend(t *testing.T) {
+	for _, kind := range []string{live.ClipSeam, live.ClipMusing,
+		live.ClipDaypartTransition, live.ClipWakeGreeting} {
+		t.Run(kind, func(t *testing.T) {
+			sf := newSeamFixture(t, &seqModel{raws: []string{goodRaw}})
+			_, ok := sf.dr.prepare(context.Background(), kind, testStation)
+			require.True(t, ok)
+
+			require.Equal(t, "director:"+kind, sf.model.lastLabel)
+			require.Contains(t, ledgerLabels(t, sf.ledger), "tts:director:"+kind)
+		})
+	}
 }

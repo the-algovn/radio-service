@@ -29,9 +29,9 @@ func (s *PGStore) withTx(ctx context.Context, fn func(q *db.Queries) error) erro
 	return tx.Commit(ctx)
 }
 
-func djSettings(voiceID string, rate float64, breakEvery, stationIDMin, maxChars int32) DJSettings {
+func djSettings(voiceID string, rate float64, breakEvery, stationIDMin, maxChars, musingEveryMin int32) DJSettings {
 	return DJSettings{VoiceID: voiceID, Rate: rate, BreakEvery: int(breakEvery),
-		StationIDMin: int(stationIDMin), MaxChars: int(maxChars)}
+		StationIDMin: int(stationIDMin), MusingEveryMin: int(musingEveryMin), MaxChars: int(maxChars)}
 }
 
 func (s *PGStore) GetStation(ctx context.Context) (Station, error) {
@@ -40,7 +40,7 @@ func (s *PGStore) GetStation(ctx context.Context) (Station, error) {
 		return Station{}, err
 	}
 	return Station{OnAir: row.OnAir, OnAirSince: row.OnAirSince, AIEnabled: row.AiEnabled,
-		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars)}, nil
+		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars, row.DjMusingEveryMin)}, nil
 }
 
 func (s *PGStore) GoOnAir(ctx context.Context) (Station, error) {
@@ -52,7 +52,7 @@ func (s *PGStore) GoOnAir(ctx context.Context) (Station, error) {
 		}
 		if st.OnAir { // idempotent — preserve the anchor
 			out = Station{OnAir: true, OnAirSince: st.OnAirSince, AIEnabled: st.AiEnabled,
-				DJ: djSettings(st.DjVoiceID, st.DjRate, st.DjBreakEvery, st.DjStationIDMin, st.DjMaxChars)}
+				DJ: djSettings(st.DjVoiceID, st.DjRate, st.DjBreakEvery, st.DjStationIDMin, st.DjMaxChars, st.DjMusingEveryMin)}
 			return nil
 		}
 		row, err := q.StationGoOnAir(ctx)
@@ -60,7 +60,7 @@ func (s *PGStore) GoOnAir(ctx context.Context) (Station, error) {
 			return err
 		}
 		out = Station{OnAir: row.OnAir, OnAirSince: row.OnAirSince, AIEnabled: row.AiEnabled,
-			DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars)}
+			DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars, row.DjMusingEveryMin)}
 		return nil
 	})
 	return out, err
@@ -72,7 +72,7 @@ func (s *PGStore) GoOffAir(ctx context.Context) (Station, error) {
 		return Station{}, err
 	}
 	return Station{OnAir: row.OnAir, OnAirSince: row.OnAirSince, AIEnabled: row.AiEnabled,
-		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars)}, nil
+		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars, row.DjMusingEveryMin)}, nil
 }
 
 func (s *PGStore) SetAIEnabled(ctx context.Context, enabled bool) (Station, error) {
@@ -81,17 +81,18 @@ func (s *PGStore) SetAIEnabled(ctx context.Context, enabled bool) (Station, erro
 		return Station{}, err
 	}
 	return Station{OnAir: row.OnAir, OnAirSince: row.OnAirSince, AIEnabled: row.AiEnabled,
-		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars)}, nil
+		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars, row.DjMusingEveryMin)}, nil
 }
 
 func (s *PGStore) UpdateDJSettings(ctx context.Context, in DJSettings) (Station, error) {
 	row, err := db.New(s.pool).UpdateStationDJSettings(ctx, db.UpdateStationDJSettingsParams{
 		DjVoiceID: in.VoiceID, DjRate: in.Rate, DjBreakEvery: int32(in.BreakEvery),
 		DjStationIDMin: int32(in.StationIDMin), DjMaxChars: int32(in.MaxChars),
+		DjMusingEveryMin: int32(in.MusingEveryMin),
 	})
 	if err != nil {
 		return Station{}, err
 	}
 	return Station{OnAir: row.OnAir, OnAirSince: row.OnAirSince, AIEnabled: row.AiEnabled,
-		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars)}, nil
+		DJ: djSettings(row.DjVoiceID, row.DjRate, row.DjBreakEvery, row.DjStationIDMin, row.DjMaxChars, row.DjMusingEveryMin)}, nil
 }

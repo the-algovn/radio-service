@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/cadence"
 	"github.com/the-algovn/radio-service/internal/showlog"
 )
 
@@ -34,6 +35,20 @@ func TestClipKindConstantsMirrorShowlog(t *testing.T) {
 	// no test failure anywhere.
 	require.Equal(t, showlog.KindSeam, ClipSeam)
 	require.Equal(t, showlog.KindStationID, ClipStationID)
+	require.Equal(t, showlog.KindMusing, ClipMusing)
+	require.Equal(t, showlog.KindDaypartTransition, ClipDaypartTransition)
+	require.Equal(t, showlog.KindWakeGreeting, ClipWakeGreeting)
+}
+
+// The director hands cadence.DueKind's answer straight to prepare as a clip
+// kind, so a drift here would make Advance fall through to its default branch
+// and stop resetting the format clock.
+func TestClipKindConstantsMirrorCadence(t *testing.T) {
+	require.Equal(t, cadence.KindSeam, ClipSeam)
+	require.Equal(t, cadence.KindStationID, ClipStationID)
+	require.Equal(t, cadence.KindMusing, ClipMusing)
+	require.Equal(t, cadence.KindDaypartTransition, ClipDaypartTransition)
+	require.Equal(t, cadence.KindWakeGreeting, ClipWakeGreeting)
 }
 
 func TestDJPayloadZeroListenersPresent(t *testing.T) {

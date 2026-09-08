@@ -168,7 +168,7 @@ func TestGenerateScriptAuditsWithLabel(t *testing.T) {
 	)
 
 	_, err := s.GenerateScript(ctx, &radiolabv1.GenerateScriptRequest{
-		Brief:           &radiolabv1.Brief{Type: "backsell"},
+		Brief:           &radiolabv1.Brief{Type: "musing"},
 		PersonaOverride: "# test persona",
 	})
 	require.NoError(t, err)
@@ -176,6 +176,6 @@ func TestGenerateScriptAuditsWithLabel(t *testing.T) {
 	recs, err := store.List(context.Background(), audit.Filter{}, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, recs, 1)
-	require.Equal(t, "script:backsell", recs[0].Label)
+	require.Equal(t, "script:musing", recs[0].Label)
 	require.True(t, recs[0].Fake)
 }

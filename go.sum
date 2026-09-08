@@ -335,6 +335,8 @@ github.com/the-algovn/gopkg v0.1.0 h1:e3UBqu+8NtsJcPWWNlouHStbihriw3aXP7nzA1T3eO
 github.com/the-algovn/gopkg v0.1.0/go.mod h1:0CLz4y1PaSNwA4LbdzepDGiFPqpIGUCigk/uHWGxFVw=
 github.com/the-algovn/protos/gen/go v0.24.0 h1:aKpNPpZajH6RfQiMkJ19ShiZsDDakxZSkD9Ff9utN2M=
 github.com/the-algovn/protos/gen/go v0.24.0/go.mod h1:R7XPFZZ4rZTL4uTugvszHktcYV+MTpGSh2lFal4ZyK0=
+github.com/the-algovn/protos/gen/go v0.25.0 h1:TTnNNkr19NmIicEA1Qe+kyJOrOazwrwR49WWrbLL2R8=
+github.com/the-algovn/protos/gen/go v0.25.0/go.mod h1:R7XPFZZ4rZTL4uTugvszHktcYV+MTpGSh2lFal4ZyK0=
 github.com/tidwall/gjson v1.14.2/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
 github.com/tidwall/gjson v1.18.0 h1:FIDeeyB800efLX89e5a8Y0BNH+LOngJyGrIWxG2FKQY=
 github.com/tidwall/gjson v1.18.0/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/radio-service/internal/cadence"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
@@ -611,4 +612,134 @@ func firstOfKind(t *testing.T, segs []timeline.Segment, kinds ...string) timelin
 	}
 	t.Fatalf("no segment of kinds %v in %d segments", kinds, len(segs))
 	return timeline.Segment{}
+}
+
+func TestKindFromEngineMapsTheNewKindsThrough(t *testing.T) {
+	require.Equal(t, timeline.KindDJ, timeline.KindFromEngine("seam"), "the one deliberate rename")
+	require.Equal(t, timeline.KindStationID, timeline.KindFromEngine("station_id"))
+	require.Equal(t, timeline.KindMusing, timeline.KindFromEngine(cadence.KindMusing))
+	require.Equal(t, timeline.KindDaypartTransition, timeline.KindFromEngine(cadence.KindDaypartTransition))
+	require.Equal(t, timeline.KindWakeGreeting, timeline.KindFromEngine(cadence.KindWakeGreeting))
+	require.Equal(t, timeline.KindUnknown, timeline.KindFromEngine("dedication_read"))
+}
+
+// All three are break kinds on the wire, so an airing one must block a break
+// projected on top of it. isBreakKind is an exclusion rather than an
+// enumeration precisely so this keeps holding as the vocabulary grows.
+func TestAnAiringNewKindBlocksABreakOnTopOfIt(t *testing.T) {
+	for _, k := range []string{timeline.KindMusing, timeline.KindDaypartTransition,
+		timeline.KindWakeGreeting} {
+		t.Run(k, func(t *testing.T) {
+			s := liveState()
+			s.Airing = airing(k, 30)
+			s.Dir.SessionHasMusic = true
+			s.Dir.FinishedSinceSeam = 5
+			s.Dir.LastStationID = base.Add(-60 * time.Minute)
+			up, _, _ := timeline.Project(s)
+			require.False(t, isBreak(up[0]), "a break is never followed immediately by another")
+		})
+	}
+}
+
+func TestWakeGreetingProjectsAheadOfAnOwedSeam(t *testing.T) {
+	s := liveState()
+	s.Dir.FinishedSinceSeam = 5
+	s.Dir.PendingWake = true
+	up, _, _ := timeline.Project(s)
+	require.Equal(t, timeline.KindWakeGreeting, up[0].Kind)
+	require.Equal(t, timeline.CertaintyDue, up[0].Certainty)
+	require.Equal(t, timeline.EstWakeS, up[0].DurationS)
+	require.False(t, up[0].Forced, "only a seam can be operator-armed")
+}
+
+func TestArmedDaypartTransitionProjectsAndExpires(t *testing.T) {
+	s := liveState()
+	s.Dir.FinishedSinceSeam = 5
+	s.Dir.PendingDaypart = base
+	up, _, _ := timeline.Project(s)
+	require.Equal(t, timeline.KindDaypartTransition, up[0].Kind)
+	require.Equal(t, timeline.EstDaypartS, up[0].DurationS)
+
+	// Past the window it stops being due and the owed seam takes the slot back.
+	s.Dir.PendingDaypart = base.Add(-cadence.DaypartWindow - time.Minute)
+	up, _, _ = timeline.Project(s)
+	require.Equal(t, timeline.KindDJ, up[0].Kind)
+}
+
+func TestMusingProjectsFromItsOwnTimer(t *testing.T) {
+	s := liveState()
+	s.Station.DJ.MusingEveryMin = 10
+	s.Dir.LastMusing = base.Add(-11 * time.Minute)
+	up, _, _ := timeline.Project(s)
+	require.Equal(t, timeline.KindMusing, up[0].Kind)
+	require.Equal(t, timeline.EstMusingS, up[0].DurationS)
+}
+
+// A zero LastMusing means the director has not started its clock yet, not
+// "overdue since the epoch" - the same guard the station ID already has.
+func TestZeroLastMusingIsNotOverdue(t *testing.T) {
+	s := liveState()
+	s.Station.DJ.MusingEveryMin = 10
+	s.Dir.LastMusing = time.Time{}
+	up, _, _ := timeline.Project(s)
+	for _, seg := range up {
+		require.NotEqual(t, timeline.KindMusing, seg.Kind)
+	}
+}
+
+// A musing, daypart transition and wake greeting set no anchor at all - only
+// a seam names a specific track it just played. The prepared-clip arm must
+// exempt them by anchor ABSENCE, not by enumerating kinds, or a prepared one
+// loses its exact duration and correlation ID, or falls through to `due` (the
+// wrong kind) or the gate (vanishing entirely). None of these set
+// s.Dir.ClipAnchorYTID or s.Airing.YTID, matching how prepare.go actually
+// fills the slot for these kinds.
+func TestPreparedAnchorFreeKindsAreEmittedExactAndProvenanced(t *testing.T) {
+	cases := []struct {
+		name       string
+		engineKind string
+		wireKind   string
+	}{
+		{"musing", live.ClipMusing, timeline.KindMusing},
+		{"daypart_transition", live.ClipDaypartTransition, timeline.KindDaypartTransition},
+		{"wake_greeting", live.ClipWakeGreeting, timeline.KindWakeGreeting},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := liveState()
+			s.Dir.HasClip = true
+			s.Dir.ClipKind = tc.engineKind
+			s.Dir.ClipDurationS = 7.6 // rounds to 8 - distinct from every Est* constant
+			s.Dir.ClipCorrelationID = "corr-" + tc.name
+
+			up, _, _ := timeline.Project(s)
+
+			require.NotEmpty(t, up)
+			require.Equal(t, tc.wireKind, up[0].Kind)
+			require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+			require.Equal(t, 8, up[0].DurationS,
+				"prepared must carry the clip's exact rounded duration, never an estimate")
+			require.Equal(t, "corr-"+tc.name, up[0].CorrelationID)
+		})
+	}
+}
+
+// A prepared clip is already paid for - Take will air it regardless of the
+// current gate. That exemption must hold for the anchor-free kinds too, not
+// just for a seam: a closed budget gate must not make a prepared musing
+// vanish into an anonymous unknown block.
+func TestPreparedAnchorFreeKindSurvivesAClosedGate(t *testing.T) {
+	s := liveState()
+	s.SpentUSD = s.BudgetUSD // GateBudget
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipMusing
+	s.Dir.ClipDurationS = 12
+
+	up, _, gate := timeline.Project(s)
+
+	require.Equal(t, timeline.GateBudget, gate)
+	require.NotEmpty(t, up)
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty,
+		"a prepared musing is paid for and will air regardless of the gate")
+	require.Equal(t, timeline.KindMusing, up[0].Kind)
 }

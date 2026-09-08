@@ -112,6 +112,14 @@ type Snapshot struct {
 	// Without it the projector cannot tell a session that has aired music
 	// from one that has not, and promises a seam the engine will not make.
 	SessionHasMusic bool
+
+	// LastMusing, PendingDaypart and PendingWake are the remaining terms of
+	// cadence.DueKind. internal/timeline re-evaluates the whole ladder off this
+	// snapshot, so a term left out here is a segment the console silently never
+	// projects - and, worse, a seam it projects in that segment's place.
+	LastMusing     time.Time
+	PendingDaypart time.Time
+	PendingWake    bool
 }
 
 // Director prepares talk breaks ahead of air and hands them to the feeder
@@ -126,6 +134,21 @@ type Director struct {
 	slot     *live.Clip
 	cad      cadence.State
 	wasOnAir bool
+
+	// wasAIEnabled is the edge detector for the RESUME transition, which is
+	// deliberately not the same thing as a new broadcast session.
+	wasAIEnabled bool
+	// lastDaypart is the rollover edge detector. Seeded at session open, which
+	// is what stops a bogus transition on a broadcast's first tick.
+	lastDaypart string
+	// daypartFrom is the daypart the night just left, held for the transition's
+	// brief so she can name both sides of the hinge.
+	daypartFrom string
+	// aiDisabledSince times the silence; silentForMin is the answer, kept
+	// separately because the answer has to survive until the greeting is
+	// actually prepared, which can be several ticks after the resume.
+	aiDisabledSince time.Time
+	silentForMin    int
 }
 
 func New(d Deps) *Director {
@@ -150,11 +173,12 @@ func (dr *Director) TrackFinished(_ live.Entry) {
 }
 
 // Take hands over the prepared clip, if any. Never blocks. Staleness is
-// owned here: a seam whose anchor is not the entry that just finished is
-// deleted and cleared before returning ok=false (the slot-empty wake gate
-// must never livelock). station_id clips are always fresh. A successful
-// hand-off resets the matching format-clock counter — a stale discard does
-// NOT (the break is still owed and re-preps against the new anchor).
+// owned here: an ANCHORED clip whose anchor is not the entry that just
+// finished is deleted and cleared before returning ok=false (the slot-empty
+// wake gate must never livelock); every other kind is always fresh, having
+// named no track. A successful hand-off resets the matching format-clock
+// counter — a stale discard does NOT (the break is still owed and re-preps
+// against the new anchor).
 func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
@@ -162,7 +186,8 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		return live.Clip{}, false
 	}
 	c := *dr.slot
-	if c.Kind == live.ClipSeam && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
+	sp, _ := specFor(c.Kind)
+	if sp.Anchored && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
 		dr.slot = nil
 		_ = os.Remove(c.Path)
 		dr.d.Logger.Info("stale seam discarded", "anchor_ytid", c.AnchorYTID, "finished_ytid", justFinished.YTID)
@@ -255,11 +280,13 @@ func (dr *Director) Run(ctx context.Context) error {
 	}
 }
 
-// RunOnce evaluates the wake gates (spec §3) in order: on-air → ai_enabled →
-// listeners>0 → daily budget → segment due → slot empty; every failure is a
-// quiet skip (music covers the air). Pause/off-air additionally cancel a
-// pending clip; the off→on transition resets the station-id timer so the
-// first ID airs ~StationIDMin into each broadcast session.
+// RunOnce evaluates the wake gates (spec section 3) in order: on-air ->
+// ai_enabled -> listeners>0 -> daily budget -> segment due -> slot empty;
+// every failure is a quiet skip (music covers the air). Pause/off-air
+// additionally cancel a pending clip; the off->on transition now restarts the
+// whole format clock and owes a greeting, an AIEnabled off->on owes a
+// greeting without restarting the session, and the daypart rollover is
+// checked every tick while on air.
 func (dr *Director) RunOnce(ctx context.Context) {
 	st, err := dr.d.Station.GetStation(ctx)
 	if err != nil {
@@ -277,11 +304,47 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	// session's last track and discarded by Take against the zero Entry.
 	if st.OnAir && !dr.wasOnAir {
 		dr.cad.LastStationID = now
+		dr.cad.LastMusing = now
 		dr.cad.Forced = false
 		dr.cad.SessionHasMusic = false
 		dr.cad.FinishedSinceSeam = 0
+		dr.cad.PendingDaypart = time.Time{}
+		dr.cad.PendingWake = true
+		dr.lastDaypart = daypart(now.In(dr.d.Location).Hour())
+		dr.daypartFrom = ""
+		dr.silentForMin = 0 // she was not silent; the station was off
+		dr.aiDisabledSince = time.Time{}
 	}
 	dr.wasOnAir = st.OnAir
+
+	// An AIEnabled resume is NOT a new session: the station stayed on air and
+	// the feeder kept calling TrackFinished. SessionHasMusic and the seam
+	// counter are deliberately left alone - PendingWake outranks the owed seam
+	// in the ladder and Advance resets the counter when the greeting airs, so
+	// the ladder handles it with no special case.
+	if st.AIEnabled && !dr.wasAIEnabled {
+		dr.cad.PendingWake = true
+		dr.cad.LastStationID = now
+		dr.cad.LastMusing = now
+		if !dr.aiDisabledSince.IsZero() {
+			dr.silentForMin = int(now.Sub(dr.aiDisabledSince).Minutes())
+			dr.aiDisabledSince = time.Time{}
+		}
+	}
+	if !st.AIEnabled && dr.wasAIEnabled {
+		dr.aiDisabledSince = now
+	}
+	dr.wasAIEnabled = st.AIEnabled
+
+	if st.OnAir {
+		if d := daypart(now.In(dr.d.Location).Hour()); dr.lastDaypart != "" && d != dr.lastDaypart {
+			dr.cad.PendingDaypart = now
+			dr.daypartFrom = dr.lastDaypart
+			dr.lastDaypart = d
+		} else {
+			dr.lastDaypart = d
+		}
+	}
 	dr.mu.Unlock()
 	if !st.OnAir || !st.AIEnabled {
 		return
@@ -344,6 +407,9 @@ func (dr *Director) Snapshot() Snapshot {
 		StationIDsAvailable: dr.ids.available(),
 		Forced:              dr.cad.Forced,
 		SessionHasMusic:     dr.cad.SessionHasMusic,
+		LastMusing:          dr.cad.LastMusing,
+		PendingDaypart:      dr.cad.PendingDaypart,
+		PendingWake:         dr.cad.PendingWake,
 	}
 	if dr.slot != nil {
 		c := *dr.slot

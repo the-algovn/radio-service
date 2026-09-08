@@ -470,19 +470,21 @@ func (q *Queries) GetRequest(ctx context.Context, id string) (GetRequestRow, err
 
 const getStationRow = `-- name: GetStationRow :one
 SELECT on_air, on_air_since, ai_enabled,
-       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+       dj_musing_every_min
 FROM station WHERE id = TRUE
 `
 
 type GetStationRowRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
@@ -497,6 +499,7 @@ func (q *Queries) GetStationRow(ctx context.Context) (GetStationRowRow, error) {
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }
@@ -939,19 +942,21 @@ func (q *Queries) ListTracksMissingCues(ctx context.Context, limit int32) ([]Tra
 
 const lockStationRow = `-- name: LockStationRow :one
 SELECT on_air, on_air_since, ai_enabled,
-       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+       dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+       dj_musing_every_min
 FROM station WHERE id = TRUE FOR UPDATE
 `
 
 type LockStationRowRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) LockStationRow(ctx context.Context) (LockStationRowRow, error) {
@@ -966,6 +971,7 @@ func (q *Queries) LockStationRow(ctx context.Context) (LockStationRowRow, error)
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }
@@ -1654,18 +1660,20 @@ func (q *Queries) SetRequestPosition(ctx context.Context, arg SetRequestPosition
 const setStationAIEnabled = `-- name: SetStationAIEnabled :one
 UPDATE station SET ai_enabled = $1, updated_at = now() WHERE id = TRUE
 RETURNING on_air, on_air_since, ai_enabled,
-          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+          dj_musing_every_min
 `
 
 type SetStationAIEnabledRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) SetStationAIEnabled(ctx context.Context, aiEnabled bool) (SetStationAIEnabledRow, error) {
@@ -1680,6 +1688,7 @@ func (q *Queries) SetStationAIEnabled(ctx context.Context, aiEnabled bool) (SetS
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }
@@ -1687,18 +1696,20 @@ func (q *Queries) SetStationAIEnabled(ctx context.Context, aiEnabled bool) (SetS
 const stationGoOffAir = `-- name: StationGoOffAir :one
 UPDATE station SET on_air = FALSE, on_air_since = NULL, updated_at = now() WHERE id = TRUE
 RETURNING on_air, on_air_since, ai_enabled,
-          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+          dj_musing_every_min
 `
 
 type StationGoOffAirRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) StationGoOffAir(ctx context.Context) (StationGoOffAirRow, error) {
@@ -1713,6 +1724,7 @@ func (q *Queries) StationGoOffAir(ctx context.Context) (StationGoOffAirRow, erro
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }
@@ -1720,18 +1732,20 @@ func (q *Queries) StationGoOffAir(ctx context.Context) (StationGoOffAirRow, erro
 const stationGoOnAir = `-- name: StationGoOnAir :one
 UPDATE station SET on_air = TRUE, on_air_since = now(), updated_at = now() WHERE id = TRUE
 RETURNING on_air, on_air_since, ai_enabled,
-          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+          dj_musing_every_min
 `
 
 type StationGoOnAirRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) StationGoOnAir(ctx context.Context) (StationGoOnAirRow, error) {
@@ -1746,6 +1760,7 @@ func (q *Queries) StationGoOnAir(ctx context.Context) (StationGoOnAirRow, error)
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }
@@ -1823,29 +1838,33 @@ func (q *Queries) SumLedgerCostSince(ctx context.Context, ts time.Time) (float64
 
 const updateStationDJSettings = `-- name: UpdateStationDJSettings :one
 UPDATE station SET dj_voice_id = $1, dj_rate = $2, dj_break_every = $3,
-       dj_station_id_min = $4, dj_max_chars = $5, updated_at = now()
+       dj_station_id_min = $4, dj_max_chars = $5, dj_musing_every_min = $6,
+       updated_at = now()
 WHERE id = TRUE
 RETURNING on_air, on_air_since, ai_enabled,
-          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars
+          dj_voice_id, dj_rate, dj_break_every, dj_station_id_min, dj_max_chars,
+          dj_musing_every_min
 `
 
 type UpdateStationDJSettingsParams struct {
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 type UpdateStationDJSettingsRow struct {
-	OnAir          bool
-	OnAirSince     *time.Time
-	AiEnabled      bool
-	DjVoiceID      string
-	DjRate         float64
-	DjBreakEvery   int32
-	DjStationIDMin int32
-	DjMaxChars     int32
+	OnAir            bool
+	OnAirSince       *time.Time
+	AiEnabled        bool
+	DjVoiceID        string
+	DjRate           float64
+	DjBreakEvery     int32
+	DjStationIDMin   int32
+	DjMaxChars       int32
+	DjMusingEveryMin int32
 }
 
 func (q *Queries) UpdateStationDJSettings(ctx context.Context, arg UpdateStationDJSettingsParams) (UpdateStationDJSettingsRow, error) {
@@ -1855,6 +1874,7 @@ func (q *Queries) UpdateStationDJSettings(ctx context.Context, arg UpdateStation
 		arg.DjBreakEvery,
 		arg.DjStationIDMin,
 		arg.DjMaxChars,
+		arg.DjMusingEveryMin,
 	)
 	var i UpdateStationDJSettingsRow
 	err := row.Scan(
@@ -1866,6 +1886,7 @@ func (q *Queries) UpdateStationDJSettings(ctx context.Context, arg UpdateStation
 		&i.DjBreakEvery,
 		&i.DjStationIDMin,
 		&i.DjMaxChars,
+		&i.DjMusingEveryMin,
 	)
 	return i, err
 }

@@ -164,7 +164,7 @@ func stationProto(st station.Station) *radiov1.Station {
 func djSettingsProto(dj station.DJSettings) *radiov1.DJSettings {
 	return &radiov1.DJSettings{VoiceId: dj.VoiceID, SpeakingRate: dj.Rate,
 		BreakEvery: int32(dj.BreakEvery), StationIdMin: int32(dj.StationIDMin),
-		MaxChars: int32(dj.MaxChars)}
+		MaxChars: int32(dj.MaxChars), MusingEveryMin: int32(dj.MusingEveryMin)}
 }
 
 // canonicalVoiceID mirrors catalog.Resolve's namespacing rule in tts-service:
@@ -594,19 +594,23 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	if in.GetStationIdMin() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "station_id_min must be >= 0 (0 disables)")
 	}
+	if in.GetMusingEveryMin() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "musing_every_min must be >= 0 (0 disables)")
+	}
 	if n := in.GetMaxChars(); n < djMinMaxChars || n > djMaxMaxChars {
 		return nil, status.Errorf(codes.InvalidArgument, "max_chars must be between %d and %d", djMinMaxChars, djMaxMaxChars)
 	}
 	st, err := s.deps.Store.UpdateDJSettings(ctx, station.DJSettings{
 		VoiceID: in.GetVoiceId(), Rate: in.GetSpeakingRate(),
 		BreakEvery: int(in.GetBreakEvery()), StationIDMin: int(in.GetStationIdMin()),
-		MaxChars: int(in.GetMaxChars()),
+		MusingEveryMin: int(in.GetMusingEveryMin()), MaxChars: int(in.GetMaxChars()),
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update dj settings: %v", err)
 	}
 	s.logger.InfoContext(ctx, "dj settings updated", "voice", st.DJ.VoiceID, "rate", st.DJ.Rate,
-		"break_every", st.DJ.BreakEvery, "station_id_min", st.DJ.StationIDMin, "max_chars", st.DJ.MaxChars)
+		"break_every", st.DJ.BreakEvery, "station_id_min", st.DJ.StationIDMin,
+		"musing_every_min", st.DJ.MusingEveryMin, "max_chars", st.DJ.MaxChars)
 	return &radiov1.UpdateDJSettingsResponse{Settings: djSettingsProto(st.DJ)}, nil
 }
 
@@ -786,6 +790,9 @@ func (s *Server) GetShowTimeline(ctx context.Context, req *radiov1.GetShowTimeli
 			StationIDsAvailable: snap.StationIDsAvailable,
 			Forced:              snap.Forced,
 			SessionHasMusic:     snap.SessionHasMusic,
+			LastMusing:          snap.LastMusing,
+			PendingDaypart:      snap.PendingDaypart,
+			PendingWake:         snap.PendingWake,
 		}
 	}
 
