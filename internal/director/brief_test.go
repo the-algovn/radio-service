@@ -12,7 +12,7 @@ func TestBriefJSONFieldNames(t *testing.T) {
 		Type: "seam", LocalTime: "Thứ Ba 23:15", Daypart: "đêm",
 		OnAirForMin:   120,
 		Listeners:     5,
-		JustPlayed:    BriefTrack{Title: "Bài A", Artist: "Ca sĩ B", Source: "ai", Reason: "hợp đêm mưa"},
+		JustPlayed:    &BriefTrack{Title: "Bài A", Artist: "Ca sĩ B", Source: "ai", Reason: "hợp đêm mưa"},
 		Tonight:       []BriefTrack{{Title: "Bài C"}},
 		Thread:        []string{"đã kể chuyện mưa"},
 		RecentPhrases: []string{"bạn nghe đài"},
@@ -38,7 +38,7 @@ func TestDaypartMapping(t *testing.T) {
 }
 
 func TestBriefMarshalsComingUpOnlyWhenPresent(t *testing.T) {
-	b := Brief{Type: "seam", JustPlayed: BriefTrack{Title: "A"}, MaxChars: 1500}
+	b := Brief{Type: "seam", JustPlayed: &BriefTrack{Title: "A"}, MaxChars: 1500}
 	j, err := json.Marshal(b)
 	require.NoError(t, err)
 	require.NotContains(t, string(j), "coming_up",
@@ -48,6 +48,15 @@ func TestBriefMarshalsComingUpOnlyWhenPresent(t *testing.T) {
 	j, err = json.Marshal(b)
 	require.NoError(t, err)
 	require.Contains(t, string(j), `"coming_up":{"title":"B","artist":"Sơn Tùng M-TP"}`)
+}
+
+// An anchor-free kind's brief must not carry just_played at all. A null there
+// would be one more thing for her to read, and a zero-valued BriefTrack would
+// be a song with no name.
+func TestBriefOmitsJustPlayedWhenThereIsNoAnchor(t *testing.T) {
+	j, err := json.Marshal(Brief{Type: "musing", MaxChars: 1500})
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "just_played")
 }
 
 func TestBriefTonightCarriesOnlyTitleAndArtist(t *testing.T) {

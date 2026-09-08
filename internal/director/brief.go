@@ -1,6 +1,6 @@
 package director
 
-// Brief is the data block for one seam break. It enters the prompt ONLY inside
+// Brief is the data block for one authored talk break. It enters the prompt ONLY inside
 // brain.BuildScriptPrompts' <brief> delimiter (data, not instructions);
 // segment instructions ride exclusively in brain.SeamRules.
 //
@@ -10,7 +10,7 @@ package director
 // colour is not in here at all: it comes from model knowledge and the rules
 // require her to hedge it.
 type Brief struct {
-	Type        string `json:"type"` // "seam"
+	Type        string `json:"type"` // the live.Clip* kind this brief is for
 	LocalTime   string `json:"local_time"`
 	Daypart     string `json:"daypart"`
 	OnAirForMin int    `json:"on_air_for_min"`
@@ -19,8 +19,11 @@ type Brief struct {
 	// can only mean the second read failed — and shipping "listeners": 0 into a
 	// brief whose contract is "these facts are true, state them plainly" would
 	// have her announce an empty room that isn't empty.
-	Listeners  int        `json:"listeners,omitempty"`
-	JustPlayed BriefTrack `json:"just_played"`
+	Listeners int `json:"listeners,omitempty"`
+	// JustPlayed is nil for every kind but the seam. A musing or a greeting
+	// carrying just_played invites exactly the backsell those kinds exist to
+	// avoid, and their rules do not mention the field at all.
+	JustPlayed *BriefTrack `json:"just_played,omitempty"`
 	// ComingUp is nil when nothing could be promised — PeekNext found
 	// planNext's unknowable lazy-shuffle arm. She then simply backsells,
 	// which is exactly the pre-seam behaviour.
