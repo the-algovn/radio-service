@@ -4,21 +4,27 @@ import "time"
 
 // Clip kinds (v2 talk breaks). ClipSeam closes the song that just played and
 // opens the next one in a single break (spec 2026-07-29-radio-dj-seam-breaks);
-// it replaced ClipBacksell, which only ever looked backwards.
+// it replaced ClipBacksell, which only ever looked backwards. The other three
+// authored kinds talk about the night rather than about a song, so none of
+// them carries an anchor (spec 2026-09-08-radio-dj-segment-kinds).
 const (
-	ClipSeam      = "seam"
-	ClipStationID = "station_id"
+	ClipSeam              = "seam"
+	ClipStationID         = "station_id"
+	ClipMusing            = "musing"
+	ClipDaypartTransition = "daypart_transition"
+	ClipWakeGreeting      = "wake_greeting"
 )
 
 // Clip is one pre-rendered talk break: a raw s16le/48kHz/stereo PCM file on
 // local disk, prepared ahead of air by the director. AnchorYTID +
 // AnchorStartedAt identify the air-log entry the clip was written about
-// (seam freshness); both are zero on a station_id, which is always fresh.
+// (seam freshness); both are zero on every kind but ClipSeam, all of which
+// are always fresh.
 type Clip struct {
 	Path            string
 	DurationS       float64 // exact, from byte size — pacing truth
 	Script          string  // logs only, never published
-	Kind            string  // ClipSeam | ClipStationID
+	Kind            string  // one of the Clip* kinds
 	AnchorYTID      string
 	AnchorStartedAt time.Time
 	// BacksellTitle and PromiseTitle name what the break talked about, so the

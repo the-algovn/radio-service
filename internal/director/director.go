@@ -150,11 +150,12 @@ func (dr *Director) TrackFinished(_ live.Entry) {
 }
 
 // Take hands over the prepared clip, if any. Never blocks. Staleness is
-// owned here: a seam whose anchor is not the entry that just finished is
-// deleted and cleared before returning ok=false (the slot-empty wake gate
-// must never livelock). station_id clips are always fresh. A successful
-// hand-off resets the matching format-clock counter — a stale discard does
-// NOT (the break is still owed and re-preps against the new anchor).
+// owned here: an ANCHORED clip whose anchor is not the entry that just
+// finished is deleted and cleared before returning ok=false (the slot-empty
+// wake gate must never livelock); every other kind is always fresh, having
+// named no track. A successful hand-off resets the matching format-clock
+// counter — a stale discard does NOT (the break is still owed and re-preps
+// against the new anchor).
 func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
@@ -162,7 +163,8 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		return live.Clip{}, false
 	}
 	c := *dr.slot
-	if c.Kind == live.ClipSeam && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
+	sp, _ := specFor(c.Kind)
+	if sp.Anchored && !anchorFresh(c.AnchorYTID, c.AnchorStartedAt, justFinished) {
 		dr.slot = nil
 		_ = os.Remove(c.Path)
 		dr.d.Logger.Info("stale seam discarded", "anchor_ytid", c.AnchorYTID, "finished_ytid", justFinished.YTID)

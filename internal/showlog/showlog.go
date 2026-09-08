@@ -20,8 +20,11 @@ import (
 // are redeclared here rather than imported: internal/live imports THIS package
 // (for FeederDeps.TalkSegments), so the dependency runs one way only.
 const (
-	KindSeam      = "seam"
-	KindStationID = "station_id"
+	KindSeam              = "seam"
+	KindStationID         = "station_id"
+	KindMusing            = "musing"
+	KindDaypartTransition = "daypart_transition"
+	KindWakeGreeting      = "wake_greeting"
 )
 
 // Row origins — which table a Segment came from.
@@ -42,7 +45,7 @@ const (
 type Segment struct {
 	ID        int64
 	Origin    string // OriginAir | OriginTalk — which table
-	Kind      string // "track" | KindSeam | KindStationID
+	Kind      string // "track", or one of the Kind* talk kinds
 	YTID      string
 	Title     string
 	Artist    string
@@ -90,7 +93,7 @@ type MusicFunc func(ctx context.Context) ([]Segment, error)
 // by an operator skip therefore still appears, at its intended duration, which
 // is exactly the semantics music already has.
 type Talk struct {
-	Kind          string // KindSeam | KindStationID
+	Kind          string // one of the Kind* talk kinds
 	StartedAt     time.Time
 	DurationS     int
 	Script        string
