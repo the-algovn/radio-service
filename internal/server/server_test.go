@@ -464,24 +464,43 @@ func TestParseCallInExplicitModelStillHonoured(t *testing.T) {
 	require.True(t, resp.GetFake(), "an explicitly named model must still be honoured, not overridden by the default pin")
 }
 
-// THE point of the bench: byte-identical system prompt. Prompt parity is what
-// makes an audition mean anything.
+// THE point of the bench: byte-identical system prompt, for every kind the
+// brain writes. Prompt parity is what makes an audition mean anything.
 func TestBenchPromptMatchesDirector(t *testing.T) {
 	const persona = "Bạn là Tiểu Dương Dương.\n"
-	brief := `{"type":"seam","just_played":{"title":"A"},"max_chars":1500}`
 
-	wantSystem, wantUser := brain.BuildScriptPrompts(persona, brief)
+	for _, kind := range []string{"seam", "musing", "daypart_transition", "wake_greeting"} {
+		t.Run(kind, func(t *testing.T) {
+			brief := `{"type":"` + kind + `","max_chars":1500}`
+			rules, ok := brain.RulesFor(kind)
+			require.True(t, ok)
+			wantSystem, wantUser := brain.BuildScriptPrompts(persona, rules, brief)
 
-	spy := &promptSpyModel{}
-	s := New(Deps{Models: map[string]brain.Model{"script": spy},
+			spy := &promptSpyModel{}
+			s := New(Deps{Models: map[string]brain.Model{"script": spy},
+				DefaultModel: "script", ScriptModel: "script"})
+
+			_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+				BriefJson: brief, PersonaOverride: persona,
+			})
+			require.NoError(t, err)
+			require.Equal(t, wantSystem, spy.system)
+			require.Equal(t, wantUser, spy.user)
+		})
+	}
+}
+
+func TestGenerateScriptRejectsAnUnknownBriefType(t *testing.T) {
+	s := New(Deps{Models: map[string]brain.Model{"script": brain.NewFake("{}")},
 		DefaultModel: "script", ScriptModel: "script"})
 
-	_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
-		BriefJson: brief, PersonaOverride: persona,
-	})
-	require.NoError(t, err)
-	require.Equal(t, wantSystem, spy.system)
-	require.Equal(t, wantUser, spy.user)
+	for _, brief := range []string{`{"type":"backsell","max_chars":800}`, `{"max_chars":800}`} {
+		_, err := s.GenerateScript(context.Background(), &radiolabv1.GenerateScriptRequest{
+			BriefJson: brief, PersonaOverride: "p",
+		})
+		require.Error(t, err, brief)
+		require.Equal(t, codes.InvalidArgument, status.Code(err), brief)
+	}
 }
 
 // The property TestBenchPromptMatchesDirector's fixture could otherwise hide:

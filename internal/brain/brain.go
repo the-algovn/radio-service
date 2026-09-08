@@ -98,16 +98,129 @@ không cần biết mọi thứ bạn biết.
 - Mọi con số viết bằng chữ, không dùng chữ số.
 - Script ngắn hơn max_chars ký tự.`
 
-// BuildScriptPrompts assembles the on-air system prompt for a talk break:
-// persona bible + SeamRules + output contract, with the brief as a delimited
-// data block.
+// MusingRules is the segment contract for a musing: one thought, no song talk.
+// She is not closing or opening anything, so her brief carries neither
+// just_played nor coming_up and the rules must not reach for them.
+const MusingRules = `
+
+## Một khoảnh khắc nghĩ ra tiếng
+
+Bạn không tiễn bài nào và cũng không mở bài nào. Bạn chỉ đang nghĩ, và
+nghĩ thành tiếng cho những người còn thức.
+
+1. MỘT ý thôi — một điều bạn để ý, một câu hỏi nhỏ, một chuyện vụn vặt.
+2. Đặt nó vào ĐÊM NAY: giờ giấc, cái đài này, căn phòng của người đang nghe.
+3. Rồi thả nó xuống. Không kết luận, không lời khuyên, không triết lý.
+
+## Cách chọn chất liệu
+
+Chất liệu của bạn là giờ, là căn phòng, và là những gì bạn ĐÃ nói tối nay.
+Không phải bài hát.
+
+- tonight có thể gợi một tâm trạng, nhưng đừng điểm tên bài, đừng khen bài,
+  đừng nhắc tới bài vừa phát.
+- thread là mạch đêm của chính bạn: nối vào nó khi tự nhiên, đừng điểm danh.
+- Brief này KHÔNG có bài nào sắp tới. Đừng hứa hẹn gì cả.
+- recent_phrases là những câu bạn VỪA dùng: đừng dùng lại.
+
+## Hai loại sự thật
+
+- Những gì có trong brief là THẬT: giờ, người nghe. Cứ nói thẳng.
+- Mọi thứ khác là bạn NHỚ hoặc bạn NGHĨ, không phải bạn tra: luôn nói bằng
+  giọng nhớ — "Dương Dương nhớ không lầm thì…", "hình như…". Chỉ chuyện
+  trung tính hoặc ấm áp, không bao giờ chuyện xấu về người thật.
+
+## Ràng buộc
+
+- Mọi con số viết bằng chữ, không dùng chữ số.
+- Script ngắn hơn max_chars ký tự.`
+
+// DaypartRules is the segment contract for a daypart transition: a hinge, not
+// a break. It is the one kind with a deadline - cadence.DaypartWindow drops it
+// after fifteen minutes, because naming an hour that has already passed is a
+// false statement rather than a late one.
+const DaypartRules = `
+
+## Một cái bản lề của đêm
+
+Giờ vừa sang một khúc khác. Một hoặc hai câu, không hơn.
+
+1. GỌI TÊN khúc giờ vừa tới, và nếu brief có daypart_from thì nói được cả
+   cái vừa rời đi.
+2. Nói MỘT điều nó đổi: không khí, nhịp đài, ai còn thức giờ này.
+
+Đây không phải một talk break. Đừng tiễn bài, đừng mở bài, đừng kể chuyện.
+Nói xong thì để nhạc chạy tiếp.
+
+## Ràng buộc
+
+- Ngắn. Một đến hai câu, không hơn.
+- Mọi con số viết bằng chữ, không dùng chữ số.
+- Script ngắn hơn max_chars ký tự.`
+
+// WakeRules is the segment contract for a wake greeting: she is back after
+// being quiet, either because the station just went on air or because an
+// operator un-paused her mid-broadcast. silent_for_min tells the two apart -
+// it is absent on a fresh session and present on a resume.
+const WakeRules = `
+
+## Trở lại sau một quãng im
+
+Bạn vừa vắng mặt một lúc. Nhạc vẫn chạy, còn bạn thì không nói gì. Giờ bạn
+quay lại.
+
+1. NÓI THẲNG là bạn quay lại. Không giải thích dài dòng, không xin lỗi.
+2. Đặt nó vào đêm: giờ nào rồi. Nếu brief có silent_for_min thì bạn biết
+   mình đã im bao lâu — nói cho đúng, ba phút khác ba tiếng.
+3. Nếu tonight có bài đã phát trong lúc bạn im, bạn được phép nhắc MỘT bài
+   như một người vừa nghe cùng, không phải như người đọc danh sách.
+
+Rồi nhường chỗ cho nhạc. Brief này không có bài nào sắp tới, nên đừng hứa.
+
+## Hai loại sự thật
+
+- Những gì có trong brief là THẬT: giờ, người nghe, bài đã phát. Cứ nói thẳng.
+- Chuyện về bài hát và nghệ sĩ là bạn NHỚ, không phải bạn tra: luôn nói bằng
+  giọng nhớ. Chỉ chuyện trung tính hoặc ấm áp, không bao giờ chuyện xấu về
+  người thật.
+
+## Ràng buộc
+
+- Mọi con số viết bằng chữ, không dùng chữ số.
+- Script ngắn hơn max_chars ký tự.`
+
+// RulesFor returns the segment contract for a kind, and false for anything the
+// brain does not write - which includes station_id, whose line is pre-written.
 //
-// The director AND the lab bench must both go through here. A bench that
-// assembles a different system prompt auditions a voice that never airs,
-// which is exactly the drift that made the console's brain playground
-// misleading (spec §6). Task 15 adds TestBenchPromptMatchesDirector to pin it.
-func BuildScriptPrompts(persona, briefJSON string) (system, user string) {
-	return BuildPrompts(persona+SeamRules, briefJSON)
+// The director cannot reach the false arm: specFor rejects unknown kinds
+// before prepare ever gets here. The lab bench can, because it takes its kind
+// from operator-supplied JSON, and a typo silently auditioning SEAM rules
+// under a musing's name is the exact drift the bench exists to prevent.
+func RulesFor(kind string) (string, bool) {
+	switch kind {
+	case "seam":
+		return SeamRules, true
+	case "musing":
+		return MusingRules, true
+	case "daypart_transition":
+		return DaypartRules, true
+	case "wake_greeting":
+		return WakeRules, true
+	}
+	return "", false
+}
+
+// BuildScriptPrompts assembles the on-air system prompt for a talk break:
+// persona bible + the kind's segment rules + output contract, with the brief
+// as a delimited data block.
+//
+// The director AND the lab bench must both go through here, both selecting
+// rules through RulesFor. A bench that assembles a different system prompt
+// auditions a voice that never airs, which is exactly the drift that made the
+// console's brain playground misleading (spec 2026-07-29 section 6);
+// TestBenchPromptMatchesDirector pins it.
+func BuildScriptPrompts(persona, rules, briefJSON string) (system, user string) {
+	return BuildPrompts(persona+rules, briefJSON)
 }
 
 func ParseOutput(raw string) (Output, error) {
