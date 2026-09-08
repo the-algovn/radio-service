@@ -15,7 +15,7 @@ import (
 // Entry is one break's memory. Summary is what she may build on and call back
 // to; Phrases feeds the separate don't-repeat blocklist.
 type Entry struct {
-	Kind      string // live.ClipSeam
+	Kind      string // one of the generated live.Clip* kinds
 	Summary   string
 	Phrases   []string
 	CreatedAt time.Time // set by the store on Append

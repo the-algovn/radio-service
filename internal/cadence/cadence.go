@@ -35,6 +35,13 @@ const (
 // air. Every other kind carries indefinitely because its trigger is a timer
 // that stays elapsed, but a rollover happened at one moment: "da chin gio toi
 // roi do" said at ten in the evening is false, not late.
+//
+// This bounds when the transition becomes DUE, not when it airs: once due it
+// still waits in the slot for the next track boundary, which can land several
+// minutes past the window. That is only safe because no daypart band (see
+// daypart() in internal/director/brief.go) is shorter than this window plus
+// one track length - otherwise the transition could end up naming an hour
+// that has already passed again.
 const DaypartWindow = 15 * time.Minute
 
 type State struct {
@@ -88,6 +95,11 @@ func DueKind(s State, dj station.DJSettings) string {
 			return KindDaypartTransition
 		}
 	}
+	// A musing takes a seam's slot rather than adding one, since Advance resets
+	// the seam counter for every authored kind - so talk volume never
+	// increases. That holds only while the musing period is at least the seam
+	// period; make MusingEveryMin shorter than BreakEvery's effective period
+	// and musings start adding breaks instead of replacing them.
 	if dj.MusingEveryMin > 0 && !s.LastMusing.IsZero() &&
 		s.Now.Sub(s.LastMusing) >= time.Duration(dj.MusingEveryMin)*time.Minute {
 		return KindMusing

@@ -196,13 +196,13 @@ func seamArm(s State, gate string, cad cadence.State, first, lastWasBreak bool, 
 		return Segment{}, "", false
 	}
 
-	// Prepared clip: station_id is always fresh (no anchor needed); seam clips
-	// must pass the anchor-freshness test Take applies.
+	// Prepared clip: an anchor-free clip named no track and cannot go stale;
+	// only an anchored clip must pass the anchor-freshness test Take applies.
 	if first && s.Dir.HasClip {
 		// ClipKind is the ENGINE kind, which is not the wire vocabulary -
 		// translate before it ships.
 		kind := KindFromEngine(s.Dir.ClipKind)
-		if kind == KindStationID || anchorFresh(s) {
+		if s.Dir.ClipAnchorYTID == "" || anchorFresh(s) {
 			return Segment{
 				SegmentID:     fmt.Sprintf("proj:prep:%d", idx),
 				Kind:          kind,

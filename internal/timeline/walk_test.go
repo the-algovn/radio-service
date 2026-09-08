@@ -686,3 +686,60 @@ func TestZeroLastMusingIsNotOverdue(t *testing.T) {
 		require.NotEqual(t, timeline.KindMusing, seg.Kind)
 	}
 }
+
+// A musing, daypart transition and wake greeting set no anchor at all - only
+// a seam names a specific track it just played. The prepared-clip arm must
+// exempt them by anchor ABSENCE, not by enumerating kinds, or a prepared one
+// loses its exact duration and correlation ID, or falls through to `due` (the
+// wrong kind) or the gate (vanishing entirely). None of these set
+// s.Dir.ClipAnchorYTID or s.Airing.YTID, matching how prepare.go actually
+// fills the slot for these kinds.
+func TestPreparedAnchorFreeKindsAreEmittedExactAndProvenanced(t *testing.T) {
+	cases := []struct {
+		name       string
+		engineKind string
+		wireKind   string
+	}{
+		{"musing", live.ClipMusing, timeline.KindMusing},
+		{"daypart_transition", live.ClipDaypartTransition, timeline.KindDaypartTransition},
+		{"wake_greeting", live.ClipWakeGreeting, timeline.KindWakeGreeting},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := liveState()
+			s.Dir.HasClip = true
+			s.Dir.ClipKind = tc.engineKind
+			s.Dir.ClipDurationS = 7.6 // rounds to 8 - distinct from every Est* constant
+			s.Dir.ClipCorrelationID = "corr-" + tc.name
+
+			up, _, _ := timeline.Project(s)
+
+			require.NotEmpty(t, up)
+			require.Equal(t, tc.wireKind, up[0].Kind)
+			require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+			require.Equal(t, 8, up[0].DurationS,
+				"prepared must carry the clip's exact rounded duration, never an estimate")
+			require.Equal(t, "corr-"+tc.name, up[0].CorrelationID)
+		})
+	}
+}
+
+// A prepared clip is already paid for - Take will air it regardless of the
+// current gate. That exemption must hold for the anchor-free kinds too, not
+// just for a seam: a closed budget gate must not make a prepared musing
+// vanish into an anonymous unknown block.
+func TestPreparedAnchorFreeKindSurvivesAClosedGate(t *testing.T) {
+	s := liveState()
+	s.SpentUSD = s.BudgetUSD // GateBudget
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipMusing
+	s.Dir.ClipDurationS = 12
+
+	up, _, gate := timeline.Project(s)
+
+	require.Equal(t, timeline.GateBudget, gate)
+	require.NotEmpty(t, up)
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty,
+		"a prepared musing is paid for and will air regardless of the gate")
+	require.Equal(t, timeline.KindMusing, up[0].Kind)
+}
