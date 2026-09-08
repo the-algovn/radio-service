@@ -77,7 +77,7 @@ func TestTakeFreshSeamResetsCounter(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot)
-	require.Equal(t, 0, dr.finishedSinceSeam, "hand-off resets the seam counter")
+	require.Equal(t, 0, dr.cad.FinishedSinceSeam, "hand-off resets the seam counter")
 }
 
 // TestTakeFreshAcrossPrecisionLoss covers the CRITICAL fix: the anchor
@@ -96,7 +96,7 @@ func TestTakeFreshAcrossPrecisionLoss(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot)
-	require.Equal(t, 0, dr.finishedSinceSeam, "hand-off resets the seam counter")
+	require.Equal(t, 0, dr.cad.FinishedSinceSeam, "hand-off resets the seam counter")
 }
 
 // TestTakeStaleSameYTIDDifferentAiring covers the other half of the OR: same
@@ -115,7 +115,7 @@ func TestTakeStaleSameYTIDDifferentAiring(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot, "slot cleared — no livelock on the slot-empty gate")
-	require.Equal(t, 1, dr.finishedSinceSeam, "stale discard does NOT reset the counter")
+	require.Equal(t, 1, dr.cad.FinishedSinceSeam, "stale discard does NOT reset the counter")
 }
 
 func TestTakeStaleSeamDeletesAndClears(t *testing.T) {
@@ -130,7 +130,7 @@ func TestTakeStaleSeamDeletesAndClears(t *testing.T) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
 	require.Nil(t, dr.slot, "slot cleared — no livelock on the slot-empty gate")
-	require.Equal(t, 1, dr.finishedSinceSeam, "stale discard does NOT reset the counter")
+	require.Equal(t, 1, dr.cad.FinishedSinceSeam, "stale discard does NOT reset the counter")
 }
 
 func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
@@ -140,12 +140,13 @@ func TestTakeStationIDAlwaysFreshAndStampsTimer(t *testing.T) {
 	require.True(t, ok)
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
-	require.Equal(t, clk.Now(), dr.lastStationID, "hand-off stamps the station-id timer")
+	require.Equal(t, clk.Now(), dr.cad.LastStationID, "hand-off stamps the station-id timer")
 }
 
 func TestDueKindArithmetic(t *testing.T) {
 	dr, clk := newCoreDirector(t)
 	dj := station.DJSettings{BreakEvery: 2}
+	dr.cad.SessionHasMusic = true
 	dr.mu.Lock()
 	require.Equal(t, "", dr.dueKindLocked(clk.Now(), dj), "0 finished + current = 1 < 2")
 	dr.mu.Unlock()
@@ -159,7 +160,8 @@ func TestDueKindStationIDWinsAndBreakEveryZeroDisables(t *testing.T) {
 	dr, clk := newCoreDirector(t)
 	dj := station.DJSettings{BreakEvery: 2, StationIDMin: 60}
 	dr.mu.Lock()
-	dr.lastStationID = clk.Now()
+	dr.cad.LastStationID = clk.Now()
+	dr.cad.SessionHasMusic = true
 	dr.mu.Unlock()
 	dr.TrackFinished(live.Entry{YTID: "a"}) // seam due
 	clk.advance(61 * time.Minute)           // station id also due
@@ -303,12 +305,12 @@ func TestSnapshotCopiesTheSlotAndNeverLeaksIt(t *testing.T) {
 
 func TestSnapshotDoesNotMutateTheFormatClock(t *testing.T) {
 	dr, clk := newCoreDirector(t)
-	dr.finishedSinceSeam = 3
-	dr.lastStationID = clk.Now()
-	before := dr.finishedSinceSeam
+	dr.cad.FinishedSinceSeam = 3
+	dr.cad.LastStationID = clk.Now()
+	before := dr.cad.FinishedSinceSeam
 
 	_ = dr.Snapshot()
-	require.Equal(t, before, dr.finishedSinceSeam)
+	require.Equal(t, before, dr.cad.FinishedSinceSeam)
 }
 
 func TestSnapshotIsRaceFreeWithTake(t *testing.T) {
@@ -362,6 +364,7 @@ func TestRunExitsOnCancel(t *testing.T) {
 func TestForceBreakArmsTheSeam(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	dj := station.DJSettings{BreakEvery: 4, StationIDMin: 0}
+	dr.cad.SessionHasMusic = true
 
 	require.Equal(t, "", dr.dueKindLocked(time.Now(), dj), "not due before forcing")
 	require.True(t, dr.ForceBreak(), "arming an empty slot returns armed")
@@ -372,7 +375,8 @@ func TestForceBreakNeverPreemptsAnOwedStationID(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	// StationIDMin elapsed and IDs loaded: the station ID is owed.
 	dj := station.DJSettings{BreakEvery: 4, StationIDMin: 1}
-	dr.lastStationID = time.Now().Add(-2 * time.Minute)
+	dr.cad.LastStationID = time.Now().Add(-2 * time.Minute)
+	dr.cad.SessionHasMusic = true
 
 	require.True(t, dr.ForceBreak())
 	require.Equal(t, live.ClipStationID, dr.dueKindLocked(time.Now(), dj),
@@ -399,7 +403,7 @@ func TestSeamTakeClearsTheFlag(t *testing.T) {
 	slotClip(t, dr, live.Clip{
 		Kind: live.ClipSeam, AnchorYTID: entry.YTID, AnchorStartedAt: entry.StartedAt,
 	})
-	dr.forcedBreak = true
+	dr.cad.Forced = true
 
 	_, ok := dr.Take(entry)
 	require.True(t, ok)
@@ -409,7 +413,7 @@ func TestSeamTakeClearsTheFlag(t *testing.T) {
 func TestStationIDTakeDoesNotClearTheFlag(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	slotClip(t, dr, live.Clip{Kind: live.ClipStationID})
-	dr.forcedBreak = true
+	dr.cad.Forced = true
 
 	_, ok := dr.Take(live.Entry{YTID: "abc", StartedAt: time.Now()})
 	require.True(t, ok)
@@ -421,7 +425,7 @@ func TestStaleDiscardDoesNotClearTheFlag(t *testing.T) {
 	slotClip(t, dr, live.Clip{
 		Kind: live.ClipSeam, AnchorYTID: "stale", AnchorStartedAt: time.Now().Add(-time.Hour),
 	})
-	dr.forcedBreak = true
+	dr.cad.Forced = true
 
 	_, ok := dr.Take(live.Entry{YTID: "fresh", StartedAt: time.Now()})
 	require.False(t, ok, "anchor drifted; the clip is discarded")
@@ -448,7 +452,7 @@ func TestCancelWithNothingArmedOrPrepared(t *testing.T) {
 func TestCancelDiscardsAPreparedClipAndTheFlag(t *testing.T) {
 	dr, _ := newCoreDirector(t)
 	path := slotClip(t, dr, live.Clip{Kind: live.ClipSeam})
-	dr.forcedBreak = true
+	dr.cad.Forced = true
 
 	require.True(t, dr.CancelPrepared())
 	require.Nil(t, dr.slot)
@@ -461,4 +465,53 @@ func TestSnapshotCarriesForced(t *testing.T) {
 	require.False(t, dr.Snapshot().Forced)
 	require.True(t, dr.ForceBreak())
 	require.True(t, dr.Snapshot().Forced)
+}
+
+func TestNoSeamBeforeAnyMusicThisSession(t *testing.T) {
+	// A seam prepared before the session's first track is anchored to the
+	// PREVIOUS broadcast's last track and is discarded by Take against the
+	// zero Entry, so preparing one buys an LLM call and a TTS bill for a clip
+	// that can never air.
+	dr, clk := newCoreDirector(t)
+	dj := station.DJSettings{BreakEvery: 2}
+
+	dr.cad.FinishedSinceSeam = 5
+	require.Equal(t, "", dr.dueKindLocked(clk.Now(), dj),
+		"nothing is due before the session's first track finishes")
+
+	dr.TrackFinished(live.Entry{YTID: "y1"})
+	require.Equal(t, live.ClipSeam, dr.dueKindLocked(clk.Now(), dj),
+		"the first finished track opens the seam")
+}
+
+func TestGoingOnAirStartsTheSessionSilent(t *testing.T) {
+	// The counter carries across sessions. Without the reset, a seam is due
+	// the instant a new broadcast opens, is anchored to the PREVIOUS session's
+	// last track, and is discarded by Take - one wasted LLM call plus TTS on
+	// every session open.
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	withListener(t, f)
+	seedAirLog(t, f)
+
+	f.dr.TrackFinished(live.Entry{YTID: "a"})
+	f.dr.TrackFinished(live.Entry{YTID: "b"})
+	require.True(t, f.dr.cad.SessionHasMusic)
+	require.Equal(t, 2, f.dr.cad.FinishedSinceSeam)
+
+	onAir(t, f)
+	f.dr.RunOnce(context.Background())
+
+	require.False(t, f.dr.cad.SessionHasMusic, "a new session has heard no music yet")
+	require.Equal(t, 0, f.dr.cad.FinishedSinceSeam, "the format clock restarts with the session")
+	require.False(t, slotFilled(f.dr), "no clip is prepared before the session's first track")
+	require.Zero(t, f.model.calls, "and nothing is paid for one")
+}
+
+func TestSnapshotCarriesSessionHasMusic(t *testing.T) {
+	dr, _ := newCoreDirector(t)
+
+	require.False(t, dr.Snapshot().SessionHasMusic)
+	dr.TrackFinished(live.Entry{YTID: "y1"})
+	require.True(t, dr.Snapshot().SessionHasMusic,
+		"the projector re-implements the due test and needs this term")
 }

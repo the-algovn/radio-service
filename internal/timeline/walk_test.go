@@ -434,6 +434,24 @@ func TestSeamDueIsSkippedWhenNoMusicHasAired(t *testing.T) {
 	require.NotEqual(t, timeline.KindStationID, up[0].Kind)
 }
 
+// TestDirSessionHasMusicArmsASeamWithNothingAiring pins the left operand of
+// walk.go's `s.Dir.SessionHasMusic || (s.Airing != nil && ...)`. Nothing is
+// airing here, so the right operand is false throughout - only the
+// director's own SessionHasMusic can make the seam due. Without reading
+// s.Dir.SessionHasMusic at all, the walk would derive session-has-music
+// purely from Airing and wrongly suppress this seam.
+func TestDirSessionHasMusicArmsASeamWithNothingAiring(t *testing.T) {
+	s := liveState()
+	s.Airing = nil
+	s.Dir.SessionHasMusic = true
+	s.Dir.FinishedSinceSeam = 1 // +1 == BreakEvery(2): owed
+
+	up, _, _ := timeline.Project(s)
+
+	require.Equal(t, timeline.KindDJ, up[0].Kind)
+	require.Equal(t, timeline.CertaintyDue, up[0].Certainty)
+}
+
 // helpers
 
 func isBreak(s timeline.Segment) bool {
@@ -492,6 +510,36 @@ func TestPreparedClipCarriesForcedWhenArmed(t *testing.T) {
 	require.NotEmpty(t, up)
 	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
 	require.True(t, up[0].Forced, "Cancel must reach a prepared forced break")
+}
+
+// TestPreparedClipAdvancesCadenceWithTheEngineKind pins seamArm's middle
+// return - the ENGINE kind fed to cadence.Advance - for the prepared-clip
+// arm specifically. If that return is wrong (empty, or the WIRE kind by
+// mistake), Advance falls to its default branch: Forced is never cleared and
+// FinishedSinceSeam is never reset, so the next cadence-due seam wrongly
+// inherits the operator's single arming.
+func TestPreparedClipAdvancesCadenceWithTheEngineKind(t *testing.T) {
+	s := liveState()
+	s.Dir.HasClip = true
+	s.Dir.ClipKind = live.ClipSeam
+	s.Dir.ClipDurationS = 8
+	s.Dir.ClipAnchorYTID = "y1"
+	s.Dir.ClipAnchorStartedAt = base
+	s.Airing.YTID = "y1"
+	s.Dir.Forced = true
+
+	up, _, _ := timeline.Project(s)
+
+	require.Equal(t, timeline.CertaintyPrepared, up[0].Certainty)
+	require.True(t, up[0].Forced, "the prepared clip itself carries the arming")
+
+	for _, seg := range up[1:] {
+		if seg.Kind == timeline.KindDJ {
+			require.False(t, seg.Forced,
+				"Forced must be cleared once the prepared clip airs in the projection - "+
+					"a later seam still carrying it means Advance never ran")
+		}
+	}
 }
 
 // Take anchor-checks seam clips against the just-finished entry, so a seam

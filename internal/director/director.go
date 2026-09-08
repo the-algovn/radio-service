@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/the-algovn/radio-service/internal/brain"
+	"github.com/the-algovn/radio-service/internal/cadence"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
 	"github.com/the-algovn/radio-service/internal/schedule"
@@ -106,6 +107,11 @@ type Snapshot struct {
 	// re-implements the due test off this snapshot, so omitting it leaves the
 	// console blind to a forced break until the clip is prepared a tick later.
 	Forced bool
+
+	// SessionHasMusic mirrors the gate of the same name in cadence.DueKind.
+	// Without it the projector cannot tell a session that has aired music
+	// from one that has not, and promises a seam the engine will not make.
+	SessionHasMusic bool
 }
 
 // Director prepares talk breaks ahead of air and hands them to the feeder
@@ -116,12 +122,10 @@ type Director struct {
 	ids *stationIDs
 	seq atomic.Int64 // clip filename counter (deterministic in tests)
 
-	mu                sync.Mutex
-	slot              *live.Clip
-	finishedSinceSeam int
-	lastStationID     time.Time
-	wasOnAir          bool
-	forcedBreak       bool
+	mu       sync.Mutex
+	slot     *live.Clip
+	cad      cadence.State
+	wasOnAir bool
 }
 
 func New(d Deps) *Director {
@@ -142,7 +146,7 @@ func New(d Deps) *Director {
 func (dr *Director) TrackFinished(_ live.Entry) {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
-	dr.finishedSinceSeam++
+	dr.cad = cadence.AdvanceMusic(dr.cad)
 }
 
 // Take hands over the prepared clip, if any. Never blocks. Staleness is
@@ -165,12 +169,7 @@ func (dr *Director) Take(justFinished live.Entry) (live.Clip, bool) {
 		return live.Clip{}, false
 	}
 	dr.slot = nil
-	if c.Kind == live.ClipStationID {
-		dr.lastStationID = dr.d.Clock.Now()
-	} else {
-		dr.finishedSinceSeam = 0
-		dr.forcedBreak = false
-	}
+	dr.cad = cadence.Advance(dr.cad, c.Kind, dr.d.Clock.Now())
 	return c, true
 }
 
@@ -185,7 +184,7 @@ func (dr *Director) ForceBreak() bool {
 	if dr.slot != nil {
 		return false
 	}
-	dr.forcedBreak = true
+	dr.cad.Forced = true
 	return true
 }
 
@@ -194,7 +193,7 @@ func (dr *Director) ForceBreak() bool {
 func (dr *Director) CancelPrepared() bool {
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
-	had := dr.slot != nil || dr.forcedBreak
+	had := dr.slot != nil || dr.cad.Forced
 	dr.cancelPendingLocked("operator cancelled")
 	return had
 }
@@ -220,43 +219,13 @@ func anchorFresh(anchorYTID string, anchorStartedAt time.Time, justFinished live
 }
 
 // dueKindLocked picks the due segment kind ("" = none). Caller holds mu.
-// station_id wins when both are due; the seam counter carries over and
-// stays due. The +1 counts the currently-airing track — the one the break
-// will describe — so the default cadence is truly every BreakEvery tracks.
+// Now and StationIDsAvailable are filled per evaluation rather than stored:
+// one is the caller's instant, the other lives behind the ids mutex.
 func (dr *Director) dueKindLocked(now time.Time, dj station.DJSettings) string {
-	if dj.StationIDMin > 0 && dr.ids.available() &&
-		now.Sub(dr.lastStationID) >= time.Duration(dj.StationIDMin)*time.Minute {
-		return live.ClipStationID
-	}
-	if dr.forcedBreak {
-		return live.ClipSeam
-	}
-	if dj.BreakEvery > 0 && dr.finishedSinceSeam+1 >= dj.BreakEvery {
-		return live.ClipSeam
-	}
-	return ""
-}
-
-// DueKindForTest evaluates dueKindLocked against a synthetic state. It exists
-// so internal/timeline can pin its hand-written copy of this rule to the
-// original; walk.go re-implements the due test and would otherwise drift.
-func DueKindForTest(forced bool, finishedSinceSeam int, lastStationIDAgo time.Duration,
-	idsAvailable bool, dj station.DJSettings) string {
-
-	now := time.Now()
-	ids := &stationIDs{}
-	if idsAvailable {
-		ids = &stationIDs{lines: []string{"x"}}
-	}
-	dr := &Director{ids: ids}
-	dr.forcedBreak = forced
-	dr.finishedSinceSeam = finishedSinceSeam
-	if lastStationIDAgo > 0 {
-		dr.lastStationID = now.Add(-lastStationIDAgo)
-	} else {
-		dr.lastStationID = now
-	}
-	return dr.dueKindLocked(now, dj)
+	s := dr.cad
+	s.Now = now
+	s.StationIDsAvailable = dr.ids.available()
+	return cadence.DueKind(s, dj)
 }
 
 // cancelPendingLocked discards a prepared-but-unaired clip (operator paused
@@ -264,7 +233,7 @@ func DueKindForTest(forced bool, finishedSinceSeam int, lastStationIDAgo time.Du
 func (dr *Director) cancelPendingLocked(reason string) {
 	// Above the nil check on purpose: an arming with no clip yet is still
 	// something an operator can cancel, and pause/off-air must disarm too.
-	dr.forcedBreak = false
+	dr.cad.Forced = false
 	if dr.slot == nil {
 		return
 	}
@@ -303,9 +272,14 @@ func (dr *Director) RunOnce(ctx context.Context) {
 	if !st.OnAir || !st.AIEnabled {
 		dr.cancelPendingLocked("paused or off-air")
 	}
+	// Going on air starts a new broadcast session. The counter must restart
+	// with it: a seam owed from the last session would be anchored to that
+	// session's last track and discarded by Take against the zero Entry.
 	if st.OnAir && !dr.wasOnAir {
-		dr.lastStationID = now
-		dr.forcedBreak = false
+		dr.cad.LastStationID = now
+		dr.cad.Forced = false
+		dr.cad.SessionHasMusic = false
+		dr.cad.FinishedSinceSeam = 0
 	}
 	dr.wasOnAir = st.OnAir
 	dr.mu.Unlock()
@@ -353,8 +327,8 @@ func (dr *Director) RunOnce(ctx context.Context) {
 //     logging and no clock read.
 //   - The slot is copied BY VALUE. Take sets dr.slot = nil while a caller
 //     could still hold the pointer.
-//   - It must not touch finishedSinceSeam or lastStationID — a read that
-//     mutates the format clock would silently change the cadence.
+//   - It must not touch dr.cad.FinishedSinceSeam or dr.cad.LastStationID - a
+//     read that mutates the format clock would silently change the cadence.
 //   - Script is deliberately NOT copied here. live.Clip.Script is "logs only,
 //     never published"; the aired script reaches the console from the stored
 //     talk_segment row instead, which is admin-gated at the route.
@@ -363,12 +337,13 @@ func (dr *Director) Snapshot() Snapshot {
 	defer dr.mu.Unlock()
 	s := Snapshot{
 		Present:           true,
-		FinishedSinceSeam: dr.finishedSinceSeam,
-		LastStationID:     dr.lastStationID,
+		FinishedSinceSeam: dr.cad.FinishedSinceSeam,
+		LastStationID:     dr.cad.LastStationID,
 		// ids has its own mutex and is never held while taking dr.mu, so this
 		// is a len() under an uncontended lock — no I/O, no clock read.
 		StationIDsAvailable: dr.ids.available(),
-		Forced:              dr.forcedBreak,
+		Forced:              dr.cad.Forced,
+		SessionHasMusic:     dr.cad.SessionHasMusic,
 	}
 	if dr.slot != nil {
 		c := *dr.slot

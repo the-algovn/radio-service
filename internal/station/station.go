@@ -19,7 +19,11 @@ type DJSettings struct {
 	Rate         float64
 	BreakEvery   int
 	StationIDMin int // minutes
-	MaxChars     int
+	// MusingEveryMin is minutes between musings; 0 disables. Plan 1 declares
+	// it so cadence.DueKind's musing term compiles; the column, the proto
+	// field and the console knob arrive in Plan 2, so it reads 0 until then.
+	MusingEveryMin int
+	MaxChars       int
 }
 
 // DefaultDJSettings mirrors the 00014 migration column defaults (the current

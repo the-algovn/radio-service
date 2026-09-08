@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/the-algovn/radio-service/internal/director"
+	"github.com/the-algovn/radio-service/internal/cadence"
 	"github.com/the-algovn/radio-service/internal/library"
 	"github.com/the-algovn/radio-service/internal/live"
 	"github.com/the-algovn/radio-service/internal/request"
@@ -244,10 +244,9 @@ func newConformanceState(t *testing.T, dj station.DJSettings) timeline.State {
 	return s
 }
 
-// TestSeamArmMatchesDueKind pins walk.go's break arm to the director's own
-// dueKindLocked. The two are hand-written copies of one rule; without this
-// they drift silently and the console projects a break the engine will not
-// air, or misses one it will.
+// TestSeamArmMatchesDueKind pins walk.go's break arm to cadence.DueKind. The
+// walk applies its own projection policy on top (the gate, prepared clips,
+// lastWasBreak), so this proves the policy never contradicts the rule.
 func TestSeamArmMatchesDueKind(t *testing.T) {
 	cases := []struct {
 		name              string
@@ -272,37 +271,45 @@ func TestSeamArmMatchesDueKind(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dj := station.DJSettings{BreakEvery: tc.breakEvery, StationIDMin: tc.stationIDMin}
-			engine := director.DueKindForTest(
-				tc.forced, tc.finishedSinceSeam, tc.lastStationIDAgo, tc.idsAvailable, dj)
 
 			s := newConformanceState(t, dj)
 			s.Dir.Forced = tc.forced
 			s.Dir.FinishedSinceSeam = tc.finishedSinceSeam
 			s.Dir.StationIDsAvailable = tc.idsAvailable
+			s.Dir.LastStationID = s.Now
 			if tc.lastStationIDAgo > 0 {
 				s.Dir.LastStationID = s.Now.Add(-tc.lastStationIDAgo)
 			}
 
+			// liveState() has a track airing, so the session has heard music.
+			engine := cadence.DueKind(cadence.State{
+				Now:                 s.Now,
+				SessionHasMusic:     true,
+				FinishedSinceSeam:   tc.finishedSinceSeam,
+				LastStationID:       s.Dir.LastStationID,
+				Forced:              tc.forced,
+				StationIDsAvailable: tc.idsAvailable,
+			}, dj)
+
 			up, _, _ := timeline.Project(s)
 			require.NotEmpty(t, up)
 
-			// dueKindLocked answers one instant: is a break due with exactly
-			// these inputs. Only up[0] shares that instant unmodified - a
-			// cadence that is not due yet still recurs later in the walk, so
-			// scanning past up[0] would compare against a state the engine
-			// was never asked about.
+			// DueKind answers one instant: is a break due with exactly these
+			// inputs. Only up[0] shares that instant unmodified - a cadence
+			// that is not due yet still recurs later in the walk, so scanning
+			// past up[0] would compare against a state never asked about.
 			projected := ""
 			if up[0].Certainty == timeline.CertaintyDue {
 				switch up[0].Kind {
 				case timeline.KindDJ:
-					projected = live.ClipSeam
+					projected = cadence.KindSeam
 				case timeline.KindStationID:
-					projected = live.ClipStationID
+					projected = cadence.KindStationID
 				}
 			}
 
 			require.Equal(t, engine, projected,
-				"walk.go and dueKindLocked disagree about %q", tc.name)
+				"walk.go and cadence.DueKind disagree about %q", tc.name)
 		})
 	}
 }
