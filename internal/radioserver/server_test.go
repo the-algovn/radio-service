@@ -30,7 +30,7 @@ func (f *fakeLedger) SpentSince(context.Context, time.Time) (float64, error) { r
 // fakeTTS is a minimal ttsv1.TTSServiceClient double standing in for the
 // shared tts-service's catalog in voiceKnown's tests -- the real catalog
 // lives in a different service, out of reach in a unit test.
-type fakeTTS struct{}
+type fakeTTS struct{ ttsv1.TTSServiceClient }
 
 func (fakeTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not used by these tests")
@@ -46,7 +46,7 @@ func (fakeTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.Cal
 // erroringTTS simulates the shared tts-service being unreachable, for tests
 // proving UpdateDJSettings doesn't hard-depend on a healthy catalog check
 // when voice_id isn't actually changing.
-type erroringTTS struct{}
+type erroringTTS struct{ ttsv1.TTSServiceClient }
 
 func (erroringTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not used by these tests")

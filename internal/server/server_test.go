@@ -28,7 +28,7 @@ import (
 // fakeTTS is a minimal ttsv1.TTSServiceClient double: SynthesizeVoice's
 // keyless-dev path (no real tts-service) returns a canned silent-take
 // response as if the shared service had reported fake-mode itself.
-type fakeTTS struct{}
+type fakeTTS struct{ ttsv1.TTSServiceClient }
 
 func (fakeTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.CallOption) (*ttsv1.SynthesizeResponse, error) {
 	return &ttsv1.SynthesizeResponse{Audio: []byte("wav-bytes"), Provider: "fake", CostUsd: 0}, nil
