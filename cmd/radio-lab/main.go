@@ -263,13 +263,13 @@ func main() {
 			logger.ErrorContext(ctx, "mkdir dj failed", "err", err)
 			os.Exit(1)
 		}
-		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
-		// edited from the console, re-read by the director every tick.
 		prepDeadline, err := time.ParseDuration(config.Get("DIRECTOR_PREP_DEADLINE", "60s"))
-		if err != nil {
-			logger.ErrorContext(ctx, "DIRECTOR_PREP_DEADLINE", "err", err)
+		if err != nil || prepDeadline <= 0 {
+			logger.ErrorContext(ctx, "invalid DIRECTOR_PREP_DEADLINE", "err", err, "value", prepDeadline)
 			os.Exit(1)
 		}
+		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
+		// edited from the console, re-read by the director every tick.
 		dj = director.New(director.Deps{
 			Model: scriptOrDefault(models, scriptModel, defaultModel), Voice: voiceProv,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
