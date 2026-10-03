@@ -40,7 +40,11 @@ func normalizeDJ(dj station.DJSettings) station.DJSettings {
 // ledgered stays ledgered) — the air never waits on this path.
 func (dr *Director) prepare(ctx context.Context, kind string, st station.Station) (live.Clip, bool) {
 	dj := normalizeDJ(st.DJ)
-	ctx, cancel := context.WithTimeout(ctx, prepDeadline)
+	deadline := dr.d.PrepDeadline
+	if deadline <= 0 {
+		deadline = defaultPrepDeadline
+	}
+	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
 	sp, known := specFor(kind)

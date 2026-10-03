@@ -23,10 +23,10 @@ const (
 	// tickEvery is deliberately faster than the programmer's 60s — the
 	// director must notice "break due" within one track.
 	tickEvery = 20 * time.Second
-	// prepDeadline bounds one whole prepare attempt. ttsclient sets no
-	// timeout of its own and relies entirely on this deadline; a timeout is
-	// an ordinary failure.
-	prepDeadline = 60 * time.Second
+	// defaultPrepDeadline bounds one whole prepare attempt (overridable via
+	// Deps.PrepDeadline). ttsclient sets no timeout of its own and relies
+	// entirely on this deadline; a timeout is an ordinary failure.
+	defaultPrepDeadline = 60 * time.Second
 	// stationIDMaxChars is the FIXED boot-time cap for committed station-ID
 	// lines. The live max_chars setting governs LLM seam scripts only
 	// (spec §4) — station-ID lines are pre-written and validated once at load.
@@ -63,6 +63,10 @@ type Deps struct {
 	Listeners live.Listeners
 	AirLog    live.AirLog
 	TalkMem   talkmem.Store // persisted show memory; nil disables the thread
+
+	// PrepDeadline bounds one prepare attempt; 0 means defaultPrepDeadline.
+	// Self-hosted CPU voices render far slower than a cloud voice.
+	PrepDeadline time.Duration
 
 	PersonaDir     string
 	StationIDsPath string

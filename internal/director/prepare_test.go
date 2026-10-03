@@ -759,3 +759,30 @@ func TestGeneratedKindsLabelTheirOwnSpend(t *testing.T) {
 		})
 	}
 }
+
+type deadlineSpeaker struct{ remaining time.Duration }
+
+func (d *deadlineSpeaker) Synthesize(ctx context.Context, _, _ string, _ float64) ([]byte, string, float64, string, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.remaining = time.Until(dl)
+	}
+	return nil, "", 0, "", errors.New("stop here")
+}
+
+func TestPrepareUsesConfiguredDeadline(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	sp := &deadlineSpeaker{}
+	f.dr.d.Voice = sp
+	f.dr.d.PrepDeadline = 240 * time.Second
+	f.dr.prepare(context.Background(), live.ClipStationID, testStation)
+	require.Greater(t, sp.remaining, 200*time.Second)
+}
+
+func TestPrepareDefaultsTo60s(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	sp := &deadlineSpeaker{}
+	f.dr.d.Voice = sp
+	f.dr.prepare(context.Background(), live.ClipStationID, testStation)
+	require.LessOrEqual(t, sp.remaining, 60*time.Second)
+	require.Greater(t, sp.remaining, 50*time.Second)
+}

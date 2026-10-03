@@ -265,6 +265,11 @@ func main() {
 		}
 		// Voice/rate/cadence live on the station row (spec 2026-07-23) —
 		// edited from the console, re-read by the director every tick.
+		prepDeadline, err := time.ParseDuration(config.Get("DIRECTOR_PREP_DEADLINE", "60s"))
+		if err != nil {
+			logger.ErrorContext(ctx, "DIRECTOR_PREP_DEADLINE", "err", err)
+			os.Exit(1)
+		}
 		dj = director.New(director.Deps{
 			Model: scriptOrDefault(models, scriptModel, defaultModel), Voice: voiceProv,
 			Ledger: ledger, Station: stationStore, Listeners: listeners,
@@ -274,7 +279,7 @@ func main() {
 			StationIDsPath: filepath.Join(config.Get("PERSONA_DIR", "persona"), "station-ids.txt"),
 			DataDir:        djDir, BudgetUSD: budget,
 			Clock: live.RealClock(), Location: loc, Logger: logger,
-			Sched: sched,
+			Sched: sched, PrepDeadline: prepDeadline,
 			Peek: func(ctx context.Context) (live.Upcoming, bool, error) {
 				return live.PeekNext(ctx, sched, requests, lib)
 			},
