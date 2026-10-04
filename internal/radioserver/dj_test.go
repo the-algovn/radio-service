@@ -61,7 +61,6 @@ func TestUpdateDJSettingsValidation(t *testing.T) {
 	}{
 		{"missing settings", nil},
 		{"unknown voice", func(d *radiov1.DJSettings) { d.VoiceId = "vi-VN-Nope" }},
-		{"empty voice", func(d *radiov1.DJSettings) { d.VoiceId = "" }},
 		{"fake is preview-only", func(d *radiov1.DJSettings) { d.VoiceId = "fake" }},
 		{"rate too low", func(d *radiov1.DJSettings) { d.SpeakingRate = 0.5 }},
 		{"rate too high", func(d *radiov1.DJSettings) { d.SpeakingRate = 1.5 }},
@@ -130,4 +129,18 @@ func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged(t *testin
 			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
 	})
 	require.Equal(t, codes.Unavailable, status.Code(err))
+}
+
+func TestUpdateDJSettingsEmptyVoiceMeansNoVoice(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	_, err := s.deps.Store.UpdateDJSettings(ctx, station.DJSettings{VoiceID: "voxcpm:v_aaaaaaaaaaaa", Rate: 1.0,
+		BreakEvery: 1, StationIDMin: 60, MusingEveryMin: 10, MaxChars: 1024})
+	require.NoError(t, err)
+	_, err = s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{Settings: &radiov1.DJSettings{
+		SpeakingRate: 1.0, BreakEvery: 1, StationIdMin: 60, MusingEveryMin: 10, MaxChars: 1024}})
+	require.NoError(t, err)
+	st, err := s.deps.Store.GetStation(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "", st.DJ.VoiceID)
 }
