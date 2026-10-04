@@ -69,6 +69,14 @@ func (f *fakeClock) step(d time.Duration) {
 	}
 }
 
+// advance moves time without firing a tick: time spent inside a call (a slow
+// fetch, an encoder outage) rather than waiting on the pacer.
+func (f *fakeClock) advance(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.t = f.t.Add(d)
+}
+
 // pumpChunk fires one pacing tick and waits for the feeder to write the
 // resulting chunk, so a test's step count equals the chunks actually fed.
 // Returns false when no write arrives before the deadline, which is how a
@@ -171,6 +179,12 @@ func (e *fakeEncoder) count() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.sessions)
+}
+
+func (e *fakeEncoder) session(i int) *fakeSession {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sessions[i]
 }
 
 // firstSessionBytes reports how many bytes the first encoder session has been
@@ -937,7 +951,54 @@ func TestOperatorOffAirEndsSession(t *testing.T) {
 	require.True(t, enc.sessions[0].closed) // encoder stdin closed
 }
 
-func TestStartedAtFollowsSampleClock(t *testing.T) {
+func frameStartedAt(t *testing.T, frame string) time.Time {
+	t.Helper()
+	var f struct {
+		StartedAt time.Time `json:"startedAt"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(frame), &f))
+	return f.StartedAt
+}
+
+// ffmpeg's HLS muxer dates its first segment from the moment it receives its
+// first byte, and the web's ear-sync compares that PROGRAM-DATE-TIME against
+// startedAt. So startedAt must count samples from the encoder's first byte:
+// a slow first open must not make every later stamp early by its duration.
+func TestStartedAtFollowsEncoderClock(t *testing.T) {
+	store, lib, reqs := newFixture(t, "a", "b")
+	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
+	var slowFirstFetch sync.Once
+	f := newTestFeederWith(store, lib, reqs, enc, prod, clk, t.TempDir(), func(d *FeederDeps) {
+		d.Fetch = func(_ context.Context, id, _ string) (string, error) {
+			slowFirstFetch.Do(func() { clk.advance(3 * time.Second) })
+			return "/fake/" + id, nil
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.RunSession(ctx) }()
+	require.Eventually(t, func() bool { return len(prod.byTopic(TopicNowPlaying)) == 1 },
+		2*time.Second, time.Millisecond)
+	sess := enc.session(0)
+	require.True(t, pumpChunk(t, clk, sess))
+	firstByte := clk.Now()
+	require.True(t, pumpChunk(t, clk, sess))
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	// Track a = 2 chunks = 0.5s of samples after the encoder's first byte.
+	nps := prod.byTopic(TopicNowPlaying)
+	require.Equal(t, firstByte.Add(500*time.Millisecond), frameStartedAt(t, nps[1]))
+	// a itself is stamped when announced, at most one pacing tick before the
+	// first byte.
+	require.WithinDuration(t, firstByte, frameStartedAt(t, nps[0]), 250*time.Millisecond)
+}
+
+// A crash restart starts a new encoder that dates its segments from its own
+// first byte; the outage must not leave every later stamp early by its length.
+func TestStartedAtFollowsEncoderClockAcrossCrash(t *testing.T) {
 	store, lib, reqs := newFixture(t, "a", "b")
 	enc, prod, clk := &fakeEncoder{}, &fakeProducer{}, newFakeClock()
 	f := newTestFeeder(store, lib, reqs, enc, prod, clk, t.TempDir())
@@ -945,24 +1006,25 @@ func TestStartedAtFollowsSampleClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- f.RunSession(ctx) }()
-	require.Eventually(t, func() bool { return f.SessionDir() != "" }, time.Second, time.Millisecond)
-	deadline := time.Now().Add(2 * time.Second)
-	for len(prod.byTopic(TopicNowPlaying)) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for 2 now-playing frames")
-		}
-		clk.step(250 * time.Millisecond)
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	<-done
+	require.Eventually(t, func() bool { return len(prod.byTopic(TopicNowPlaying)) == 1 },
+		2*time.Second, time.Millisecond)
+	require.True(t, pumpChunk(t, clk, enc.session(0))) // 0.25s of a aired
+	clk.advance(5 * time.Second)
+	enc.session(0).fail(errors.New("simulated crash"))
+	require.Eventually(t, func() bool { return enc.count() == 2 }, 2*time.Second, time.Millisecond)
 
-	// track a = 2 chunks = 96,000 bytes = 0.5s of audio → track b's
-	// startedAt must be exactly a's startedAt + 500ms (sample math, not
-	// wall-clock guesses).
+	sess := enc.session(1)
+	require.True(t, pumpChunk(t, clk, sess))
+	restartByte := clk.Now()
+	require.True(t, pumpChunk(t, clk, sess))
+	pumpFrames(t, clk, prod, done, TopicNowPlaying, 2)
+	cancel()
+	require.NoError(t, drive(t, clk, done, 100))
+
+	// fakeDecoder ignores the resume offset, so a's reopen feeds its 2 chunks
+	// again: b starts 0.5s of samples after the new encoder's first byte.
 	nps := prod.byTopic(TopicNowPlaying)
-	require.Contains(t, nps[0], `"startedAt":"2026-07-21T12:00:00Z"`)
-	require.Contains(t, nps[1], `"startedAt":"2026-07-21T12:00:00.5`)
+	require.Equal(t, restartByte.Add(500*time.Millisecond), frameStartedAt(t, nps[1]))
 }
 
 // TestFetchFailureSkipsTrackWithoutPublishOrLog covers the CRITICAL fix: a

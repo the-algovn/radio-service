@@ -80,16 +80,17 @@ type Feeder struct {
 	d          FeederDeps
 	sessionDir atomic.Value // string
 	seq        atomic.Int64 // session counter for dir names
-	// anchor is the sample-clock epoch for the CURRENT session only:
-	// entry.StartedAt = anchor + samplesFed/48000. Must be captured fresh
-	// at the start of each RunSession call, not once at Feeder
-	// construction — one Feeder is built at boot and RunSession is called
-	// again each time the operator goes back on-air, possibly hours
-	// later, so a construction-time anchor would misdate every session
-	// after the first. Written only by RunSession's own goroutine and
-	// read only within that same call, so it needs no synchronization of
-	// its own.
-	anchor time.Time
+	// anchor is the sample-clock epoch: entry.StartedAt = anchor +
+	// samplesFed/48000. It is pinned to the CURRENT encoder's clock, which
+	// is what listeners hear by: ffmpeg's HLS muxer dates its first segment
+	// (PROGRAM-DATE-TIME) from the arrival of its first byte, and the web's
+	// ear-sync compares that against StartedAt. Any other epoch (session
+	// start, the first track's slow open, a crash outage) makes every stamp
+	// early by the gap. So while encoderFresh, the anchor is re-based on
+	// each stamp and once more at the first write. Both fields are touched
+	// only by RunSession's goroutine, so they need no synchronization.
+	anchor       time.Time
+	encoderFresh bool
 	// skip is the operator's skip-current-track flag (v1.2). Ephemeral by
 	// design: set by RequestSkip (any goroutine), consumed by airTrack's
 	// next tick as "track finished", and cleared at session start so a
@@ -116,11 +117,27 @@ func (f *Feeder) SessionDir() string { return f.sessionDir.Load().(string) }
 // no-op when nothing consumes it (the flag is reset at session start).
 func (f *Feeder) RequestSkip() { f.skip.Store(true) }
 
-// startedAt converts the sample clock to wall time: anchor + samplesFed/48000,
-// split into whole seconds + sub-second remainder so it cannot overflow int64
-// nanoseconds (samplesFed can exceed ~9.2e9 ≈ 53h continuous at 48kHz).
+// samplesDuration converts a 48kHz frame count to a duration, split into whole
+// seconds + sub-second remainder so it cannot overflow int64 nanoseconds
+// (samplesFed can exceed ~9.2e9, about 53h continuous at 48kHz).
+func samplesDuration(samples int64) time.Duration {
+	return time.Duration(samples/48000)*time.Second + time.Duration(samples%48000)*time.Second/48000
+}
+
+// startedAt stamps the item starting at samplesFed in wall time. An item
+// stamped before the current encoder's first byte re-bases the anchor on now,
+// which is at most one pacing tick before that byte arrives.
 func (f *Feeder) startedAt(samplesFed int64) time.Time {
-	return f.anchor.Add(time.Duration(samplesFed/48000)*time.Second + time.Duration(samplesFed%48000)*time.Second/48000)
+	f.syncAnchorToEncoder(samplesFed)
+	return f.anchor.Add(samplesDuration(samplesFed))
+}
+
+// syncAnchorToEncoder makes now the wall time of sample samplesFed, while the
+// current encoder has not been fed; see anchor.
+func (f *Feeder) syncAnchorToEncoder(samplesFed int64) {
+	if f.encoderFresh {
+		f.anchor = f.d.Clock.Now().Add(-samplesDuration(samplesFed))
+	}
 }
 
 func (f *Feeder) publish(ctx context.Context, topic string, val []byte) {
@@ -602,20 +619,11 @@ type onAir struct {
 // new session dir + encoder is started in place and the current track is
 // resumed at its aired offset — see the crash-resume block below.
 func (f *Feeder) RunSession(ctx context.Context) error {
-	// Per-session epoch: captured before any of MkdirAll/Encoder.Start/
-	// sessionDir.Store, so callers can synchronize on SessionDir() != ""
-	// becoming true and be guaranteed the anchor is already fixed (program
-	// order on this goroutine — no separate lock needed for the field).
-	// findBootResume below may still adjust it (to the resumed entry's real
-	// StartedAt), but that happens before any of the dir/encoder setup, so
-	// the invariant holds for anyone observing SessionDir() != "".
-	f.anchor = f.d.Clock.Now()
 	f.skip.Store(false) // a skip requested while off-air must not cut the next session's first track
 
 	var samplesFed int64 // 4 bytes per stereo sample-frame at s16le
 	resume := f.findBootResume(ctx)
 	if resume != nil {
-		f.anchor = resume.entry.StartedAt
 		samplesFed = int64(resume.offsetS * 48000)
 	}
 
@@ -671,6 +679,7 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	f.encoderFresh = true
 	f.sessionDir.Store(dir)
 	defer func() {
 		f.sessionDir.Store("")
@@ -797,9 +806,8 @@ func (f *Feeder) RunSession(ctx context.Context) error {
 		// crashes on the same track keep computing offset from the track's
 		// true start, not from the previous restart point. For a
 		// boot-resumed track, samplesFed already starts pre-loaded at the
-		// resumed offset (see above), and the track's true start is 0
-		// frames from f.anchor (== the entry's original StartedAt) — not
-		// the current samplesFed value.
+		// resumed offset (see above), so the track's true start is frame 0,
+		// not the current samplesFed value.
 		if resumed {
 			cur.startSamples = 0
 		} else {
@@ -933,6 +941,7 @@ func (f *Feeder) restartSession(ctx context.Context, oldDir string) (dir string,
 		_ = os.RemoveAll(dir)
 		return "", nil, err
 	}
+	f.encoderFresh = true
 	f.sessionDir.Store(dir)
 	_ = os.RemoveAll(oldDir)
 	return dir, sess, nil
@@ -1157,9 +1166,11 @@ func (f *Feeder) airTrack(ctx context.Context, sess Session, rd io.Reader, sampl
 			// one paced chunk per tick
 			n, rerr := io.ReadFull(rd, buf)
 			if n > 0 {
+				f.syncAnchorToEncoder(*samplesFed)
 				if _, werr := sess.Stdin().Write(buf[:n]); werr != nil {
 					return false, false, fmt.Errorf("encoder write: %w", werr)
 				}
+				f.encoderFresh = false
 				*samplesFed += int64(n / 4) // 4 bytes per stereo frame
 			}
 			// Off-air check on EVERY tick (not just at track end): the

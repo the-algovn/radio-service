@@ -149,7 +149,7 @@ func TestBootResumeAirsCurrentTrackAtOffset(t *testing.T) {
 // boot-resume implementation: trackStartSamples is special-cased to 0 for a
 // resumed track (not `= samplesFed`, the pattern every OTHER track uses),
 // because samplesFed is pre-loaded with the resume offset while the track's
-// true start is 0 frames from the (now entry.StartedAt) anchor. A refactor
+// true start is frame 0. A refactor
 // that "simplified" this back to the general `trackStartSamples = samplesFed`
 // pattern would silently double-count the resume offset on any mid-track
 // crash. This test forces exactly that path: resume track 'a' ~30s in, feed
