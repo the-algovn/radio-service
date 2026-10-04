@@ -40,6 +40,10 @@ func normalizeDJ(dj station.DJSettings) station.DJSettings {
 // ledgered stays ledgered) — the air never waits on this path.
 func (dr *Director) prepare(ctx context.Context, kind string, st station.Station) (live.Clip, bool) {
 	dj := normalizeDJ(st.DJ)
+	if dj.VoiceID == "" {
+		dr.d.Logger.WarnContext(ctx, "director: no dj voice configured; skipping break", "kind", kind)
+		return live.Clip{}, false
+	}
 	deadline := dr.d.PrepDeadline
 	if deadline <= 0 {
 		deadline = defaultPrepDeadline

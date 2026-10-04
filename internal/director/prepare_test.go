@@ -206,6 +206,19 @@ func TestPrepareSeamNoAirLogEntryQuietSkip(t *testing.T) {
 	require.Zero(t, f.model.calls)
 }
 
+func TestPrepareNoVoiceConfiguredSkips(t *testing.T) {
+	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
+	rec := &recVoice{}
+	f.dr.d.Voice = rec
+	require.NoError(t, f.log.Append(context.Background(), live.Entry{YTID: "a", Title: "A", StartedAt: time.Now()}))
+	st := testStation
+	st.DJ.VoiceID = ""
+	_, ok := f.dr.prepare(context.Background(), live.ClipSeam, st)
+	require.False(t, ok)
+	require.Zero(t, f.model.calls, "no llm spend without a voice")
+	require.Empty(t, rec.voiceID, "tts is never called with an empty voice id")
+}
+
 func TestPrepareStationIDSkipsLLM(t *testing.T) {
 	f := newPrepFixture(t, &seqModel{raws: []string{goodRaw}})
 	clip, ok := f.dr.prepare(context.Background(), live.ClipStationID, testStation)
@@ -392,7 +405,7 @@ func (r *recVoice) Synthesize(_ context.Context, _ string, voiceID string, rate 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.voiceID, r.rate = voiceID, rate
-	return []byte("mp3"), "mp3", 0, "google", nil
+	return []byte("mp3"), "mp3", 0, "voxcpm", nil
 }
 
 // The whole point of the DB move: a settings change applies to the NEXT
@@ -408,7 +421,7 @@ func TestRunOnceSettingsChangeAffectsNextPrepare(t *testing.T) {
 	withListener(t, f)
 
 	_, err := f.dr.d.Station.UpdateDJSettings(ctx, station.DJSettings{
-		VoiceID: "vi-VN-Neural2-A", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
+		VoiceID: "voxcpm:v_aaaaaaaaaaaa", Rate: 1.0, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
 	require.NoError(t, err)
 
 	start := time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC)
@@ -418,20 +431,20 @@ func TestRunOnceSettingsChangeAffectsNextPrepare(t *testing.T) {
 	f.dr.TrackFinished(live.Entry{YTID: "a"})
 	f.dr.RunOnce(ctx) // 1 finished + current = 2 >= 2 → prepares
 	require.True(t, slotFilled(f.dr))
-	require.Equal(t, "vi-VN-Neural2-A", rec.voiceID, "first prepare uses the current settings")
+	require.Equal(t, "voxcpm:v_aaaaaaaaaaaa", rec.voiceID, "first prepare uses the current settings")
 
 	_, ok := f.dr.Take(live.Entry{YTID: "a", StartedAt: start}) // air it; counter resets
 	require.True(t, ok)
 
 	_, err = f.dr.d.Station.UpdateDJSettings(ctx, station.DJSettings{
-		VoiceID: "vi-VN-Chirp3-HD-Aoede", Rate: 1.2, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
+		VoiceID: "voxcpm:v_bbbbbbbbbbbb", Rate: 1.2, BreakEvery: 2, StationIDMin: 60, MaxChars: 1024})
 	require.NoError(t, err)
 
 	require.NoError(t, f.log.Append(ctx, live.Entry{YTID: "b", Title: "B", StartedAt: start.Add(3 * time.Minute)}))
 	f.dr.TrackFinished(live.Entry{YTID: "b"})
 	f.dr.RunOnce(ctx)
 	require.True(t, slotFilled(f.dr))
-	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", rec.voiceID, "next prepare uses the updated settings")
+	require.Equal(t, "voxcpm:v_bbbbbbbbbbbb", rec.voiceID, "next prepare uses the updated settings")
 	require.Equal(t, 1.2, rec.rate)
 }
 

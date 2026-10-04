@@ -38,8 +38,8 @@ func (fakeTTS) Synthesize(context.Context, *ttsv1.SynthesizeRequest, ...grpc.Cal
 
 func (fakeTTS) ListVoices(context.Context, *ttsv1.ListVoicesRequest, ...grpc.CallOption) (*ttsv1.ListVoicesResponse, error) {
 	return &ttsv1.ListVoicesResponse{Voices: []*ttsv1.Voice{
-		{Id: "google:vi-VN-Neural2-A", Label: "Neural2 A", Tier: "neural2"},
-		{Id: "google:vi-VN-Chirp3-HD-Aoede", Label: "Chirp3 HD Aoede", Tier: "chirp3-hd"},
+		{Id: "voxcpm:v_aaaaaaaaaaaa", Label: "Voice A", Tier: "voxcpm"},
+		{Id: "voxcpm:v_bbbbbbbbbbbb", Label: "Voice B", Tier: "voxcpm"},
 	}}, nil
 }
 

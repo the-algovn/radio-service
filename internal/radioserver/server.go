@@ -167,21 +167,8 @@ func djSettingsProto(dj station.DJSettings) *radiov1.DJSettings {
 		MaxChars: int32(dj.MaxChars), MusingEveryMin: int32(dj.MusingEveryMin)}
 }
 
-// canonicalVoiceID mirrors catalog.Resolve's namespacing rule in tts-service:
-// an id with no "provider:" prefix is a bare id persisted before tts-service
-// existed (e.g. the 00010 migration's dj_voice_id default) and resolves to
-// google, tts-service's original sole provider.
-func canonicalVoiceID(id string) string {
-	if !strings.Contains(id, ":") {
-		return "google:" + id
-	}
-	return id
-}
-
 // voiceKnown reports catalog membership by asking the shared tts-service.
-// Both sides are canonicalized before comparing, since a bare persisted id
-// (e.g. "vi-VN-Neural2-A") must match the catalog's namespaced id
-// ("google:vi-VN-Neural2-A") for the same voice.
+// Ids are provider-namespaced (e.g. "voxcpm:v_1a2b3c4d5e6f") and compared exactly.
 // "fake" is deliberately NOT accepted: the shared catalog never lists it,
 // and persisting it would poison the row for the day a real backend key is
 // missing (spec §6).
@@ -190,9 +177,8 @@ func (s *Server) voiceKnown(ctx context.Context, id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	want := canonicalVoiceID(id)
 	for _, v := range resp.GetVoices() {
-		if canonicalVoiceID(v.GetId()) == want {
+		if v.GetId() == id {
 			return true, nil
 		}
 	}
@@ -576,7 +562,10 @@ func (s *Server) UpdateDJSettings(ctx context.Context, req *radiov1.UpdateDJSett
 	// codes.Unavailable tts-service must not block edits to the other DJ
 	// fields, including the one an operator most wants when TTS itself is
 	// broken (break_every: 0, to stop the DJ attempting breaks).
-	if canonicalVoiceID(in.GetVoiceId()) != canonicalVoiceID(cur.DJ.VoiceID) {
+	if in.GetVoiceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "voice_id is required")
+	}
+	if in.GetVoiceId() != cur.DJ.VoiceID {
 		known, err := s.voiceKnown(ctx, in.GetVoiceId())
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "voice catalog: %v", err)

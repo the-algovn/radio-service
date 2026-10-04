@@ -9,6 +9,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	radiov1 "github.com/the-algovn/protos/gen/go/algovn/radio/v1"
+
+	"github.com/the-algovn/radio-service/internal/station"
 )
 
 func TestUpdateDJSettings(t *testing.T) {
@@ -18,7 +20,7 @@ func TestUpdateDJSettings(t *testing.T) {
 	// Defaults surface on GetStation before any update.
 	st, err := s.GetStation(ctx, &radiov1.GetStationRequest{})
 	require.NoError(t, err)
-	require.Equal(t, "vi-VN-Neural2-A", st.GetDj().GetVoiceId())
+	require.Equal(t, "", st.GetDj().GetVoiceId())
 	require.Equal(t, 1.0, st.GetDj().GetSpeakingRate())
 	require.Equal(t, int32(2), st.GetDj().GetBreakEvery())
 	require.Equal(t, int32(60), st.GetDj().GetStationIdMin())
@@ -27,17 +29,17 @@ func TestUpdateDJSettings(t *testing.T) {
 
 	// Update to a different voice (proves a real change off the default).
 	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
-		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Chirp3-HD-Aoede", SpeakingRate: 1.2,
+		Settings: &radiov1.DJSettings{VoiceId: "voxcpm:v_bbbbbbbbbbbb", SpeakingRate: 1.2,
 			BreakEvery: 3, StationIdMin: 0, MusingEveryMin: 25, MaxChars: 300},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", resp.GetSettings().GetVoiceId())
+	require.Equal(t, "voxcpm:v_bbbbbbbbbbbb", resp.GetSettings().GetVoiceId())
 	require.Equal(t, int32(0), resp.GetSettings().GetStationIdMin(), "0 = disabled is legal")
 	require.Equal(t, int32(25), resp.GetSettings().GetMusingEveryMin())
 
 	st, err = s.GetStation(ctx, &radiov1.GetStationRequest{})
 	require.NoError(t, err)
-	require.Equal(t, "vi-VN-Chirp3-HD-Aoede", st.GetDj().GetVoiceId())
+	require.Equal(t, "voxcpm:v_bbbbbbbbbbbb", st.GetDj().GetVoiceId())
 	require.Equal(t, 1.2, st.GetDj().GetSpeakingRate())
 	require.Equal(t, int32(300), st.GetDj().GetMaxChars())
 	require.Equal(t, int32(25), st.GetDj().GetMusingEveryMin(), "persisted, not just echoed")
@@ -46,8 +48,11 @@ func TestUpdateDJSettings(t *testing.T) {
 func TestUpdateDJSettingsValidation(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
+	_, err := s.deps.Store.UpdateDJSettings(ctx, station.DJSettings{VoiceID: "voxcpm:v_aaaaaaaaaaaa", Rate: 1.0,
+		BreakEvery: 1, StationIDMin: 60, MusingEveryMin: 10, MaxChars: 1024})
+	require.NoError(t, err)
 	base := func() *radiov1.DJSettings {
-		return &radiov1.DJSettings{VoiceId: "vi-VN-Neural2-A", SpeakingRate: 1.0,
+		return &radiov1.DJSettings{VoiceId: "voxcpm:v_aaaaaaaaaaaa", SpeakingRate: 1.0,
 			BreakEvery: 1, StationIdMin: 60, MusingEveryMin: 10, MaxChars: 1024}
 	}
 	cases := []struct {
@@ -83,20 +88,20 @@ func TestUpdateDJSettingsValidation(t *testing.T) {
 	// Rejected updates must not have touched the stored settings.
 	st, err := s.GetStation(ctx, &radiov1.GetStationRequest{})
 	require.NoError(t, err)
-	require.Equal(t, "vi-VN-Neural2-A", st.GetDj().GetVoiceId())
+	require.Equal(t, "voxcpm:v_aaaaaaaaaaaa", st.GetDj().GetVoiceId())
 }
 
-// TestVoiceKnownAcceptsBarePersistedID guards the canonicalization fix: the
-// shared tts-service's catalog only ever returns namespaced ids
-// ("google:vi-VN-Neural2-A"), but the persisted production value is bare
-// (the 00010 migration's dj_voice_id default). Without canonicalizing both
-// sides before comparing, this bare id -- already live in prod -- would be
-// rejected as unknown, breaking the console DJ page.
-func TestVoiceKnownAcceptsBarePersistedID(t *testing.T) {
+func TestVoiceKnownComparesExactly(t *testing.T) {
 	s := newTestServer(t)
-	known, err := s.voiceKnown(context.Background(), "vi-VN-Neural2-A")
+	ctx := context.Background()
+	known, err := s.voiceKnown(ctx, "voxcpm:v_aaaaaaaaaaaa")
 	require.NoError(t, err)
-	require.True(t, known, "bare persisted id must resolve against the namespaced catalog")
+	require.True(t, known)
+	for _, id := range []string{"", "v_aaaaaaaaaaaa", "vi-VN-Neural2-A", "google:vi-VN-Neural2-A"} {
+		known, err = s.voiceKnown(ctx, id)
+		require.NoError(t, err)
+		require.False(t, known, id)
+	}
 }
 
 // TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged guards
@@ -108,9 +113,12 @@ func TestVoiceKnownAcceptsBarePersistedID(t *testing.T) {
 func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged(t *testing.T) {
 	s := newTestServerWithTTS(t, erroringTTS{})
 	ctx := context.Background()
+	_, err := s.deps.Store.UpdateDJSettings(ctx, station.DJSettings{VoiceID: "voxcpm:v_aaaaaaaaaaaa", Rate: 1.0,
+		BreakEvery: 1, StationIDMin: 60, MusingEveryMin: 10, MaxChars: 1024})
+	require.NoError(t, err)
 
 	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
-		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Neural2-A", SpeakingRate: 1.0,
+		Settings: &radiov1.DJSettings{VoiceId: "voxcpm:v_aaaaaaaaaaaa", SpeakingRate: 1.0,
 			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
 	})
 	require.NoError(t, err)
@@ -118,28 +126,8 @@ func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceUnchanged(t *testin
 
 	// Changing voice_id while the catalog is down must still fail Unavailable.
 	_, err = s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
-		Settings: &radiov1.DJSettings{VoiceId: "vi-VN-Chirp3-HD-Aoede", SpeakingRate: 1.0,
+		Settings: &radiov1.DJSettings{VoiceId: "voxcpm:v_bbbbbbbbbbbb", SpeakingRate: 1.0,
 			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
 	})
 	require.Equal(t, codes.Unavailable, status.Code(err))
-}
-
-// TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceOnlyRenamespaced
-// guards the voice_id change-detection gate itself, not just voiceKnown: the
-// persisted default is bare ("vi-VN-Neural2-A", per the 00010 migration),
-// but ListVoices now returns namespaced ids, so the console populates its
-// voice field as "google:vi-VN-Neural2-A". Resubmitting that same voice in
-// namespaced form must not read as a change -- a raw string comparison would
-// wrongly consult the catalog and, with tts-service down, block edits to
-// break_every even though the voice never actually changed.
-func TestUpdateDJSettingsToleratesCatalogUnavailableWhenVoiceOnlyRenamespaced(t *testing.T) {
-	s := newTestServerWithTTS(t, erroringTTS{})
-	ctx := context.Background()
-
-	resp, err := s.UpdateDJSettings(ctx, &radiov1.UpdateDJSettingsRequest{
-		Settings: &radiov1.DJSettings{VoiceId: "google:vi-VN-Neural2-A", SpeakingRate: 1.0,
-			BreakEvery: 0, StationIdMin: 60, MaxChars: 1500},
-	})
-	require.NoError(t, err)
-	require.Equal(t, int32(0), resp.GetSettings().GetBreakEvery())
 }
