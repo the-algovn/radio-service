@@ -17,6 +17,10 @@ import (
 )
 
 // StartPostgres runs postgres:18-alpine and returns a pgx URL.
+// The official minio images are no longer published. Chainguard's runs as a
+// non-root user, so the data dir must be one that user can write.
+const minioImage = "cgr.dev/chainguard/minio@sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034"
+
 func StartPostgres(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
@@ -38,7 +42,7 @@ func StartPostgres(t *testing.T) string {
 func StartMinio(t *testing.T) (endpoint, accessKey, secretKey string) {
 	t.Helper()
 	ctx := context.Background()
-	c, err := tcminio.Run(ctx, "minio/minio:latest")
+	c, err := tcminio.Run(ctx, minioImage, testcontainers.WithCmd("server", "/tmp/data"))
 	testcontainers.CleanupContainer(t, c)
 	require.NoError(t, err)
 	ep, err := c.ConnectionString(ctx)
